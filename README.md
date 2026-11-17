@@ -1,8 +1,60 @@
 # Armature
 
-A small language for describing a software system once, in YAML files inside the project's repo, and reading it two ways: as an interactive diagram for people, and as compact, queryable context for coding agents. The documents about the system stay Markdown and are tied to the same model. Planning goes through it: new work starts as a change in the model, and hooks stop a coding agent that goes around it.
+Describe a software system once, in text files inside its repo, and read it two ways: as an interactive diagram for people, and as compact, queryable context for coding agents.
 
-The language is specified in [SPEC.md](SPEC.md). This repo holds the tooling: the compiler and checker, the `armature` CLI, an MCP server, the viewer, and the Claude Code skills and hooks.
+Armature is a small architecture language and its tooling for [Claude Code](https://claude.com/claude-code). The model lives in an `armature/` folder next to the code: the parts of the system (apps, services, workers, stores, outside systems), the interfaces where data arrives, the data shapes that move between them, flows, requirements tied to tests, and planned changes. Documents stay Markdown and are tied to the same model. Status is never typed: what is planned, built, verified, stale or failing is computed from the code, the tests and git.
+
+```yaml
+# armature/nodes/billing.yaml
+kind: worker
+role: charges cards, issues refunds
+code: [src/billing/**]
+accepts:
+  - id: charge
+    via: pgmq
+    takes: ChargeJob
+calls:
+  - to: payments#charges
+writes: [db#payments]
+requirements:
+  - id: no-double-charge
+    text: A charge job retried after a timeout never charges the card twice.
+```
+
+What you get:
+
+- **A diagram.** `armature view` draws the model as a zoomable map: planned work dashed, flows you can play step by step, and lenses for data, tests, documents, activity and code.
+- **Context for agents.** A digest of the system at the start of every session, `armature context "<task>"` for the parts, files, rules and tests a task touches, and an MCP server with the same answers.
+- **A planning gate.** New work starts as a change in the model. Claude Code hooks send back plans and new files that go around it, and approving a change stays with a person.
+- **Checks.** `armature check`, locally and in CI, says where the model and the code disagree: undeclared imports, tables and routes, stale data shapes, files no part owns, dead code, and documents that name something that no longer exists.
+
+The language is specified in [SPEC.md](SPEC.md). This repo holds the tooling: the compiler and checker, the `armature` CLI, an MCP server, the viewer, and the Claude Code plugin with its skills and hooks. Version 0.1: it has been used on two private codebases, and it will change.
+
+## Quick start
+
+You need Node 22 or newer and Claude Code.
+
+In Claude Code, add the plugin:
+
+```
+/plugin marketplace add pxlzone/armature
+/plugin install armature@armature
+```
+
+The plugin brings the hooks, the skills and the MCP server, and puts `armature` on the PATH of Claude's Bash tool. To use `armature` in your own terminal as well:
+
+```bash
+git clone https://github.com/pxlzone/armature.git
+cd armature && npm install && npm link
+```
+
+Then, in your project, start a model and ask Claude to fill it in:
+
+```bash
+armature init          # creates armature/ with an empty system.yaml
+```
+
+Ask Claude to document the repo (the `armature-document` skill), or to plan a feature before building it (`armature-design`). `armature view` opens the diagram at http://localhost:4747.
 
 ## Set up for a team
 
@@ -11,7 +63,7 @@ The tool ships as a Claude Code plugin, `armature`, from the marketplace in this
 **Once per project repo** (one person, then commit):
 
 ```bash
-armature install --team --marketplace <owner>/armature
+armature install --team --marketplace pxlzone/armature
 ```
 
 It writes only files meant to be committed, none naming a path on this machine:
@@ -57,23 +109,7 @@ Once the plugin is on (or after `armature install`), restart the Claude Code ses
 - planning goes through the model (see "Planning gate" below);
 - four workflows are available as skills: `/armature-document` (model an existing repo), `/armature-design` (plan a feature before building it), `/armature-docs` (write a document, or tie existing ones to the model), `/armature-audit` (repair drift).
 
-All commands: `armature help`.
-
-## Coming from Agent Brain
-
-The tool was called Agent Brain until 2026-11-17: the CLI was `brain`, the model folder `arch/`, the skills `arch-*`, the plugin `brain@agent-brain`. A repo set up under those names keeps working: `arch/` is read as it is, and `armature check` reports `legacy-folder` until it is renamed.
-
-To move a repo over:
-
-```bash
-git mv arch armature
-```
-
-```bash
-armature install --team --marketplace <owner>/armature
-```
-
-The install replaces the old plugin entry in `.claude/settings.json`, the old hooks and MCP server, and the generated `.claude/rules/arch-*.md` files. Then run `armature check` and fix the paths it lists that still start with `arch/` (a change's `doc:`, a node's `docs:`). Copied skills in `.claude/skills/arch-*` are named in the output for you to delete. Environment variables changed prefix: `BRAIN_CLAUDE_BIN` is now `ARMATURE_CLAUDE_BIN`, and so on.
+All commands: `armature help`. A model in `arch/`, the folder's earlier name, is still read; `armature check` asks you to rename it to `armature/`.
 
 ## Test results and coverage
 
