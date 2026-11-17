@@ -43,8 +43,22 @@ export interface Interface {
   /** The change that alters this interface. It exists today and stays built. */
   modify?: string;
   retire?: string;
+  /** Who may call it: none, user, service, admin, or the name of a scheme. Declared, not seen in code. */
+  auth?: string;
+  /** The nodes that may link to it (callers and senders; writers, for a table). Absent: anyone. */
+  only?: string[];
   status: Status;
   evidence: Evidence;
+}
+
+/** Where data with a tag may leave the system, from `data:` in system.yaml. Keys are tags without the @. */
+export type DataPolicy = Record<string, { leaves: string[] }>;
+
+/** One read of an environment variable in a node's code. */
+export interface EnvRead {
+  name: string;
+  file: string;
+  line: number;
 }
 
 export interface Requirement {
@@ -52,6 +66,8 @@ export interface Requirement {
   ref: string; // node:id
   node: string;
   text: string;
+  /** `security`: a statement about who may get or change what. Entry points that reach sensitive data need one. */
+  kind?: 'security';
   change?: string;
   modify?: string;
   tests: string[];
@@ -243,6 +259,14 @@ export interface GNode {
   retire?: string;
   /** Nodes this one must never import code from or link to: its own and inherited ones. */
   never: Boundary[];
+  /** Code that runs on the user's device (a browser, mobile or desktop app). Its own or inherited. */
+  client: boolean;
+  /** Editing its existing files needs an approved change that modifies it. Its own or inherited. */
+  protect: boolean;
+  /** Credentials this node holds, by environment variable name. */
+  secrets: string[];
+  /** Reads of environment variables in its code that look like credentials or that it declares. */
+  env: EnvRead[];
   status: Status;
   statusWhy: string;
   coverage: number | null; // 0..100
@@ -492,6 +516,9 @@ export const WARNING_INFO: Record<string, { group: WarningGroup; what: string }>
   'not-in-code': { group: 'wrong', what: 'The model declares a route or a queue on a node whose code registers others of the same kind, and this one is not among them.' },
   overlap: { group: 'wrong', what: 'Two nodes that are not parent and child claim the same files. Each file goes to one of them, so the other owns less than its globs say.' },
   'built-unapproved': { group: 'wrong', what: 'A node has code, but the change that adds it is still proposed: the code was written before a person approved the change.' },
+  'no-auth': { group: 'incomplete', what: 'An entry point (an interface an actor, an outside system or a client links to) does not say who may call it. Add "auth:".' },
+  'no-security-requirement': { group: 'incomplete', what: 'An entry point reaches sensitive data and no requirement of kind security covers it.' },
+  'undeclared-secret': { group: 'incomplete', what: 'A node\'s code reads an environment variable that looks like a credential, and its "secrets:" does not list it.' },
   'scope-changed': { group: 'wrong', what: 'Elements were added to or removed from a change after a person approved it. It needs approving again: "armature approve <change>".' },
   'legacy-folder': { group: 'incomplete', what: 'The model is still in arch/, the earlier name of the folder. Rename it to armature/.' },
   'unused-linked': { group: 'wrong', what: 'A node is marked unused but still has links to other nodes.' },
@@ -546,6 +573,14 @@ export interface Graph {
     branch?: string;
     /** `at` is when the newest test report was written. */
     reports: { junit: number; lcov: number; at?: string };
+    /** Where tagged data may leave the system. */
+    data: DataPolicy;
+    /** Paths the project leaves out of the system, with the reason. */
+    ignore: Array<{ path: string; why?: string }>;
+    /** Warnings the team keeps, from `accept:`. */
+    accepts: Array<{ code: string; ref?: string; file?: string; match?: string; why?: string }>;
+    /** False when system.yaml says `gate: off`. */
+    gate: boolean;
   };
   nodes: GNode[];
   edges: Edge[];

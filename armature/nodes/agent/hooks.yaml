@@ -2,7 +2,7 @@ kind: job
 role: gate and checks around tools
 tech: [node, typescript, claude-code]
 code: [src/agent.ts, src/gate.ts]
-tests: [test/gate.test.ts, test/gate-holes.test.ts, test/team.test.ts]
+tests: [test/gate.test.ts, test/gate-holes.test.ts, test/team.test.ts, test/security.test.ts]
 never:
   - to: viewer
     why: A hook runs around every tool call and must load as little as it can.
@@ -12,6 +12,7 @@ accepts:
     via: cli
     takes: HookInput
     gives: GateDecision
+    auth: local
     note: session-start, prompt, pre-write, pre-bash, pre-plan, post-edit and stop.
 
 reads:
@@ -43,6 +44,10 @@ requirements:
     text: A new source file that no node owns is refused, and one in an existing node is not.
     tests: test/gate.test.ts
     match: lets new files into nodes that exist
+  - id: guards-are-the-persons
+    kind: security
+    text: An edit that removes a guard from the model or the hooks from the settings is put to the person, and a protected node's files change only under an approved change.
+    tests: test/security.test.ts
   - id: shell-commands-are-gated
     text: A shell command that creates a source file or approves a change meets the same rules as an edit.
     tests: test/gate-holes.test.ts

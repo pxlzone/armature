@@ -12,7 +12,8 @@ accepts:
     via: cli
     takes: Command
     gives: Answer
-    note: Every command "armature help" lists.
+    auth: local
+    note: Every command "armature help" lists. Whoever runs it on the machine may use it.
 
 calls:
   - to: core.compiler#compile

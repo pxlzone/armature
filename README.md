@@ -142,7 +142,8 @@ With the plugin on (or after `armature install`), a Claude Code session in a rep
 - checks every edit under `armature/` at once, and sends errors back to the agent;
 - checks every edit to a document too: a reference that names nothing in the model goes back to the agent;
 - when code under a node changes and `armature/` does not, asks the agent once to confirm that the model and the documents about that node still hold;
-- routes planning through the model (see "Planning gate" below), for file edits and for shell commands that create files.
+- routes planning through the model (see "Planning gate" below), for file edits and for shell commands that create files;
+- puts every constraint on the nodes a task touches (boundaries, auth, allow-lists, data policy, secrets, rules) in front of the agent as "Must hold", and says the planning rules again for each new plan and after the conversation is compacted.
 
 All commands: `armature help`. A model in `arch/`, the folder's earlier name, is still read; `armature check` asks you to rename it to `armature/`.
 
@@ -199,6 +200,7 @@ Going deeper:
 | `armature drift [node]` | Tables, queues, routes and calls in the code that the model doesn't declare, interfaces and links the model declares that the code doesn't show, and the nodes it could not check |
 | `armature path <node> <node>` | How data gets from one part to another, step by step |
 | `armature trace <Shape\|@pii>` | Where a shape or tagged data is held, and which outside systems it leaves to |
+| `armature surface [change]` | Entry points with their auth, sensitive data leaving the system, and secrets |
 | `armature impact <ref> [--depth n]` | What a change to a node, interface, link or shape touches, several links out |
 | `armature hotspots [node]` | Files that change most and are largest |
 | `armature islands [node]` | Dead code: files no entry point (script, container command, route, test) reaches |
@@ -207,7 +209,7 @@ Going deeper:
 | `armature summarize --yes` | One-line file summaries by a model (costs money) |
 | `armature index --watch` | Keep the index fresh while you work |
 
-The MCP tools `context`, `search`, `callers`, `tests_for`, `drift`, `path`, `trace`, `diff`, `hotspots`, `shapes`, `islands` and `tech` give agents the same.
+The MCP tools `context`, `search`, `callers`, `tests_for`, `drift`, `path`, `trace`, `surface`, `diff`, `hotspots`, `shapes`, `islands` and `tech` give agents the same.
 
 ## Keeping the model honest
 
@@ -232,6 +234,32 @@ armature rename api#checkout place-order     # an interface; also node~link, nod
 It rewrites the model, the lock files and the documents, and names the test titles that carry an old `[req …]` tag.
 
 **Boundaries.** `never:` on a node lists the nodes it must not touch. A link to one, an import of its code, or one of its tables or routes used in the code is an error, not a warning.
+
+**Security.** The model says who may call what and where data may go, and the check holds the code to it:
+
+```yaml
+# armature/nodes/api.yaml
+accepts:
+  - id: checkout
+    via: http
+    auth: user                  # every entry point says who may call it
+    only: [web]                 # and, when it matters, the one node that may
+secrets: [STRIPE_SECRET_KEY]    # credentials it holds
+protect: true                   # its existing files change only under an approved change
+requirements:
+  - id: own-orders
+    kind: security
+    text: A buyer sees only their own orders.
+    covers: [api#checkout]
+```
+
+```yaml
+# armature/system.yaml
+data:
+  pii: { leaves: [stripe] }     # tagged fields may leave the system only to these
+```
+
+An entry point open to anyone that reaches `@pii` or `@secret` data, a tagged field sent where the policy does not allow, a link that goes around an `only:`, and a credential on browser or mobile code (`client: true`) are errors. A credential the code reads from the environment and the model does not list is a warning. `armature surface` lists the entry points, the data leaving the system and the secrets; `armature surface <change>` shows what one change adds. The `armature-threat` skill walks a change through them before approval, and `armature-review` reviews a pull request against the model. `auth:` is a declaration the code index cannot see enforced; the security requirement's test is the proof.
 
 **A large model.** Warnings never fail a check by themselves. To stop a model from getting worse without clearing hundreds of findings first:
 
@@ -304,7 +332,10 @@ The skills describe how to plan. The gate makes sure it happens. It runs as Clau
 | creates a source file in a node a change adds or alters | refuses while the change is `proposed`, and when the node joined the change after it was approved |
 | sets a change to `approved`, or to `done` without it ever being approved | asks you to confirm the edit: approval is yours |
 | sets `gate: off`, or edits the approval record | asks you |
-| runs a shell command that would do any of the above | does the same: it reads redirects, `tee`, `touch`, `cp`, `mv`, and writes to change files |
+| sets a change to `approved` that has security errors | refuses; otherwise the question put to you lists the entry points, outgoing sensitive data and secrets the change adds |
+| edits a file of a node with `protect: true` | refuses unless an approved change adds or modifies the node |
+| removes a guard (`never:`, `auth:`, `only:`, `protect`, a requirement, a data policy), adds an `ignore:`, `accept:` or allowed destination, or takes the hooks out of `.claude/settings.json` | asks you, listing what is lost. `armature diff` lists the same under "Guards removed" for the reviewer |
+| runs a shell command that would do any of the above | does the same: it reads redirects, `tee`, `touch`, `cp`, `mv`, in-place `sed`, writes to change files and deletions of model files, and refuses rewriting a model file from the shell |
 
 You approve a change by confirming the agent's edit, or yourself:
 
@@ -314,7 +345,7 @@ armature approve refunds
 
 Either way `armature/approvals.lock.json` records who approved which elements. If the change grows afterwards, `armature check` reports `scope-changed` and the new part is not built until you approve again.
 
-Editing a file that exists is never refused, and tests, documents and configuration pass. `gate: off` in `armature/system.yaml` switches off everything but the questions put to you.
+Editing a file that exists is refused only in a protected node, and tests, documents and configuration pass. `gate: off` in `armature/system.yaml` switches off everything but the questions put to you.
 
 A hook reads a command; it does not run a shell, so a script that writes files gets past it. What that leaves behind shows up in `armature check`, locally and in CI: `built-unapproved`, `scope-changed`, `unrecorded-approval`.
 

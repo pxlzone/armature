@@ -19,7 +19,8 @@ This is how the repo plans, builds and documents. New work starts as a change in
 | `armature impact <ref>` | See what depends on a node, interface, link or shape before changing it, what lies further along the data, and which documents name it |
 | `armature path <node> <node>` | See how data gets from one node to another, step by step |
 | `armature trace <Shape\|@pii>` | See where a shape or tagged data is held and where it leaves the system |
-| `armature diff [git-ref]` | See what your branch changes in the model against a commit or branch |
+| `armature surface [change]` | See the entry points with their auth and the sensitive data behind them, data leaving the system, and secrets; for a change, what it adds |
+| `armature diff [git-ref]` | See what your branch changes in the model against a commit or branch, guards removed first |
 | `armature rename <ref> <new>` | Rename or move a node, or rename an interface, link, requirement, shape, flow or change. It rewrites every reference: do not do this by hand |
 | `armature map <node>` | List a node's files, most central first, with exported signatures. Read this before opening files |
 | `armature map <file>` | See one file's symbols, what it imports and who imports it |
@@ -89,12 +90,17 @@ tests: [tests/ledger.test.ts]
 never:                  # nodes this one must not link to or import from; armature check fails when it does
   - to: web
     why: The ledger runs without the storefront.
+client: true            # only for code on the user's device (browser, mobile, desktop): holds no secret
+protect: true           # editing its existing files needs an approved change that modifies it
+secrets: [LEDGER_DB_PASSWORD]   # credentials it holds, by environment variable name
 accepts:                # interfaces: how data gets in
   - id: run
     via: pgmq           # http grpc ws webhook mcp sql bolt redis pgmq temporal kafka cron cli sdk smtp imap in-process
     route: POST /x      # or  queue: name
     takes: LedgerEntry
     gives: LedgerResult
+    auth: service       # who may call it: none user service admin, or a scheme name. Every entry point needs one
+    only: [billing.worker]   # the nodes that may call or send to it (writers, on a table); anyone else fails the check
 calls:                  # request and response
   - to: payments#balance
     id: check-balance   # optional name, so a flow or a document can say billing.ledger~check-balance
@@ -111,6 +117,10 @@ requirements:
     match: records a payment once   # optional: only tests whose title contains this
                                     # or tag a test title with [req billing.ledger:no-double-entry]
     covers: [checkout, db#entries]  # optional: the flow, interface, link or shape it is about
+  - id: own-entries
+    kind: security                  # who may get or change what; needed by every entry point that reaches sensitive data
+    text: An account sees only its own entries.
+    covers: [billing.ledger#run]
 todos:
   - A short note about work to do.          # plain string: a task of medium priority
   - text: Currency rounding is duplicated in two modules.
@@ -132,6 +142,13 @@ Rules of thumb:
 - `to:` may be a bare node while a design is coarse. `armature check` warns until it names an interface.
 - Small outside systems and people can be declared inline in `system.yaml` under `externals:` and `actors:`.
 - A view holds at most 12 nodes. Past that, group nodes in a folder.
+
+Security:
+
+- An **entry point** is an interface of a server-side node that an actor, an outside system or a `client: true` node links to. Each needs `auth:`. `auth: none` on one that reaches sensitive data is an error; with auth, it needs a requirement of `kind: security` covering it.
+- **Sensitive data** is a shape field tagged `@pii`, `@secret`, or a tag `data:` in `system.yaml` names. `data: { pii: { leaves: [mailer] } }` says which outside systems may receive it; sending it anywhere else is a `data-leak` error. `@secret` may leave nowhere unless listed.
+- `secrets:` lists the credentials a node reads from the environment. A credential the code reads and the model does not list is `undeclared-secret`; one on a client node is an error.
+- Never weaken these to make a check pass. Removing a guard asks the person, and `armature diff` shows it to the reviewer.
 
 ## Shapes
 

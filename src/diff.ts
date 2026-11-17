@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { compile } from './compile.js';
 import { LEGACY_DIR, MODEL_DIR, modelDir } from './paths.js';
+import { guardsOf } from './security.js';
 import type { Graph } from './types.js';
 
 type Facts = Map<string, Record<string, string>>;
@@ -26,12 +27,15 @@ export function declared(g: Graph): Facts {
     out.set(`node ${n.id}`, drop({
       kind: n.kind, role: n.role, code: join(n.code), tests: join(n.tests), deploy: join(n.deploy),
       rules: n.rules.filter((r) => r.from === n.id).map((r) => r.text).join(' | '),
-      never: join(n.never.filter((b) => b.from === n.id).map((b) => b.node)), ...tags(n),
+      never: join(n.never.filter((b) => b.from === n.id).map((b) => b.node)),
+      client: n.client && !(n.parent && g.nodes.find((p) => p.id === n.parent)?.client) ? 'yes' : '',
+      protect: n.protect && !(n.parent && g.nodes.find((p) => p.id === n.parent)?.protect) ? 'yes' : '',
+      secrets: join(n.secrets), ...tags(n),
     }));
     for (const i of n.interfaces) {
-      out.set(`interface ${i.ref}`, drop({ via: i.via ?? '', route: i.route ?? '', queue: i.queue ?? '', [i.holds ? 'shape' : 'takes']: join(i.takes), gives: join(i.gives), ...tags(i) }));
+      out.set(`interface ${i.ref}`, drop({ via: i.via ?? '', route: i.route ?? '', queue: i.queue ?? '', [i.holds ? 'shape' : 'takes']: join(i.takes), gives: join(i.gives), auth: i.auth ?? '', only: join(i.only ?? []), ...tags(i) }));
     }
-    for (const q of n.requirements) out.set(`requirement ${q.ref}`, drop({ text: q.text, tests: join(q.tests), match: join(q.match), covers: join(q.covers), ...tags(q) }));
+    for (const q of n.requirements) out.set(`requirement ${q.ref}`, drop({ text: q.text, kind: q.kind ?? '', tests: join(q.tests), match: join(q.match), covers: join(q.covers), ...tags(q) }));
   }
   for (const e of g.edges) {
     const target = e.verb === 'reads' ? e.iface ?? e.from : e.iface ?? e.to;
@@ -51,6 +55,8 @@ export interface ModelDiff {
   added: Array<{ what: string; facts: Record<string, string> }>;
   removed: string[];
   changed: Array<{ what: string; from: Record<string, string>; to: Record<string, string> }>;
+  /** What the model guarded at `ref` and no longer does, and what it lets through now that it did not. */
+  weakened: string[];
 }
 
 /** Copies a model folder (never its cache) somewhere it can be compiled on its own, without the code. */
@@ -97,7 +103,12 @@ export function diffModel(root: string, ref: string): ModelDiff | string {
   }
   const a = then ? declared(then) : new Map();
   const b = declared(now);
-  const diff: ModelDiff = { ref, added: [], removed: [], changed: [] };
+  const diff: ModelDiff = { ref, added: [], removed: [], changed: [], weakened: [] };
+  if (then) {
+    const [was, is] = [guardsOf(then), guardsOf(now)];
+    for (const x of was.guards) if (!is.guards.has(x)) diff.weakened.push(`no longer: ${x}`);
+    for (const x of is.allowances) if (!was.allowances.has(x)) diff.weakened.push(`now allowed: ${x}`);
+  }
   for (const [what, facts] of b) {
     const old = a.get(what);
     if (!old) diff.added.push({ what, facts });
@@ -124,8 +135,10 @@ function summary(what: string, f: Record<string, string>): string {
 
 export function diffText(d: ModelDiff | string): string {
   if (typeof d === 'string') return d;
-  if (!d.added.length && !d.removed.length && !d.changed.length) return `The model declares the same things as at ${d.ref}.`;
+  if (!d.added.length && !d.removed.length && !d.changed.length && !d.weakened.length) return `The model declares the same things as at ${d.ref}.`;
   const out = [`Model changes since ${d.ref}: ${d.added.length} added, ${d.changed.length} changed, ${d.removed.length} removed.`];
+  // Weakening a guard is the part a reviewer must not miss, so it comes first.
+  if (d.weakened.length) out.push(`Guards removed (${d.weakened.length}): review these before merging.`, ...d.weakened.map((w) => `! ${w}`), '');
   for (const a of byKind(d.added, (x) => x.what)) out.push(`+ ${summary(a.what, a.facts)}${a.facts.change ? `  (change ${a.facts.change})` : ''}`);
   for (const c of byKind(d.changed, (x) => x.what)) {
     out.push(`~ ${c.what}`);

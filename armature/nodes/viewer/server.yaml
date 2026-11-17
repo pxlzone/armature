@@ -8,10 +8,13 @@ accepts:
     via: http
     route: GET /graph.json
     gives: Graph
+    auth: local
+    note: Bound to 127.0.0.1, so only this machine can reach it.
   - id: doc
     via: http
     route: GET /doc
     gives: MarkdownText
+    auth: local
     note: One Markdown file of the repo, by path. Nothing outside the repo and nothing that is not Markdown.
   - id: serve
     via: in-process

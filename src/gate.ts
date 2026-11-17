@@ -56,6 +56,8 @@ interface OwnNode {
   /** The change that adds or alters the node, as an id. Kept for callers that only need the id. */
   change?: string;
   tag?: Tag;
+  /** `protect: true` on it or an ancestor: editing its files needs an approved change that alters it. */
+  protect: boolean;
 }
 
 export interface Ownership {
@@ -84,20 +86,22 @@ export function readOwnership(root: string): Ownership {
   const arch = path.join(root, mdir);
   const sys = readYaml(path.join(arch, 'system.yaml'));
   const nodes: OwnNode[] = [];
-  const add = (id: string, data: any, inherited: Tag | undefined): Tag | undefined => {
-    const tag: Tag | undefined = typeof data.change === 'string' ? { id: data.change, how: 'add' } : typeof data.modify === 'string' ? { id: data.modify, how: 'modify' } : inherited;
-    nodes.push({ id, code: matcher(list(data.code)), tests: matcher(list(data.tests)), change: tag?.id, tag });
-    return tag;
+  type Inherit = { tag: Tag | undefined; protect: boolean };
+  const add = (id: string, data: any, up: Inherit): Inherit => {
+    const tag: Tag | undefined = typeof data.change === 'string' ? { id: data.change, how: 'add' } : typeof data.modify === 'string' ? { id: data.modify, how: 'modify' } : up.tag;
+    const protect = data.protect === true || (up.protect && data.protect !== false);
+    nodes.push({ id, code: matcher(list(data.code)), tests: matcher(list(data.tests)), change: tag?.id, tag, protect });
+    return { tag, protect };
   };
   let anyCode = false;
-  const walk = (dir: string, prefix: string, inherited: Tag | undefined): void => {
+  const walk = (dir: string, prefix: string, inherited: Inherit): void => {
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
       return;
     }
-    const own = new Map<string, Tag | undefined>();
+    const own = new Map<string, Inherit>();
     for (const e of entries) {
       if (!e.isFile() || !/\.ya?ml$/.test(e.name) || e.name.startsWith('_')) continue;
       const base = e.name.replace(/\.ya?ml$/, '');
@@ -110,16 +114,16 @@ export function readOwnership(root: string): Ownership {
       const id = prefix ? `${prefix}.${e.name}` : e.name;
       const sub = path.join(dir, e.name);
       const groupFile = ['_group.yaml', '_group.yml'].map((n) => path.join(sub, n)).find((p) => fs.existsSync(p));
-      let tag = own.has(e.name) ? own.get(e.name) : inherited;
+      let up = own.get(e.name) ?? inherited;
       if (groupFile) {
         const data = readYaml(groupFile);
         if (list(data.code).length) anyCode = true;
-        tag = add(id, data, inherited);
+        up = add(id, data, inherited);
       }
-      walk(sub, id, tag);
+      walk(sub, id, up);
     }
   };
-  walk(path.join(arch, 'nodes'), '', undefined);
+  walk(path.join(arch, 'nodes'), '', { tag: undefined, protect: false });
   // Deepest node first, then by id, so the most specific owner wins and the compiler agrees on ties.
   nodes.sort((a, b) => b.id.split('.').length - a.id.split('.').length || a.id.localeCompare(b.id));
 
@@ -257,10 +261,14 @@ export function writeGate(root: string, input: WriteInput): GateDecision | null 
     if (now === 'off' && was !== 'off') {
       return { decision: 'ask', reason: 'This sets "gate: off" in system.yaml, which switches the planning gate off for everyone who works in this repo: new source files would no longer need a node or an approved change. Allow it only if that is what you want.' };
     }
-    return null;
+    return after !== null ? weakenAsk(rel, weakened(rel, before, after)) : null;
   }
+  // Taking a guard out of the model, or letting more through, is the person's call.
+  if (after !== null && rel.startsWith(`${mdir}/nodes/`) && /\.ya?ml$/.test(rel)) return weakenAsk(rel, weakened(rel, before, after));
+  if (after !== null && /^\.claude\/settings(\.local)?\.json$/.test(rel)) return weakenAsk(rel, weakened(rel, before, after));
 
-  if (rel.startsWith(`${mdir}/`) || fs.existsSync(abs)) return null;
+  if (rel.startsWith(`${mdir}/`)) return null;
+  if (fs.existsSync(abs)) return protectGate(root, rel);
   if (!CODE_FILE.test(rel) || isTestPath(root, rel)) return null;
   const own = readOwnership(root);
   if (!own.on || own.placed(rel)) return null;
@@ -323,6 +331,122 @@ export function writeGate(root: string, input: WriteInput): GateDecision | null 
   return null;
 }
 
+/**
+ * An edit to an existing file of a protected node: allowed only under an approved change that adds
+ * or alters the node (or one around it), as one of the elements the person approved.
+ */
+export function protectGate(root: string, rel: string): GateDecision | null {
+  if (!CODE_FILE.test(rel) || isTestPath(root, rel)) return null;
+  const own = readOwnership(root);
+  if (!own.on || own.placed(rel)) return null;
+  const owner = own.nodes.find((n) => n.code(rel));
+  if (!owner?.protect) return null;
+  const mdir = modelDir(root);
+  const tag = owner.tag;
+  const state = tag ? own.changes.get(tag.id) : undefined;
+  const plan =
+    `Plan the edit as a change: ${mdir}/changes/<id>.yaml with "state: proposed", "modify: <id>" on "${owner.id}" (or on the node around it), and the plan in ${newPlanPath(docsDir(root), mdir)}. ` +
+    'Then ask the person to approve it; do not approve it yourself.';
+  if (!tag || state === undefined || state === 'done') {
+    return { decision: 'deny', reason: `"${rel}" belongs to "${owner.id}", which is protected (protect: true): its files change only under an approved change that alters it, and none is open. ${plan}` };
+  }
+  if (state !== 'approved') {
+    return { decision: 'deny', reason: `"${rel}" belongs to "${owner.id}", which is protected (protect: true). The change behind it, "${tag.id}", is ${state}: its files change only once a person approves it.${state === 'proposed' ? ' Ask the person to review and approve it.' : ''}` };
+  }
+  const rec = readApprovals(root)[tag.id];
+  const ids = owner.id.split('.').map((_, i, all) => all.slice(0, i + 1).join('.'));
+  const listed = (e: string): boolean => ids.some((id) => new RegExp(`^(?:add|modify) node ${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?: |$)`).test(e));
+  if (!rec || !(rec.elements ?? []).some(listed)) {
+    return { decision: 'deny', reason: `"${rel}" belongs to "${owner.id}", which is protected (protect: true). Change "${tag.id}" is approved, but ${rec ? `the approval ${rec.by || 'the person'} gave does not list the node` : 'nothing records who approved it'}. Ask the person to approve it again ("armature approve ${tag.id}"); do not run that yourself.` };
+  }
+  return null;
+}
+
+/** The node a file under nodes/ declares: nodes/a/b.yaml is a.b, nodes/a/_group.yaml is a. */
+function nodeIdOf(rel: string): string {
+  const tail = rel.replace(/^.*?\bnodes\//, '').replace(/\.ya?ml$/, '').replace(/\/_group$/, '');
+  return tail.split('/').join('.');
+}
+
+/** What one model or settings file guards, and what it lets through, as lines that can be compared. */
+function guardsOfFile(rel: string, text: string): { guards: Set<string>; allowances: Set<string> } {
+  const guards = new Set<string>();
+  const allowances = new Set<string>();
+  if (!text.trim()) return { guards, allowances };
+  if (/\.json$/.test(rel)) {
+    let data: any = {};
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return { guards, allowances };
+    }
+    for (const m of JSON.stringify(data.hooks ?? {}).matchAll(/(?:armature|brain)\.mjs\\?"? hook ([\w-]+)/g)) guards.add(`hook ${m[1]}`);
+    for (const [k, on] of Object.entries<any>(data.enabledPlugins ?? {})) if (/^armature@/.test(k) && on) guards.add(`plugin ${k}`);
+    if (data.disableAllHooks === true) allowances.add('disableAllHooks');
+    return { guards, allowances };
+  }
+  let data: any;
+  try {
+    data = YAML.parse(text);
+  } catch {
+    return { guards, allowances };
+  }
+  if (!data || typeof data !== 'object') return { guards, allowances };
+  const ofNode = (id: string, d: any): void => {
+    if (!d || typeof d !== 'object') return;
+    if (d.protect === true) guards.add(`protect ${id}`);
+    if (d.client === true) guards.add(`client ${id}`);
+    for (const b of Array.isArray(d.never) ? d.never : []) {
+      const to = typeof b === 'string' ? b : b?.to;
+      if (to) guards.add(`never ${id} -> ${to}`);
+    }
+    for (const i of [...(Array.isArray(d.accepts) ? d.accepts : []), ...(Array.isArray(d.holds) ? d.holds : [])]) {
+      if (!i || typeof i !== 'object' || !i.id) continue;
+      const ref = `${id}#${i.id}`;
+      if (typeof i.auth === 'string' && i.auth !== 'none') guards.add(`auth ${ref}`);
+      if (i.auth === 'none') allowances.add(`auth none ${ref}`);
+      for (const o of list(i.only)) guards.add(`only ${ref}: ${o}`);
+    }
+    for (const q of Array.isArray(d.requirements) ? d.requirements : []) if (q?.id) guards.add(`requirement ${id}:${q.id}${q.kind === 'security' ? ' (security)' : ''}`);
+  };
+  if (/(^|\/)system\.ya?ml$/.test(rel)) {
+    for (const x of [...(Array.isArray(data.actors) ? data.actors : []), ...(Array.isArray(data.externals) ? data.externals : [])]) if (x?.id) ofNode(String(x.id), x);
+    for (const [t, p] of Object.entries<any>(data.data && typeof data.data === 'object' ? data.data : {})) {
+      guards.add(`data policy @${t}`);
+      for (const l of list(p?.leaves)) allowances.add(`@${t} may leave to ${l}`);
+    }
+    for (const x of Array.isArray(data.ignore) ? data.ignore : []) {
+      const p = typeof x === 'string' ? x : x?.path;
+      if (p) allowances.add(`ignore ${p}`);
+    }
+    for (const a of Array.isArray(data.accept) ? data.accept : []) {
+      if (a?.code) allowances.add(`accept ${[a.code, a.ref, a.file, a.match ? `"${a.match}"` : ''].filter(Boolean).join(' ')}`);
+    }
+    return { guards, allowances };
+  }
+  ofNode(nodeIdOf(rel), data);
+  return { guards, allowances };
+}
+
+/** What an edit to a model or settings file takes away: guards it removes and allowances it adds. */
+export function weakened(rel: string, before: string, after: string): string[] {
+  const [was, is] = [guardsOfFile(rel, before), guardsOfFile(rel, after)];
+  return [
+    ...[...was.guards].filter((x) => !is.guards.has(x)).map((x) => `no longer: ${x}`),
+    ...[...is.allowances].filter((x) => !was.allowances.has(x)).map((x) => `now allowed: ${x}`),
+  ];
+}
+
+function weakenAsk(rel: string, lost: string[]): GateDecision | null {
+  if (!lost.length) return null;
+  return {
+    decision: 'ask',
+    reason:
+      `This edit to ${rel} weakens what the architecture model guards:\n${lost.slice(0, 12).map((x) => `- ${x}`).join('\n')}${lost.length > 12 ? `\n- and ${lost.length - 12} more` : ''}\n` +
+      'Removing a boundary, an auth, an allow-list, a requirement or a hook, or letting more data or files through, is a person\'s decision. Allow it only if you mean it.',
+  };
+}
+
 /** One line on what a change holds, for the question put to the person. Empty when it cannot be worked out. */
 function elementsNote(root: string, change: string): string {
   try {
@@ -334,7 +458,7 @@ function elementsNote(root: string, change: string): string {
         if (e.isDirectory()) {
           if (e.name !== '.cache' && e.name !== 'docs' && e.name !== 'changes') scan(p);
         } else if (/\.ya?ml$/.test(e.name)) {
-          const n = (fs.readFileSync(p, 'utf8').match(new RegExp(`^\\s*(?:-\\s*)?(?:change|modify|retire):\\s*["']?${change}["']?\\s*$`, 'gm')) ?? []).length;
+          const n = (fs.readFileSync(p, 'utf8').match(new RegExp(`(?:^|[\\s{,])(?:change|modify|retire):\\s*["']?${change.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["']?\\s*(?=[,}]|$)`, 'gm')) ?? []).length;
           if (n) hits.push(`${path.relative(path.join(root, mdir), p).replace(/\\/g, '/')} (${n})`);
         }
       }
@@ -411,6 +535,10 @@ export function shellTargets(command: string, cwd: string): string[] {
     const cmd = bare[0] === 'git' && bare[1] === 'mv' ? 'mv' : bare[0] === 'sudo' ? bare[1] : bare[0];
     const args = bare.slice(bare[0] === 'git' || bare[0] === 'sudo' ? 2 : 1).filter((a) => !a.startsWith('-') && !/^\d?>/.test(a));
     if (cmd === 'touch' || cmd === 'tee') args.forEach(add);
+    // In-place editors: every argument that names a file is a target.
+    else if ((cmd === 'sed' || cmd === 'perl' || cmd === 'yq' || cmd === 'truncate') && (cmd === 'truncate' || bare.some((a) => /^-[A-Za-z]*i/.test(a) || a === '--in-place'))) {
+      for (const a of bare.slice(1)) if (a && !a.startsWith('-') && fs.existsSync(path.resolve(dir, a)) && fs.statSync(path.resolve(dir, a)).isFile()) add(a);
+    }
     else if ((cmd === 'cp' || cmd === 'mv' || cmd === 'install' || cmd === 'ln') && args.length >= 2) {
       const dest = args[args.length - 1];
       const destAbs = shellPath(dir, dest);
@@ -452,8 +580,21 @@ export function bashGate(root: string, command: string, cwd: string = root): Gat
   if (writes && system && /\bgate["']?\s*[:=]\s*["']?off\b/.test(command) && gateOn(root)) {
     return ask('This command sets "gate: off" in system.yaml, which switches the planning gate off for everyone who works in this repo. Allow it only if that is what you want.');
   }
+  // Model files are edited with the file tools, so the gate can see what an edit takes away.
+  const modelFile = new RegExp(`(?:^|[\\s'"/])${mdir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/(?:nodes/[^\\s'"]+|system|shapes/[^\\s'"]+|flows/[^\\s'"]+)\\.ya?ml`);
+  if (/\b(?:git\s+)?rm\b/.test(command) && modelFile.test(command)) {
+    return ask(`This command deletes part of the architecture model under ${mdir}/. Removing a node, a shape or a flow can remove the boundaries, auth and requirements it carries. Allow it only if you mean to remove it ("armature rename" moves a node).`);
+  }
   for (const target of shellTargets(command, cwd)) {
-    if (fs.existsSync(target)) continue;
+    const rel = path.relative(root, target).replace(/\\/g, '/');
+    if (fs.existsSync(target)) {
+      if (rel.startsWith(`${mdir}/`) && /^(?:nodes\/.+|system)\.ya?ml$/.test(rel.slice(mdir.length + 1)) || /^\.claude\/settings(\.local)?\.json$/.test(rel)) {
+        return { decision: 'deny', reason: `This command rewrites ${rel} from the shell, where the gate cannot see what it takes away. Make the edit with the file tools (Edit or Write) instead.` };
+      }
+      const verdict = protectGate(root, rel);
+      if (verdict) return { decision: 'deny', reason: `This command would change ${rel}.\n${verdict.reason}` };
+      continue;
+    }
     const verdict = writeGate(root, { file_path: target, content: '' });
     if (verdict?.decision === 'deny') return { decision: 'deny', reason: `This command would create ${path.relative(root, target).replace(/\\/g, '/')}.\n${verdict.reason}` };
   }
@@ -531,15 +672,22 @@ export function planModeNote(dir: string = MODEL_DIR, planPath = newPlanPath(`${
     '1. Run "armature context" for the task and "armature impact <ref>" on every node, interface and shape the work touches.\n' +
     `2. Give the plan a "Model change" section: the change id, new nodes with their "code:" globs, new or changed interfaces, links, shapes, flows and requirements, and the plan document ${planPath}. If the work changes none of these, write "None" and why.\n` +
     `3. Make the first step after approval writing those files: the planned elements tagged "change: <id>" (or "modify: <id>" for what exists and changes), the plan document with a header (kind: plan, change: <id>), and ${dir}/changes/<id>.yaml with "state: proposed". Run "armature check". Then set "state: approved" as the last edit: the person is asked to confirm it, and what the change holds at that moment is what they approve. Code comes after.\n` +
-    'The armature-design skill has the format. A plan without the "Model change" section is sent back.'
+    '4. Keep what must hold in view: "armature impact <node>" lists boundaries, auth, allow-lists, data policy, secrets and rules. If the work adds an entry point, sends tagged data out of the system or needs a credential, run "armature surface" and the armature-threat skill, and put the answers in the model: "auth:" and "only:" on interfaces, "secrets:" on nodes, a requirement of kind security for each entry point that reaches sensitive data.\n' +
+    'The armature-design skill has the format. A plan without the "Model change" section is sent back, and approval is refused while the change has security errors.'
   );
+}
+
+/** One line for every later plan in a session: the full note was given once, and the rules have not changed. */
+export function planReminder(dir: string = MODEL_DIR): string {
+  return `Planning again: the plan needs its "Model change" section (or "None" and why), planned elements go in ${dir}/ as a proposed change before any code, and "armature impact <node>" lists what must hold.`;
 }
 
 /** A shorter pointer for a prompt that asks for a plan or a design outside plan mode. */
 export function planningNote(dir: string = MODEL_DIR, planPath = newPlanPath(`${dir}/docs`, dir)): string {
   return (
     'This prompt asks for a plan or a design. In this repo that is a change in the architecture model, not a loose document: follow the armature-design skill ' +
-    `(${dir}/changes/<id>.yaml with "state: proposed", planned elements tagged with it, and the plan in ${planPath}), run "armature check", then ask the person to review it in "armature view" before any code.`
+    `(${dir}/changes/<id>.yaml with "state: proposed", planned elements tagged with it, and the plan in ${planPath}), run "armature check", then ask the person to review it in "armature view" before any code. ` +
+    'Check "armature impact <node>" for what must hold, and "armature surface" if the work adds an entry point, sends tagged data out or needs a credential.'
   );
 }
 

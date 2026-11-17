@@ -1,5 +1,6 @@
 // Answers built on the code index for agents: ranked search, callers of a symbol, tests to run,
 // runtime drift, hotspots, and the task-shaped context pack.
+import { mustHold } from './security.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { importersOf, rankFiles, stem, words, type CodeFile, type CodeIndex } from './code.js';
@@ -460,6 +461,12 @@ export function contextPack(g: Graph, idx: CodeIndex, root: string, task: string
       lines.push(...block);
     }
     if (lines.length > 2) push(...lines);
+    // Every constraint on those nodes, so a plan is made with them in view rather than refused afterwards.
+    const hold = mustHold(g, shown.map((n) => n.id));
+    if (hold.length) {
+      const head = ['', '## Must hold', 'Boundaries, who may call, where data may go, secrets and rules for these nodes. Check, approval and the gate refuse work that breaks the first four.'];
+      if (!push(...head, ...hold.slice(0, 40))) push(...head, ...hold.slice(0, 12), '  … "armature impact <node>" lists the rest.');
+    }
   }
   const shapeIds = new Set<string>();
   for (const n of shown) for (const i of n.interfaces) for (const s of [...i.takes, ...i.gives]) shapeIds.add(s);

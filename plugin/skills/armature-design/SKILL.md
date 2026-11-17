@@ -19,6 +19,7 @@ A plan in this repo is two files: a change in `armature/changes/<id>.yaml`, whic
    - new shapes with their fields;
    - a flow that tells the feature's story, also tagged with the change;
    - requirements stating the behaviour, written so a test can prove them. Give a requirement about the whole story `covers: [<flow>]`.
+   - for each new entry point (an interface an actor, an outside system or a client reaches): `auth:`, `only:` when one node should be the only caller, and a requirement of `kind: security` if it reaches sensitive data. New credentials go in `secrets:`; new outside destinations for tagged data go in `data:` in `system.yaml`. Run the `armature-threat` skill when the change adds any of these.
 4. Tag what exists and will be altered with `modify: <id>`: a node that gets new behaviour, an interface whose data changes, a shape that gets a field (list the new field; it shows as planned). Do not use `change:` for these: it would draw something that is live as planned. Tag anything being removed with `retire: <id>` instead of deleting it.
    If the work must follow another change, add `after: [<that change>]` to the change file.
 5. Write the plan document in the documents folder: `armature/docs/plans/<id>.md`, or `<folder>/<id>-plan.md` when `docs:` in `armature/system.yaml` names the repo's own folder (`armature orient` says which):
@@ -37,7 +38,7 @@ A plan in this repo is two files: a change in `armature/changes/<id>.yaml`, whic
    ```
 
    Name parts of the model as `[[node.id]]`, `[[node#interface]]` and `[[Shape]]`. Do not type a status, and do not list the planned elements again: the change holds them.
-6. Run `armature check` until it reports no errors.
+6. Run `armature check` until it reports no errors, and `armature surface <id>` to see what the change does to security. The person is shown the same summary when asked to approve, and approval is refused while the change has security errors.
 7. Stop and ask the person to review it in `armature view` (Work lens, pick the change). Do not write code yet.
 
 ## In plan mode

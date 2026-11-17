@@ -1,3 +1,4 @@
+import { surfaceText } from './security.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,6 +31,8 @@ Reading
   armature impact <ref> [--depth n]   What depends on a node, interface, link or shape, and what lies further along the data
   armature path <node> <node>      How data gets from one node to another along the declared links
   armature trace <Shape|@tag>      Where a shape, or every field tagged @pii, is held and where it leaves the system
+  armature surface [change]        Entry points and their auth, sensitive data leaving the system, secrets;
+                                with a change, only what that change adds
   armature diff [git-ref] [--json] What the model declares now against a commit or branch (default HEAD)
   armature status                  Counts per status, changes, todos
   armature docs [ref] [--loose]    Plans and documents about a node, shape, flow or change, or the whole library;
@@ -173,6 +176,12 @@ async function main(): Promise<void> {
       if (!args[1]) return fail('Usage: armature path <node> <node>');
       console.log(pathText(compile(root), args[0], args[1]));
       return;
+    case 'surface': {
+      await buildCodeIndex(root);
+      const g = compile(root);
+      console.log(surfaceText(g, args[0]));
+      return;
+    }
     case 'trace':
       if (!args[0]) return fail('Usage: armature trace <Shape|@tag>');
       await buildCodeIndex(root);

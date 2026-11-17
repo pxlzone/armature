@@ -7,6 +7,7 @@ accepts:
   - id: tools
     via: mcp
     gives: Answer
+    auth: local
     note: The same answers as the command line, for agents. Nothing here writes to a model.
   - id: serve
     via: in-process
