@@ -480,7 +480,7 @@ export function ciWorkflow(source: MarketplaceSource): string | null {
       `          repository: ${source.repo}`,
       ...(source.ref ? [`          ref: ${source.ref}`] : []),
       '          path: .armature',
-      '          # The tool repo is private: add a read-only token as the ARMATURE_REPO_TOKEN secret.',
+      '          # If the tool repo is private, add a read-only token as the ARMATURE_REPO_TOKEN secret.',
       '          token: ${{ secrets.ARMATURE_REPO_TOKEN || github.token }}',
     ].join('\n');
   } else if (source.source === 'git') {
@@ -589,6 +589,6 @@ export function installTeam(root: string, opts: TeamOptions = {}): string[] {
 
   out.push('');
   out.push(`Commit: ${modelDir(root)}/, .claude/settings.json, .claude/rules/armature-*.md${opts.ci !== false && source.source !== 'directory' ? ', .github/workflows/architecture.yml' : ''}.`);
-  out.push('Each teammate: trust the folder when Claude Code asks, then accept the plugin install (or run /plugin install ' + id + '). Node 22+ is the only requirement.');
+  out.push('Each teammate: open the repo in Claude Code, trust the folder, and run /plugin install ' + id + ' once if Claude Code has not installed it. Node 22+ is the only requirement.');
   return out;
 }

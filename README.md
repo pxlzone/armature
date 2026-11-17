@@ -30,84 +30,118 @@ What you get:
 
 The language is specified in [SPEC.md](SPEC.md). This repo holds the tooling: the compiler and checker, the `armature` CLI, an MCP server, the viewer, and the Claude Code plugin with its skills and hooks. Version 0.1: it has been used on two private codebases, and it will change.
 
-## Quick start
+## Install
 
-You need Node 22 or newer and Claude Code.
+You need:
 
-In Claude Code, add the plugin:
+- **Node.js 22 or newer** and **git**.
+- **Claude Code**, for the hooks, the skills and the MCP server.
+- Optional: the GitHub CLI `gh`, for pull requests in the Activity view, and the `claude` CLI, for model-written file summaries and `armature eval agent`.
+
+### 1. Add the plugin to Claude Code
+
+Each developer does this once. In Claude Code:
 
 ```
 /plugin marketplace add pxlzone/armature
 /plugin install armature@armature
 ```
 
-The plugin brings the hooks, the skills and the MCP server, and puts `armature` on the PATH of Claude's Bash tool. To use `armature` in your own terminal as well:
+If Claude Code asks you to, run `/reload-plugins` or start a new session. From a terminal instead:
+
+```bash
+claude plugin marketplace add pxlzone/armature
+claude plugin install armature@armature
+```
+
+The plugin brings:
+
+- **hooks** that orient the agent at session start, check every edit to the model and to documents, and hold back plans and new files that go around the model;
+- **skills**: `/armature:armature-document`, `/armature:armature-design`, `/armature:armature-docs`, `/armature:armature-audit` and `/armature:armature-language`;
+- **an MCP server**, `armature`, with the same answers as the command line;
+- **the `armature` command on the PATH of Claude's Bash tool**, so the agent can run `armature check`.
+
+In a repo without `armature/system.yaml`, every hook stays silent.
+
+### 2. Put `armature` in your own terminal (optional)
+
+The plugin's command is only on Claude's PATH. To run `armature view` or `armature check` yourself:
 
 ```bash
 git clone https://github.com/pxlzone/armature.git
-cd armature && npm install && npm link
+cd armature
+npm install     # installs and builds, about 20 seconds
+npm link        # puts armature on your PATH
+armature help
 ```
 
-Then, in your project, start a model and ask Claude to fill it in:
+If your shell then says `command not found: armature`, the folder npm links into is not on your PATH. `npm prefix -g` prints its parent: add its `bin` folder to your PATH.
+
+### 3. Start a model in a project
 
 ```bash
+cd your-project
 armature init          # creates armature/ with an empty system.yaml
+armature check         # errors and warnings; exits 1 on errors
+armature view          # the diagram at http://localhost:4747, reloads when armature/ changes
 ```
 
-Ask Claude to document the repo (the `armature-document` skill), or to plan a feature before building it (`armature-design`). `armature view` opens the diagram at http://localhost:4747.
+Without step 2, ask Claude to run `armature init` for you. Then start a new Claude Code session in the project, so it opens with the model, and ask it to document the repo (`/armature:armature-document`) or to plan a feature before building it (`/armature:armature-design`).
 
-## Set up for a team
+### 4. Share it with the team
 
-The tool ships as a Claude Code plugin, `armature`, from the marketplace in this repo (`.claude-plugin/marketplace.json`, plugin in `plugin/`). The plugin is self-contained: the CLI is bundled into one file with its dependencies, so a developer's machine needs only Node 22 or newer.
-
-**Once per project repo** (one person, then commit):
+Once per project repo, after `armature init`:
 
 ```bash
 armature install --team --marketplace pxlzone/armature
 ```
 
-It writes only files meant to be committed, none naming a path on this machine:
+It writes only files meant to be committed, none naming a path on your machine:
 
 | File | What it does |
 |---|---|
-| `.claude/settings.json` | Registers the marketplace (`extraKnownMarketplaces`) and enables `armature@armature` for everyone |
-| `.claude/rules/armature-*.md` | Path-scoped rules generated from the model |
+| `.claude/settings.json` | Registers this marketplace (`extraKnownMarketplaces`) and enables `armature@armature` for the project |
+| `.claude/rules/armature-*.md` | Path-scoped rules generated from the model; Claude Code loads them without the plugin |
 | `.github/workflows/architecture.yml` | CI: `armature check --annotate`, `armature sync-rules --check`, and the diagram as a build artifact |
 | `armature/.gitignore` | Keeps `armature/.cache/` out of git |
 
-It also removes what an earlier local `armature install` wrote (hooks in `settings.local.json`, the `.mcp.json` entry, copied skills), so nothing runs twice. `--ref` pins a tag or branch of the tool; `--no-ci` skips the workflow. If this repo is private, give CI a read-only token as the `ARMATURE_REPO_TOKEN` secret.
+Commit them. Each teammate then opens the repo in Claude Code, trusts the folder, and runs `/plugin install armature@armature` once, if Claude Code has not already installed it.
 
-**Each developer:** open the repo in Claude Code, trust the folder, and accept the plugin install (or run `/plugin install armature@armature`). The plugin brings the hooks, the MCP server, the skills (as `/armature:armature-design` and so on), and puts `armature` on the PATH of Claude's Bash tool. Repos without `armature/` are left alone. To use `armature` in your own terminal too, run `npm install && npm link` in a clone of this repo.
+- `--no-ci` skips the workflow. `--ref <tag or branch>` pins the version of Armature that CI and the marketplace use.
+- The workflow needs no secret while this repo is public. For a private fork, give CI a read-only token as the `ARMATURE_REPO_TOKEN` secret.
+- The team install also removes what a local `armature install` wrote (see below), so nothing runs twice.
 
-**Releasing a new version:** change the code, bump `version` in `package.json`, run `npm run build:plugin`, and commit `plugin/` with the change. Teammates get it with `/plugin marketplace update`.
+### Update
 
-## Set up on one machine
+- **The plugin:** run `claude plugin update armature@armature` in a terminal, or open `/plugin`, go to the Marketplaces tab and choose Update marketplace. Then run `/reload-plugins`. `/plugin marketplace update armature` alone only refreshes the list.
+- **The terminal command:** in your clone, `git pull && npm install`.
+
+### Uninstall
+
+- **The plugin:** `/plugin uninstall armature@armature`.
+- **The terminal command:** `npm unlink -g armature`.
+- **A project's model** is only files: delete `armature/`, `.claude/rules/armature-*.md`, and the `armature` entries in `.claude/settings.json`.
+
+### Without the plugin
+
+When you work on Armature itself, wire a project to your clone instead of the plugin:
 
 ```bash
-npm install         # also builds (prepare script)
-npm link            # puts armature on your path
-armature install       # in a project: hooks, MCP server and skills with paths to this checkout
+armature install       # run in a project that has armature/
 ```
 
-This is for working on the tool itself: the hooks point at this checkout, in `.claude/settings.local.json`, which is not shared.
+It writes hooks with paths to your clone in `.claude/settings.local.json`, copies the skills to `.claude/skills/`, writes the rule files, and registers the MCP server in `.mcp.json`. It leaves `.mcp.json` alone when that file is committed, because the entry would name a path on your machine. None of this is meant to be committed, and it should not run beside the plugin.
 
-## Use it in a project
+## What happens in a session
 
-```bash
-armature init          # creates armature/ with an empty system.yaml
-armature check         # errors and warnings; exits 1 on errors
-armature view          # diagram at http://localhost:4747, reloads when armature/ changes
-```
+With the plugin on (or after `armature install`), a Claude Code session in a repo with a model:
 
-Once the plugin is on (or after `armature install`), restart the Claude Code session in that repo. From then on:
-
-- the session starts with a digest of the system (`armature orient`);
-- each node's rules load when the agent touches that node's files;
-- an edit under `armature/` is checked at once, and errors go back to the agent;
-- an edit to any document is checked too: a reference that names nothing in the model goes back to the agent;
-- when code under a node changes and `armature/` does not, the agent is asked once to confirm the model and the documents about that node still hold;
-- planning goes through the model (see "Planning gate" below);
-- four workflows are available as skills: `/armature-document` (model an existing repo), `/armature-design` (plan a feature before building it), `/armature-docs` (write a document, or tie existing ones to the model), `/armature-audit` (repair drift).
+- starts with a digest of the system (`armature orient`);
+- loads each node's rules when the agent touches that node's files;
+- checks every edit under `armature/` at once, and sends errors back to the agent;
+- checks every edit to a document too: a reference that names nothing in the model goes back to the agent;
+- when code under a node changes and `armature/` does not, asks the agent once to confirm that the model and the documents about that node still hold;
+- routes planning through the model (see "Planning gate" below).
 
 All commands: `armature help`. A model in `arch/`, the folder's earlier name, is still read; `armature check` asks you to rename it to `armature/`.
 
@@ -245,6 +279,8 @@ npm run typecheck
 npm run build       # CLI to dist/, viewer to viewer/dist/index.html
 npm run build:plugin  # the plugin in plugin/: bundled CLI, viewer, skills, hooks, MCP server
 ```
+
+To release a new version, change the code, bump `version` in `package.json`, run `npm run build:plugin`, and commit `plugin/` with the change. Users get it with `claude plugin update armature@armature`.
 
 | Path | What it holds |
 |---|---|
