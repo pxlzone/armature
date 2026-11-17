@@ -1,0 +1,21 @@
+kind: store
+role: the armature/ folder
+description: The model of a project, committed in its repo. People and agents write it; the tool reads it, and writes only the two lock files and the baseline.
+holds:
+  - id: system
+    note: system.yaml
+  - id: nodes
+    note: nodes/
+  - id: shapes
+    note: shapes/ and shapes.lock.json
+  - id: flows
+    note: flows/
+  - id: changes
+    note: changes/
+  - id: documents
+    note: Markdown with a header, in the documents folder or anywhere in the repo.
+  - id: approvals
+    shape: Approval
+    note: approvals.lock.json
+  - id: baseline
+    note: baseline.json

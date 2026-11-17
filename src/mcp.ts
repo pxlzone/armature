@@ -5,11 +5,78 @@ import { z } from 'zod';
 import { buildCodeIndex, readCodeIndex } from './code.js';
 import { codeDeps, codeMap, findSymbol } from './codeview.js';
 import { callersText, contextText, driftText, searchText, testsText } from './context.js';
-import { compile, findRoot } from './compile.js';
-import { activity, docsText, formatProblems, impact, islands, orient, show, status, techText, todos, where } from './render.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { compile as compileNow, findRoot, type CompileOptions } from './compile.js';
+import { hotspotsText } from './context.js';
+import { diffModel, diffText } from './diff.js';
+import { modelDir } from './paths.js';
+import { git } from './repo.js';
+import { activity, docsText, formatProblems, impact, islands, orient, pathText, show, status, techText, todos, traceText, where } from './render.js';
+import type { Graph } from './types.js';
+
+// An agent asks several things in a row, and each answer needs the compiled model. Compiling reads
+// the whole repo, so the last result is kept for as long as nothing it was read from has changed.
+const kept = new Map<string, { print: string; at: number; graph: Graph }>();
+const KEEP_FOR = 60_000;
+
+/** A cheap summary of everything a compile reads. Null when it cannot be had (no git), which means: compile. */
+function fingerprint(root: string): string | null {
+  const head = git(root, ['rev-parse', 'HEAD']);
+  const status = git(root, ['status', '--porcelain', '--untracked-files=all']);
+  if (head === null || status === null) return null;
+  const parts = [head.trim(), status];
+  const stamp = (file: string): void => {
+    try {
+      const st = fs.statSync(file);
+      parts.push(`${file}:${st.mtimeMs}:${st.size}`);
+    } catch {
+      parts.push(`${file}:gone`);
+    }
+  };
+  // A file that already differs from the commit can change again without its status line changing.
+  for (const line of status.split('\n').filter(Boolean)) stamp(path.join(root, (line.slice(3).split(' -> ').pop() as string).replace(/^"|"$/g, '')));
+  // What git ignores and a compile still reads: the code index, test and coverage reports.
+  const cache = path.join(root, modelDir(root), '.cache');
+  for (const dir of [cache, path.join(cache, 'reports')]) {
+    try {
+      for (const f of fs.readdirSync(dir)) stamp(path.join(dir, f));
+    } catch {
+      /* not there */
+    }
+  }
+  stamp(path.join(root, 'coverage', 'lcov.info'));
+  return parts.join('\n');
+}
+
+export function compile(root: string, opts: CompileOptions = {}): Graph {
+  const key = `${root}|${JSON.stringify(opts)}`;
+  const print = fingerprint(root);
+  const hit = kept.get(key);
+  if (print !== null && hit && hit.print === print && Date.now() - hit.at < KEEP_FOR) return hit.graph;
+  const graph = compileNow(root, opts);
+  // The index may have been rebuilt just before this call; take the fingerprint after compiling so it is included.
+  const after = fingerprint(root);
+  if (after !== null) kept.set(key, { print: after, at: Date.now(), graph });
+  return graph;
+}
+
+/** The version of the tool this server belongs to. */
+const VERSION: string = (() => {
+  // From source the version is in package.json; in the plugin it is in the plugin manifest.
+  for (const file of ['../package.json', '../.claude-plugin/plugin.json']) {
+    try {
+      const v = JSON.parse(fs.readFileSync(new URL(file, import.meta.url), 'utf8')).version;
+      if (typeof v === 'string') return v;
+    } catch {
+      /* try the next */
+    }
+  }
+  return '0.0.0';
+})();
 
 export async function runMcp(rootFlag?: string): Promise<void> {
-  const server = new McpServer({ name: 'armature', version: '0.1.0' });
+  const server = new McpServer({ name: 'armature', version: VERSION });
   const run = (fn: (root: string) => string) => async () => {
     const root = findRoot(rootFlag ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd());
     const text = root ? safe(() => fn(root)) : 'No armature/system.yaml found in this project. Run "armature init" to start a model.';
@@ -31,7 +98,7 @@ export async function runMcp(rootFlag?: string): Promise<void> {
   server.registerTool(
     'show',
     {
-      description: 'Full detail for one element of the architecture model. ref is a node id (billing), an interface (billing#charge), a shape (ChargeJob), a requirement (billing:no-double-charge), a flow id or a change id. depth 2 includes child nodes.',
+      description: 'Full detail for one element of the architecture model. ref is a node id (billing), an interface (billing#charge), a named link (billing~refund-card), a shape (ChargeJob), a requirement (billing:no-double-charge), a flow id or a change id. A name that means several things takes the kind in front: flow:checkout, change:checkout, node:checkout. depth 2 includes child nodes.',
       inputSchema: { ref: z.string(), depth: z.number().int().min(1).max(4).optional() },
     },
     async ({ ref, depth }) => run((root) => show(compile(root), ref, depth ?? 1))(),
@@ -47,15 +114,46 @@ export async function runMcp(rootFlag?: string): Promise<void> {
   server.registerTool(
     'impact',
     {
-      description: 'What depends on a node, an interface (node#interface) or a shape: the links, flows and requirements a change would touch.',
-      inputSchema: { ref: z.string() },
+      description: 'What depends on a node, an interface (node#interface), a named link (node~link) or a shape: the links, flows, requirements and documents a change would touch, the shapes that embed a shape, and for a node what lies further along the data. depth is how many links away to look (default 3).',
+      inputSchema: { ref: z.string(), depth: z.number().int().min(1).max(8).optional() },
     },
-    async ({ ref }) => run((root) => impact(compile(root), ref))(),
+    async ({ ref, depth }) => run((root) => impact(compile(root), ref, depth ?? 3))(),
+  );
+  server.registerTool(
+    'path',
+    {
+      description: 'How data gets from one node to another along the declared links, step by step, in the direction the data moves. Use it to answer "does X ever reach Y, and through what".',
+      inputSchema: { from: z.string(), to: z.string() },
+    },
+    async ({ from, to }) => run((root) => pathText(compile(root), from, to))(),
+  );
+  server.registerTool(
+    'trace',
+    {
+      description: 'Where a data shape is held and where it goes: stores, interfaces, links, and the outside systems it leaves to. Give a Shape name, or a field tag such as @pii to follow every field that carries it.',
+      inputSchema: { what: z.string() },
+    },
+    async ({ what }) => run((root) => traceText(compile(root), what))(),
+  );
+  server.registerTool(
+    'diff',
+    {
+      description: 'What the model declares now against a git ref (a commit, branch or tag; default HEAD): nodes, interfaces, links, shapes and fields, flows, requirements and changes that were added, changed or removed. Use it to review what a branch does to the architecture.',
+      inputSchema: { ref: z.string().optional() },
+    },
+    async ({ ref }) => run((root) => diffText(diffModel(root, ref ?? 'HEAD')))(),
   );
   server.registerTool(
     'check',
-    { description: 'Validate the model under armature/. Returns errors and warnings. Run after every edit to armature/.', inputSchema: {} },
-    run((root) => formatProblems(compile(root).problems)),
+    {
+      description: 'Validate the model under armature/. Returns errors and warnings. Run after every edit to armature/. only narrows the answer: errors, wrong (the model disagrees with the code) or incomplete (the model leaves something out). On a large model, ask for errors and wrong first.',
+      inputSchema: { only: z.enum(['errors', 'wrong', 'incomplete']).optional() },
+    },
+    async ({ only }) =>
+      run((root) => {
+        const g = compile(root);
+        return formatProblems(only ? g.problems.filter((p) => (only === 'errors' ? p.level === 'error' : p.level === 'warning' && p.group === only)) : g.problems, g.accepted);
+      })(),
   );
   server.registerTool(
     'status',
@@ -92,8 +190,8 @@ export async function runMcp(rootFlag?: string): Promise<void> {
 
   server.registerTool(
     'activity',
-    { description: 'Recent commits per node of the architecture model, grouped by Conventional Commits type, busiest nodes first. Shows where work is happening.', inputSchema: {} },
-    run((root) => activity(compile(root, { activity: true }))),
+    { description: 'Recent commits per node of the architecture model, grouped by Conventional Commits type, busiest nodes first. Shows where work is happening. days sets the window (default 90).', inputSchema: { days: z.number().int().min(1).max(730).optional() } },
+    async ({ days }) => run((root) => activity(compile(root, { activity: true, ...(days ? { days } : {}) })))(),
   );
 
   const withIndex = (fn: (root: string) => string) => async () => {
@@ -160,8 +258,26 @@ export async function runMcp(rootFlag?: string): Promise<void> {
   );
   server.registerTool(
     'drift',
-    { description: 'What the code does at run time (tables read and written, queues, HTTP routes served and called) that the architecture model does not declare, and declared table links not seen in the code.', inputSchema: { ref: z.string().optional() } },
+    { description: 'What the code does at run time (tables read and written, queues, HTTP routes served and called) that the architecture model does not declare; what the model declares that the code does not show; and which nodes could not be checked at all (a language or library the code index does not read). No finding on a node that was not checked means nothing.', inputSchema: { ref: z.string().optional() } },
     async ({ ref }) => withIndex((root) => driftText(compile(root), ref))(),
+  );
+  server.registerTool(
+    'hotspots',
+    { description: 'Files that change most often and are largest, for the repo or one node. These are where a change is most likely to conflict or to break something.', inputSchema: { ref: z.string().optional() } },
+    async ({ ref }) => withIndex((root) => hotspotsText(compile(root), readCodeIndex(root), root, ref))(),
+  );
+  server.registerTool(
+    'shapes',
+    { description: 'Data shapes against the code they point at: how many take their fields from code, and which list fields that differ from the code.', inputSchema: {} },
+    withIndex((root) => {
+      const g = compile(root);
+      const fromCode = g.shapes.filter((s) => s.fromCode).length;
+      const withSource = g.shapes.filter((s) => s.source).length;
+      const out = [`${g.shapes.length} shapes: ${fromCode} take their fields from code, ${withSource - fromCode} have a source the index cannot read, ${g.shapes.length - withSource} have no source.`];
+      for (const s of g.shapes.filter((x) => x.drift)) out.push(`  ${s.id}: model only ${s.drift!.onlyModel.join(', ') || '-'}; code only ${s.drift!.onlyCode.join(', ') || '-'}`);
+      if (g.shapes.some((x) => x.drift)) out.push('"armature shapes --sync" rewrites these from the code.');
+      return out.join('\n');
+    }),
   );
 
   await server.connect(new StdioServerTransport());

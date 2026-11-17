@@ -1,0 +1,28 @@
+kind: service
+role: read-only answers over MCP
+tech: [node, mcp, zod]
+code: [src/mcp.ts]
+
+accepts:
+  - id: tools
+    via: mcp
+    gives: Answer
+    note: The same answers as the command line, for agents. Nothing here writes to a model.
+  - id: serve
+    via: in-process
+    takes: Command
+    note: '"armature mcp" starts the server on stdio.'
+
+calls:
+  - to: core.compiler#compile
+    note: Keeps the compiled graph between calls while nothing it was read from has changed.
+  - to: core.answers#text
+  - to: core.code-graph#index
+  - to: outside.git#commands
+
+rules:
+  - Tools here only read. A command that changes a model (approve, rename, confirm) stays on the command line, where a person runs it.
+
+todos:
+  - text: No test starts the MCP server. Its tools are covered only through the functions they call.
+    kind: debt

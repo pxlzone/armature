@@ -7,8 +7,11 @@ export type NodeKind =
   | 'platform';
 
 export const NODE_KINDS: NodeKind[] = [
-  'actor', 'app', 'service', 'worker', 'job', 'agent', 'store', 'queue', 'external', 'library', 'group',
+  'actor', 'app', 'service', 'worker', 'job', 'agent', 'store', 'queue', 'external', 'library', 'group', 'platform',
 ];
+
+/** Transports the viewer has an icon for. `via` is an open list; these are the known ones. */
+export const VIA_KINDS = ['http', 'grpc', 'ws', 'webhook', 'mcp', 'sql', 'bolt', 'redis', 'pgmq', 'temporal', 'kafka', 'cron', 'cli', 'sdk', 'smtp', 'imap', 'in-process'];
 
 export type Verb = 'calls' | 'sends' | 'reads' | 'writes';
 
@@ -16,6 +19,13 @@ export type Status =
   | 'retiring' | 'failing' | 'stale' | 'planned' | 'building' | 'verified' | 'built';
 
 export type ChangeState = 'proposed' | 'approved' | 'done' | 'dropped';
+
+/**
+ * Whether the code index saw what the model declares.
+ * seen: a detector found it. unseen: a detector that works on this node's code did not find it.
+ * unchecked: no detector covers it (a language or library the index does not read), so nothing is known.
+ */
+export type Evidence = 'seen' | 'unseen' | 'unchecked';
 
 export interface Interface {
   id: string;
@@ -30,8 +40,11 @@ export interface Interface {
   dlq?: string;
   note?: string;
   change?: string;
+  /** The change that alters this interface. It exists today and stays built. */
+  modify?: string;
   retire?: string;
   status: Status;
+  evidence: Evidence;
 }
 
 export interface Requirement {
@@ -40,10 +53,23 @@ export interface Requirement {
   node: string;
   text: string;
   change?: string;
+  modify?: string;
   tests: string[];
   match: string[];
+  /** What else the requirement is about: interfaces, links, shapes or flows, as resolved references. */
+  covers: string[];
   state: 'verified' | 'failing' | 'unverified';
+  /** True when the only passing tests are in a report older than the code they tested. */
+  outdated?: boolean;
   evidence: string[]; // test names that matched
+}
+
+/** A node whose code this node must not import and that no link of it may reach. */
+export interface Boundary {
+  node: string;
+  why?: string;
+  /** The node that declared it; children inherit it. */
+  from: string;
 }
 
 export type TodoKind = 'task' | 'debt' | 'bug' | 'idea';
@@ -143,16 +169,16 @@ export type DocKind = 'plan' | 'decision' | 'guide' | 'runbook' | 'review' | 're
 
 export const DOC_KINDS: DocKind[] = ['plan', 'decision', 'guide', 'runbook', 'review', 'research', 'note'];
 
-export type DocRefType = 'node' | 'interface' | 'requirement' | 'shape' | 'flow' | 'change';
+export type DocRefType = 'node' | 'interface' | 'link' | 'requirement' | 'shape' | 'flow' | 'change';
 
 /** One element of the model that a document names, in its header or as [[reference]] in its text. */
 export interface DocRef {
   /** As written in the document. */
   text: string;
   type: DocRefType;
-  /** The resolved reference: node id, node#interface, node:requirement, Shape, flow id or change id. */
+  /** The resolved reference: node id, node#interface, node~link, node:requirement, Shape, flow id or change id. */
   id: string;
-  /** The node it belongs to, for nodes, interfaces and requirements. */
+  /** The node it belongs to, for nodes, interfaces, links and requirements. */
   node?: string;
   count: number;
 }
@@ -179,6 +205,12 @@ export interface DocInfo {
   refs: DocRef[];
   /** References that resolve to nothing in the model. */
   broken: string[];
+  /** Bare names that could be more than one kind of thing, with the kinds: "refunds (node, flow:refunds)". */
+  ambiguous: string[];
+  /** Documents this one replaces (decisions). */
+  supersedes: string[];
+  /** The document that replaced this one. */
+  supersededBy?: string;
   /** Nothing ties it to the model: no header, no node lists it, no change names it. */
   loose: boolean;
 }
@@ -206,7 +238,11 @@ export interface GNode {
   requirements: Requirement[];
   todos: Todo[];
   change?: string;
+  /** The change that alters this node. It exists today and keeps its status. */
+  modify?: string;
   retire?: string;
+  /** Nodes this one must never import code from or link to: its own and inherited ones. */
+  never: Boundary[];
   status: Status;
   statusWhy: string;
   coverage: number | null; // 0..100
@@ -307,9 +343,15 @@ export interface Edge {
   shapes: string[]; // data moving from -> to
   returns: string[]; // data coming back, for calls
   note?: string;
+  /** The link's own id, when it has one. */
+  name?: string;
+  /** owner~name, the reference of a named link. */
+  ref?: string;
   change?: string;
+  modify?: string;
   retire?: string;
   status: Status;
+  evidence: Evidence;
   /** Set on edges synthesised from imports for the Code lens. */
   code?: { count: number; kind: CodeDep['kind']; via?: CodeDep['via'] };
 }
@@ -333,10 +375,21 @@ export interface RuntimeReport {
   node: string;
   /** In the code, not in the model. */
   undeclared: RuntimeItem[];
-  /** In the model, not seen in the code (only for tables and queues, which are detected reliably). */
+  /** In the model, not seen in the code, where a detector works on this node's code. */
   unseen: RuntimeItem[];
   /** Declared and seen. */
   confirmed: number;
+}
+
+/** What the code index could check for one node. A node with no kinds was not checked at all. */
+export interface DetectorCoverage {
+  node: string;
+  /** Files the node owns. */
+  files: number;
+  /** Of those, files in a language the index reads. */
+  indexed: number;
+  /** What was recognised in its code: route, http, queue, workflow, table. */
+  kinds: string[];
 }
 
 export interface Shape {
@@ -345,6 +398,8 @@ export interface Shape {
   source?: string;
   note?: string;
   change?: string;
+  /** The change that alters this shape. Fields only the model lists are then planned, not drift. */
+  modify?: string;
   stale: boolean;
   bound: boolean; // source resolves and hash is confirmed
   /** Set when the fields were read from code (the model's own field list is then only a fallback). */
@@ -360,6 +415,8 @@ export interface FlowStep {
   to: string;
   iface?: string;
   edge: string | null;
+  /** The step is the answer to a call: data moves against the link's direction. */
+  reply?: boolean;
   note?: string;
 }
 
@@ -369,7 +426,10 @@ export interface Flow {
   headline: string;
   trigger?: string;
   change?: string;
+  modify?: string;
   steps: FlowStep[];
+  /** Requirements that cover the flow (`covers:` on a requirement). */
+  requirements: string[];
 }
 
 export interface Change {
@@ -390,6 +450,14 @@ export interface Change {
   requirements: string[];
   shapes: string[];
   flows: string[];
+  /** Changes that must be done before this one. */
+  after: string[];
+  /** Of those, the ones not done yet. */
+  waits: string[];
+  /** Everything the change adds, alters or retires, one line each. This is what a person approves. */
+  elements: string[];
+  /** Who approved which elements, from approvals.lock.json. Null when nothing is recorded. */
+  approval: { by: string; at: string; added: string[]; removed: string[] } | null;
   progress: { total: number; built: number; reqTotal: number; reqVerified: number };
 }
 
@@ -413,7 +481,7 @@ export const WARNING_INFO: Record<string, { group: WarningGroup; what: string }>
   'shape-fields': { group: 'wrong', what: 'A shape lists fields that differ from the schema in the code it was read from.' },
   'stale-shape': { group: 'wrong', what: 'The source of a shape changed since someone confirmed it.' },
   'source-symbol': { group: 'wrong', what: 'A shape points at a symbol that is not in its source file.' },
-  verb: { group: 'wrong', what: 'A link reads from or writes to something that is not a store.' },
+  verb: { group: 'wrong', what: 'A link reads from something that is neither a store nor a queue, or writes to something that is not a store.' },
   reference: { group: 'wrong', what: 'The model names a document, test file, requirement or type that does not exist.' },
   type: { group: 'wrong', what: 'A shape field uses a type that is not known.' },
   'no-test-match': { group: 'wrong', what: 'A requirement expects a test that is not in the latest test report.' },
@@ -421,6 +489,10 @@ export const WARNING_INFO: Record<string, { group: WarningGroup; what: string }>
   report: { group: 'wrong', what: 'A test or coverage report could not be read.' },
   'deploy-missing': { group: 'wrong', what: 'A node says it runs as a container that no compose file defines.' },
   'unused-reachable': { group: 'wrong', what: 'A node is marked unused, but an entry point reaches its code.' },
+  'not-in-code': { group: 'wrong', what: 'The model declares a route or a queue on a node whose code registers others of the same kind, and this one is not among them.' },
+  overlap: { group: 'wrong', what: 'Two nodes that are not parent and child claim the same files. Each file goes to one of them, so the other owns less than its globs say.' },
+  'built-unapproved': { group: 'wrong', what: 'A node has code, but the change that adds it is still proposed: the code was written before a person approved the change.' },
+  'scope-changed': { group: 'wrong', what: 'Elements were added to or removed from a change after a person approved it. It needs approving again: "armature approve <change>".' },
   'legacy-folder': { group: 'incomplete', what: 'The model is still in arch/, the earlier name of the folder. Rename it to armature/.' },
   'unused-linked': { group: 'wrong', what: 'A node is marked unused but still has links to other nodes.' },
   'doc-reference': { group: 'wrong', what: 'A document names a node, interface, shape, requirement, flow or change that is not in the model. The part was renamed or removed, or the reference is mistyped.' },
@@ -438,6 +510,13 @@ export const WARNING_INFO: Record<string, { group: WarningGroup; what: string }>
   unowned: { group: 'incomplete', what: 'Source files belong to no node.' },
   unconfirmed: { group: 'incomplete', what: 'A shape read from code was never confirmed by a person.' },
   'empty-change': { group: 'incomplete', what: 'A planned change has no elements tagged with it yet.' },
+  'unrecorded-approval': { group: 'incomplete', what: 'A change is approved, but nothing records who approved which elements. Run "armature approve <change>".' },
+  'done-unchecked': { group: 'incomplete', what: 'A change is marked done and nothing here can prove it: there is no test report, the report is older than the code, or the change has no element a check can see.' },
+  'outdated-report': { group: 'incomplete', what: 'A test report is older than the code it tested, so its passes do not count. Run the tests again.' },
+  'ambiguous-reference': { group: 'incomplete', what: 'A document names something that could be a node, a shape, a flow or a change. Write the kind in front: [[flow:checkout]].' },
+  'ambiguous-step': { group: 'incomplete', what: 'A flow step matches more than one link. Give the link an id and write the step as node~id.' },
+  'accept-reason': { group: 'incomplete', what: 'An accepted warning gives no reason.' },
+  'stale-accept': { group: 'incomplete', what: 'An accept entry in system.yaml matches no warning any more. Remove it.' },
 };
 
 export const GROUP_TITLE: Record<WarningGroup, string> = {
@@ -465,7 +544,8 @@ export interface Graph {
     hasGit: boolean;
     hasRemote: boolean;
     branch?: string;
-    reports: { junit: number; lcov: number };
+    /** `at` is when the newest test report was written. */
+    reports: { junit: number; lcov: number; at?: string };
   };
   nodes: GNode[];
   edges: Edge[];
@@ -478,6 +558,10 @@ export interface Graph {
   codeDeps: CodeDep[];
   docs: DocInfo[];
   runtime: RuntimeReport[];
+  /** Per node with code: what the code index could check. */
+  detectors: DetectorCoverage[];
+  /** Warnings dropped because system.yaml accepts them, with a reason. */
+  accepted: number;
   coverage: Coverage;
   deployment: Deployment;
   tech: Tech[];

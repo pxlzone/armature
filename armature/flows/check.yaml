@@ -1,0 +1,16 @@
+headline: The model is compiled against the repo every time. Nothing derived is stored in it.
+trigger: A person or an agent runs armature check
+steps:
+  - developer -> cli#commands
+  - cli -> core.compiler#compile
+  - project.model#nodes -> core.compiler
+  - step: project.source#files -> core.compiler
+    note: Which files exist, and which node owns each.
+  - step: project.cache#code-index -> core.compiler
+    note: What the code imports and does, to compare with what the model declares.
+  - step: project.cache#reports -> core.compiler
+    note: Test results, counted only while they are newer than the code.
+  - step: core.compiler#compile -> cli
+    note: The graph with its problems.
+  - step: cli#commands -> developer
+    note: Errors, then where the model is wrong, then where it is incomplete.

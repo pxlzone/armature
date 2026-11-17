@@ -1,0 +1,16 @@
+tech:
+  - { id: node, name: Node.js, category: runtime, version: "22+" }
+  - { id: typescript, name: TypeScript, category: tool, files: ["**/tsconfig.json"] }
+  - { id: npm, name: npm, category: tool, files: [package.json] }
+  - { id: vite, name: Vite, category: tool, files: ["**/vite*.config.ts"], note: Builds the single-file viewer and the bundled CLI of the plugin. }
+  - { id: vitest, name: Vitest, category: tool, files: [vitest.config.ts] }
+  - { id: react, name: React, category: framework }
+  - { id: elk, name: ELK, category: library, note: Lays out the diagram. }
+  - { id: tree-sitter, name: tree-sitter, category: library, note: "Parses TypeScript, JavaScript and Python for the code index." }
+  - { id: yaml, name: yaml, category: library, note: "Reads the model, and rewrites it without losing comments." }
+  - { id: ajv, name: Ajv, category: library, note: Validates model files against the JSON Schema. }
+  - { id: picomatch, name: picomatch, category: library, note: Matches code globs. }
+  - { id: mcp, name: Model Context Protocol, category: protocol }
+  - { id: zod, name: Zod, category: library }
+  - { id: claude-code, name: Claude Code, category: platform, files: [".claude/**", ".claude-plugin/**"] }
+  - { id: git, name: git, category: tool, files: [.gitignore] }

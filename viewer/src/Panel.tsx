@@ -168,6 +168,8 @@ function ReqItem({ q }: { q: Requirement }) {
     <li>
       <Pill kind={q.state} /> {q.change && <Pill kind="planned">{q.change}</Pill>}
       <div>{q.text}</div>
+      {q.outdated && <div className="small muted">It passed, but in a test report older than the code. Run the tests again.</div>}
+      {q.covers.length > 0 && <div className="small muted">Covers <span className="mono">{q.covers.join(', ')}</span></div>}
       <div className="mono muted">[req {q.ref}]</div>
     </li>
   );
@@ -178,6 +180,8 @@ function IfaceItem({ i, shapes, pickShape }: { i: Interface; shapes: Map<string,
     <li>
       <div className="mono">
         <b>{i.id}</b> {i.via && <span className="muted">via {i.via}</span>} {i.status !== 'built' && <Pill kind={i.status} />}
+        {i.modify && <> <Pill kind="building">changing: {i.modify}</Pill></>}
+        {i.evidence === 'unseen' && i.status === 'built' && <> <Pill kind="stale">not in code</Pill></>}
       </div>
       {(i.route || i.queue) && <div className="mono muted">{i.route ?? `queue ${i.queue}`}{i.dlq ? `, dead letters to ${i.dlq}` : ''}</div>}
       {i.note && <div className="small muted">{i.note}</div>}
@@ -269,7 +273,8 @@ export function Panel(p: Props) {
                     <button className={i === p.step ? 'on' : ''} onClick={() => p.setStep(i)}>
                       <span>
                         <span className="mono">{ix.nodes.get(s.from)?.name ?? s.from} → {ix.nodes.get(s.to)?.name ?? s.to}</span>
-                        {e && e.shapes.length > 0 && <span className="mono muted"> · {e.shapes.join(', ')}</span>}
+                        {e && !s.reply && e.shapes.length > 0 && <span className="mono muted"> · {e.shapes.join(', ')}</span>}
+                        {e && s.reply && <span className="mono muted"> · {e.returns.join(', ') || 'answer'} (reply)</span>}
                         {s.note && <div className="note">{s.note}</div>}
                         {inner && <div className="note">Happens inside {ix.nodes.get(inner)?.name}. <a href="#" onClick={(ev) => { ev.preventDefault(); ev.stopPropagation(); p.toggle(inner, true); }}>Expand it</a></div>}
                       </span>
@@ -584,6 +589,9 @@ function EdgeCard({ e, shapes, pickShape }: { e: Edge; shapes: Map<string, Shape
       <div className="mono">{e.verb === 'reads' ? <><b>{e.iface ?? e.from}</b> → <b>{e.to}</b></> : <><b>{e.from}</b> → <b>{e.iface ?? e.to}</b></>}</div>
       <div className="small muted">
         {e.owner} {verb}{e.via ? ` over ${e.via}` : ''} {e.status !== 'built' && <Pill kind={e.status} />} {e.change && <Pill kind="planned">{e.change}</Pill>}
+        {e.modify && <> <Pill kind="building">changing: {e.modify}</Pill></>}
+        {e.evidence === 'unseen' && e.status === 'built' && <> <Pill kind="unverified">not seen in code</Pill></>}
+        {e.ref && <span className="mono"> · {e.ref}</span>}
       </div>
       {e.note && <div className="small">{e.note}</div>}
       {e.shapes.length === 0 && e.returns.length === 0 && <div className="small muted">No shape declared on this link yet.</div>}
@@ -748,6 +756,8 @@ function NodePanel(p: Props & { n: GNode; shapes: Map<string, Shape> }) {
       )}
       <ActivityBlock n={n} />
       {n.change && <p className="small" style={{ marginTop: 12 }}>Part of change <span className="mono">{n.change}</span>.</p>}
+      {n.modify && <p className="small" style={{ marginTop: 12 }}>Being altered by change <span className="mono">{n.modify}</span>.</p>}
+      {n.never.length > 0 && <p className="small" style={{ marginTop: 12 }}>Must never touch: {n.never.map((b) => <span key={b.node} className="mono" title={b.why ?? ''}>{b.node} </span>)}</p>}
       <p className="mono muted" style={{ marginTop: 12 }}>{n.source}</p>
       <AskAgent subject={`node \`${n.id}\``} file={n.source} />
     </aside>

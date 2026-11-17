@@ -1,0 +1,68 @@
+kind: library
+shared: false
+role: resolves the model, computes status
+tech: [typescript, yaml, ajv, picomatch]
+code:
+  - src/compile.ts
+  - src/types.ts
+  - src/paths.ts
+  - src/refs.ts
+  - src/docs.ts
+  - src/deploy.ts
+  - src/repo.ts
+  - schemas/**
+tests:
+  - test/compile.test.ts
+  - test/checks.test.ts
+  - test/docs.test.ts
+  - test/sound.test.ts
+  - test/activity.test.ts
+
+accepts:
+  - id: compile
+    via: in-process
+    gives: Graph
+    note: compile(root) reads armature/ and the repo, and returns one resolved graph with its problems.
+
+reads:
+  - project.model#system
+  - project.model#nodes
+  - project.model#shapes
+  - project.model#flows
+  - project.model#changes
+  - project.model#documents
+  - project.model#approvals
+  - project.cache#code-index
+  - project.cache#reports
+  - project.source#files
+calls:
+  - to: core.code-graph#index
+    note: Reads the index it built, and asks it for run-time drift and reachability.
+  - to: outside.git#commands
+  - to: outside.github#pull-requests
+
+rules:
+  - Status is computed. Never add a field in which a person types that something is built, verified or current.
+  - A check that cannot look says "unchecked". It never passes silently and never guesses a finding.
+  - A new warning code needs an entry in WARNING_INFO (src/types.ts) and a mention in SPEC.md section 8.
+  - src/types.ts and src/refs.ts are imported by the viewer. Keep them free of Node imports.
+
+requirements:
+  - id: status-is-computed
+    text: Planned, building, built and verified come from files and test reports. Nothing in the model can type them.
+    tests: test/compile.test.ts
+  - id: reports-age
+    text: A passing test counts only while its report is newer than the code it tested.
+    tests: test/sound.test.ts
+    match: counts a pass only while the report is newer
+  - id: claims-are-checked
+    text: An interface the model declares and the code does not register is reported, and one the index cannot read is unchecked, not fine.
+    tests: test/sound.test.ts
+    match: says when a declared interface is not in the code
+  - id: one-way-to-resolve-a-name
+    text: A name resolves the same way in commands, documents and the viewer, and a name with several meanings is reported.
+    tests: test/sound.test.ts
+    match: resolves a name one way everywhere
+  - id: documents-are-tied
+    text: A document that names something missing from the model is reported.
+    tests: test/docs.test.ts

@@ -1,0 +1,25 @@
+kind: app
+role: zoomable map with lenses
+tech: [react, elk, typescript]
+code: [viewer/src/**, viewer/index.html]
+tests: [test/view.test.ts]
+
+accepts:
+  - id: diagram
+    via: http
+    note: The page a person opens. Read-only; people ask the agent to change the model.
+
+calls:
+  - to: viewer.server#graph
+  - to: viewer.server#doc
+
+rules:
+  - The viewer never edits the model.
+  - Status must not rely on colour alone.
+  - Raw HTML in a document is shown as text, never run.
+
+requirements:
+  - id: lifts-links
+    text: A link between two nodes inside groups is drawn between the deepest nodes on screen.
+    tests: test/view.test.ts
+    match: lifts edges from inside a group

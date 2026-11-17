@@ -1,0 +1,36 @@
+kind: app
+role: the armature command
+hub: true
+tech: [node, typescript]
+code: [src/cli.ts, bin/**]
+# Started by bin/armature.mjs from the built dist/, which the code index cannot follow.
+entry: [src/cli.ts]
+tests: [test/consistency.test.ts]
+
+accepts:
+  - id: commands
+    via: cli
+    takes: Command
+    gives: Answer
+    note: Every command "armature help" lists.
+
+calls:
+  - to: core.compiler#compile
+  - to: core.code-graph#index
+  - to: core.answers#text
+  - to: core.model-tools#edit
+  - to: agent.hooks#events
+    via: in-process
+    note: '"armature hook <name>" is how Claude Code reaches the hooks.'
+  - to: agent.mcp#serve
+  - to: viewer.server#serve
+
+rules:
+  - A new command needs a line in the help text and a row in SPEC.md section 9.1. test/consistency.test.ts fails without them.
+  - Exit 1 means the model has errors, 2 means the command was used wrongly. Keep it that way; CI depends on it.
+
+requirements:
+  - id: every-command-is-documented
+    text: Every command the CLI runs is in its help text and in the spec.
+    tests: test/consistency.test.ts
+    match: documents every command the CLI runs

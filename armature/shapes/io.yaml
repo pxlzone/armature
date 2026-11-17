@@ -1,0 +1,32 @@
+# What goes in and out at the edges of the tool.
+Command:
+  note: One command line.
+  fields:
+    cmd: string
+    args: string[]
+    flags: map<string,string>
+
+Answer:
+  note: Plain text for a terminal or an agent.
+  fields:
+    text: string
+
+HookInput:
+  note: What Claude Code passes a hook on stdin. Only the fields the hooks read.
+  fields:
+    cwd: string
+    session_id: string?
+    prompt: string?
+    permission_mode: string?
+    tool_input: json?
+    stop_hook_active: bool?
+
+Prompt:
+  note: Text sent to a model through the claude CLI.
+  fields:
+    text: string
+
+MarkdownText:
+  note: One document of the repo, as written.
+  fields:
+    text: string

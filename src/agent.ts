@@ -11,7 +11,8 @@ import { buildCodeIndex, readCodeIndex } from './code.js';
 import { contextText } from './context.js';
 import { formatProblems, orient, ownerOf } from './render.js';
 import { isDocPath } from './docs.js';
-import { gateOn, PLANNING_WORDS, planGate, planModeNote, planningNote, writeGate } from './gate.js';
+import { bashGate, gateOn, PLANNING_WORDS, planGate, planModeNote, planningNote, targetOf, writeGate } from './gate.js';
+import { notePendingApproval, settleApproval } from './approve.js';
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = path.join(PKG_ROOT, 'bin', 'armature.mjs');
@@ -24,15 +25,26 @@ const LEGACY_PLUGIN = 'brain@agent-brain';
 const LEGACY_MARKET = 'agent-brain';
 
 function readStdin(): Promise<string> {
+  // The launcher has already read the input, to decide whether this repo has a model at all.
+  const given = (globalThis as { __ARMATURE_STDIN__?: unknown }).__ARMATURE_STDIN__;
+  if (typeof given === 'string') return Promise.resolve(given);
   return new Promise((resolve) => {
     if (process.stdin.isTTY) return resolve('');
     let data = '';
+    // A hook that is given no input must not hang. The timer is cleared once the input ends:
+    // left running, it kept every hook alive for its full length.
+    const giveUp = setTimeout(() => resolve(data), 1500);
     process.stdin.setEncoding('utf8');
     process.stdin.on('data', (c) => (data += c));
-    process.stdin.on('end', () => resolve(data));
-    setTimeout(() => resolve(data), 1500);
+    process.stdin.on('end', () => {
+      clearTimeout(giveUp);
+      resolve(data);
+    });
   });
 }
+
+/** The tools that write files: Claude Code's own, and the usual MCP file servers. */
+export const WRITE_TOOLS = 'Edit|Write|MultiEdit|NotebookEdit|mcp__.*__(write_file|edit_file|create_file|move_file|write_text_file)';
 
 function parseJson(text: string): any {
   try {
@@ -68,6 +80,12 @@ export function syncRules(root: string, opts: { dryRun?: boolean } = {}): { writ
       lines.push('## Rules');
       lines.push('');
       for (const r of n.rules) lines.push(`- ${r.text}`);
+    }
+    if (n.never.length) {
+      lines.push('');
+      lines.push('## Boundaries');
+      lines.push('');
+      for (const b of n.never) lines.push(`- Never import code from \`${b.node}\`, and never call, send to, read or write it${b.why ? `: ${b.why}` : '.'} \`armature check\` fails when this is broken.`);
     }
     if (n.interfaces.length) {
       lines.push('');
@@ -172,6 +190,15 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
       // Before a Write or Edit: new source files need a node, planned nodes need an approved change,
       // and approving a change asks the person.
       const verdict = writeGate(root, input.tool_input ?? {});
+      if (!verdict) return;
+      // If the person says yes, the edit goes through and the approval is recorded after it.
+      if (verdict.approves) notePendingApproval(root, verdict.approves);
+      decide(verdict.decision, verdict.reason);
+      return;
+    }
+    if (name === 'pre-bash') {
+      // Before a shell command: the same rules, for what the command plainly does.
+      const verdict = bashGate(root, String(input.tool_input?.command ?? ''), typeof input.cwd === 'string' ? input.cwd : root);
       if (verdict) decide(verdict.decision, verdict.reason);
       return;
     }
@@ -187,18 +214,20 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
           plan = '';
         }
       }
-      const missing = planGate(plan, modelDir(root), newPlanPath(docsDir(root), modelDir(root)));
+      const missing = planGate(plan, modelDir(root), newPlanPath(docsDir(root), modelDir(root)), root);
       if (missing) decide('deny', missing);
       return;
     }
     if (name === 'post-edit') {
-      const file: string = input.tool_input?.file_path ?? '';
+      const file: string = targetOf(input.tool_input) ?? '';
       if (!file) return;
       const rel = path.relative(root, path.resolve(root, file)).replace(/\\/g, '/');
       if (rel.startsWith('..') || rel.startsWith(`${modelDir(root)}/.cache/`)) return;
       const inArch = rel.startsWith(`${modelDir(root)}/`);
       const isDoc = isDocPath(rel);
       if (!inArch && !isDoc) return;
+      // An approval the person has just confirmed is recorded with what the change holds now.
+      if (inArch) settleApproval(root, false);
       const g = compile(root);
       const say: string[] = [];
       if (inArch) {
@@ -226,6 +255,7 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
       return;
     }
     if (name === 'stop') {
+      settleApproval(root, true);
       if (input.stop_hook_active) return;
       const changed = changedFiles(root);
       if (changed.length === 0) return;
@@ -274,9 +304,10 @@ function mergeHooks(settingsPath: string): boolean {
   const want: Array<[string, string | undefined, string]> = [
     ['SessionStart', undefined, cmd('session-start')],
     ['UserPromptSubmit', undefined, cmd('prompt')],
-    ['PreToolUse', 'Edit|Write|MultiEdit', cmd('pre-write')],
+    ['PreToolUse', WRITE_TOOLS, cmd('pre-write')],
+    ['PreToolUse', 'Bash', cmd('pre-bash')],
     ['PreToolUse', 'ExitPlanMode', cmd('pre-plan')],
-    ['PostToolUse', 'Edit|Write|MultiEdit', cmd('post-edit')],
+    ['PostToolUse', WRITE_TOOLS, cmd('post-edit')],
     ['Stop', undefined, cmd('stop')],
   ];
   let changed = false;
@@ -290,7 +321,13 @@ function mergeHooks(settingsPath: string): boolean {
       entry.hooks = (entry.hooks ?? []).filter((h: any) => !(typeof h.command === 'string' && OUR_HOOK.test(h.command) && !wanted.has(h.command)));
       if (entry.hooks.length !== before) changed = true;
     }
-    const present = list.some((entry) => (entry.hooks ?? []).some((h: any) => h.command === command));
+    const existing = list.find((entry) => (entry.hooks ?? []).some((h: any) => h.command === command));
+    const present = !!existing;
+    // An entry written by an earlier version may match fewer tools.
+    if (existing && matcherText && existing.matcher !== matcherText) {
+      existing.matcher = matcherText;
+      changed = true;
+    }
     if (!present) {
       const entry: any = { hooks: [{ type: 'command', command }] };
       if (matcherText) entry.matcher = matcherText;
@@ -509,14 +546,23 @@ ${fetch}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # Requirements count as verified only with a test report newer than the code. This job runs
+      # no tests, so a finished change is reported as "cannot be checked here", never failed for it.
+      # To have CI check requirements, run your tests with a JUnit reporter into
+      # armature/.cache/reports/ before the next step.
       - name: Check the model
         # Errors fail the job. Warnings where the model is wrong show as warnings on the pull
         # request; warnings where it is only incomplete show as notices.
         # While the team adopts the model, uncomment the next line to report without blocking.
         # continue-on-error: true
+        # To stop the model from getting worse, commit a baseline ("armature check --update-baseline")
+        # and add: --new --fail-on wrong
         run: node .armature/plugin/bin/armature.mjs check --annotate
       - name: Rule files match the model
         run: node .armature/plugin/bin/armature.mjs sync-rules --check
+      - name: What this pull request changes in the model
+        if: github.event_name == 'pull_request'
+        run: node .armature/plugin/bin/armature.mjs diff "origin/\${{ github.base_ref }}" >> "$GITHUB_STEP_SUMMARY"
       - name: Diagram
         if: always()
         run: node .armature/plugin/bin/armature.mjs export architecture.html

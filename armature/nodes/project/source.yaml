@@ -1,0 +1,5 @@
+kind: store
+role: the project's own files
+holds:
+  - id: files
+    note: Everything git tracks, and new files it does not ignore.

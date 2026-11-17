@@ -29,7 +29,10 @@ copy('schemas/armature.schema.json');
 copy('skills');
 
 // Launchers. The plugin's bin/ is on the PATH of Claude's Bash tool, so agents can run "armature show x".
-const launcher = `import { existsSync } from 'node:fs';\nconst cli = new URL('../dist/cli.mjs', import.meta.url);\nif (!existsSync(cli)) {\n  console.error('The armature plugin is incomplete: dist/cli.mjs is missing. Reinstall the plugin.');\n  process.exit(1);\n}\nawait import(cli.href);\n`;
+// The launcher starts with the same model check as bin/armature.mjs: taken from that file, up to where it finds the CLI.
+const devLauncher = fs.readFileSync(path.join(root, 'bin', 'armature.mjs'), 'utf8');
+const head = devLauncher.slice(devLauncher.indexOf('import { existsSync }'), devLauncher.indexOf('const built ='));
+const launcher = `${head}const cli = new URL('../dist/cli.mjs', import.meta.url);\nif (!existsSync(cli)) {\n  console.error('The armature plugin is incomplete: dist/cli.mjs is missing. Reinstall the plugin.');\n  process.exit(1);\n}\nawait import(cli.href);\n`;
 fs.mkdirSync(path.join(out, 'bin'), { recursive: true });
 fs.writeFileSync(path.join(out, 'bin', 'armature.mjs'), `#!/usr/bin/env node\n${launcher}`);
 // A shell wrapper, so it works whatever package.json sits above the plugin folder.
@@ -51,6 +54,8 @@ const write = (rel, body) => {
 };
 const bin = '"${CLAUDE_PLUGIN_ROOT}/bin/armature.mjs"';
 const hook = (name) => [{ type: 'command', command: `node ${bin} hook ${name}` }];
+// The tools that write files: Claude Code's own, and the usual MCP file servers. Keep in step with WRITE_TOOLS in src/agent.ts.
+const WRITE_TOOLS = 'Edit|Write|MultiEdit|NotebookEdit|mcp__.*__(write_file|edit_file|create_file|move_file|write_text_file)';
 write('.claude-plugin/plugin.json', {
   name: 'armature',
   version: pkg.version,
@@ -63,10 +68,11 @@ write('hooks/hooks.json', {
     SessionStart: [{ hooks: hook('session-start') }],
     UserPromptSubmit: [{ hooks: hook('prompt') }],
     PreToolUse: [
-      { matcher: 'Edit|Write|MultiEdit', hooks: hook('pre-write') },
+      { matcher: WRITE_TOOLS, hooks: hook('pre-write') },
+      { matcher: 'Bash', hooks: hook('pre-bash') },
       { matcher: 'ExitPlanMode', hooks: hook('pre-plan') },
     ],
-    PostToolUse: [{ matcher: 'Edit|Write|MultiEdit', hooks: hook('post-edit') }],
+    PostToolUse: [{ matcher: WRITE_TOOLS, hooks: hook('post-edit') }],
     Stop: [{ hooks: hook('stop') }],
   },
 });

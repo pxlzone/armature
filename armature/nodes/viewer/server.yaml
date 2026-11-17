@@ -1,0 +1,28 @@
+kind: service
+role: serves graph and documents
+tech: [node]
+code: [src/server.ts]
+
+accepts:
+  - id: graph
+    via: http
+    route: GET /graph.json
+    gives: Graph
+  - id: doc
+    via: http
+    route: GET /doc
+    gives: MarkdownText
+    note: One Markdown file of the repo, by path. Nothing outside the repo and nothing that is not Markdown.
+  - id: serve
+    via: in-process
+    takes: Command
+    note: '"armature view" starts it; "armature export" writes the same page with the graph inside.'
+
+reads: [project.model#documents]
+calls:
+  - to: core.compiler#compile
+  - to: core.code-graph#index
+
+todos:
+  - text: No test covers the server or the static export.
+    kind: debt

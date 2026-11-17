@@ -5,7 +5,11 @@ import { compile, confirmShapes, findRoot } from './compile.js';
 import { MODEL_DIR, modelDir } from './paths.js';
 import { ownerOf } from './render.js';
 import { watchSources } from './watch.js';
-import { activity, docsText, formatProblems, impact, islands, orient, show, status, techText, todos, where } from './render.js';
+import { activity, docsText, formatProblems, impact, islands, orient, pathText, show, status, techText, todos, traceText, where } from './render.js';
+import { approveChange } from './approve.js';
+import { newSince, readBaseline, writeBaseline } from './baseline.js';
+import { diffModel, diffText } from './diff.js';
+import { rename } from './rename.js';
 import { exportHtml, serve } from './server.js';
 import { hook, install, installTeam, syncRules } from './agent.js';
 import { buildCodeIndex, readCodeIndex } from './code.js';
@@ -20,9 +24,13 @@ const HELP = `armature: read, check and view the architecture model in armature/
 
 Reading
   armature orient                  Short digest of the whole system
-  armature show <ref> [--depth n]  A node, node#interface, Shape, node:requirement, flow or change
+  armature show <ref> [--depth n]  A node, node#interface, node~link, Shape, node:requirement, flow or change.
+                                A name that means several things takes the kind in front: flow:checkout
   armature where <file>            The node that owns a file, with its rules
-  armature impact <ref>            What depends on a node, interface or shape
+  armature impact <ref> [--depth n]   What depends on a node, interface, link or shape, and what lies further along the data
+  armature path <node> <node>      How data gets from one node to another along the declared links
+  armature trace <Shape|@tag>      Where a shape, or every field tagged @pii, is held and where it leaves the system
+  armature diff [git-ref] [--json] What the model declares now against a commit or branch (default HEAD)
   armature status                  Counts per status, changes, todos
   armature docs [ref] [--loose]    Plans and documents about a node, shape, flow or change, or the whole library;
                                 --loose lists documents not yet tied to the model
@@ -38,7 +46,8 @@ Code graph
   armature search "<words>"        Files ranked by how well they match, with matching symbols
   armature callers <symbol>        Where a symbol is used: files, enclosing functions, nodes, tests
   armature tests <file|node|symbol>   Test files that exercise it
-  armature drift [node]            What the code does at run time that the model does not declare, and the reverse
+  armature drift [node]            What the code does at run time that the model does not declare, the reverse,
+                                and which nodes the check could not read at all
   armature hotspots [node]         Files that change most and are largest
   armature shapes [--sync]         Shapes whose fields differ from the code; --sync rewrites them from the code
   armature summarize [--node n] [--limit n] [--yes]   One-line file summaries by a model (costs money; asks first)
@@ -48,10 +57,17 @@ Code graph
 Checking
   armature islands [node]           Dead code: files no entry point reaches, by node
   armature tech [id]               Technologies from armature/tech.yaml and who uses them
-  armature check [--json] [--annotate] [--only errors|wrong|incomplete]
+  armature check [--json] [--annotate] [--only errors|wrong|incomplete] [--new] [--fail-on wrong|warnings]
                                 Errors, then warnings where the model is wrong, then where it is incomplete.
-                                Exits 1 on errors. --annotate adds GitHub Actions annotations
+                                Exits 1 on errors. --annotate adds GitHub Actions annotations.
+                                --new shows only warnings that are not in the baseline; --fail-on makes
+                                warnings of that kind exit 1 too. --update-baseline records today's warnings
   armature confirm [Shape...]      Record shape sources as read, so later edits flag them stale
+
+Changing the model
+  armature approve <change> [--by name]   Approve a change and record who approved which elements. A person runs this
+  armature rename <ref> <new>      Rename a node (new is its full id, so this also moves it), interface, link,
+                                requirement, shape, flow or change, and rewrite every reference to it
 
 Viewing
   armature view [--port n] [--github]   Local diagram with live reload
@@ -75,7 +91,7 @@ function parse(argv: string[]): { cmd: string; args: string[]; flags: Record<str
   const [cmd = 'help', ...rest] = argv;
   const args: string[] = [];
   const flags: Record<string, string | boolean> = {};
-  const valued = new Set(['root', 'depth', 'port', 'kind', 'days', 'budget', 'files', 'node', 'limit', 'n', 'skip', 'marketplace', 'ref', 'only']);
+  const valued = new Set(['root', 'depth', 'port', 'kind', 'days', 'budget', 'files', 'node', 'limit', 'n', 'skip', 'marketplace', 'ref', 'only', 'fail-on', 'by']);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a.startsWith('--')) {
@@ -150,9 +166,38 @@ async function main(): Promise<void> {
       return;
     }
     case 'impact':
-      if (!args[0]) return fail('Usage: armature impact <ref>');
-      console.log(impact(compile(root), args[0]));
+      if (!args[0]) return fail('Usage: armature impact <ref> [--depth n]');
+      console.log(impact(compile(root), args[0], Number(flags.depth) || 3));
       return;
+    case 'path':
+      if (!args[1]) return fail('Usage: armature path <node> <node>');
+      console.log(pathText(compile(root), args[0], args[1]));
+      return;
+    case 'trace':
+      if (!args[0]) return fail('Usage: armature trace <Shape|@tag>');
+      await buildCodeIndex(root);
+      console.log(traceText(compile(root), args[0]));
+      return;
+    case 'diff': {
+      const d = diffModel(root, args[0] ?? 'HEAD');
+      console.log(flags.json ? JSON.stringify(d, null, 2) : diffText(d));
+      if (typeof d === 'string') process.exit(2);
+      return;
+    }
+    case 'approve':
+      if (!args[0]) return fail('Usage: armature approve <change> [--by name]');
+      console.log(approveChange(root, args[0], typeof flags.by === 'string' ? flags.by : undefined));
+      return;
+    case 'rename': {
+      if (!args[1]) return fail('Usage: armature rename <ref> <new name>');
+      console.log(rename(root, args[0], args[1]));
+      // Rule files are named after node ids and quote the model: bring them along when the repo has them.
+      if (fs.existsSync(path.join(root, '.claude', 'rules'))) {
+        const r = syncRules(root);
+        if (r.written || r.removed) console.log(`Rule files: ${r.written} written, ${r.removed} removed.`);
+      }
+      return;
+    }
     case 'status':
       console.log(status(compile(root, { github: flags.github === true })));
       return;
@@ -283,9 +328,28 @@ async function main(): Promise<void> {
       const g = compile(root);
       const only = typeof flags.only === 'string' ? flags.only : null;
       if (only && only !== 'wrong' && only !== 'incomplete' && only !== 'errors') return fail('--only takes errors, wrong or incomplete.');
-      const shown = only ? g.problems.filter((p) => (only === 'errors' ? p.level === 'error' : p.level === 'warning' && p.group === only)) : g.problems;
+      const failOn = typeof flags['fail-on'] === 'string' ? flags['fail-on'] : null;
+      if (failOn && failOn !== 'wrong' && failOn !== 'warnings') return fail('--fail-on takes wrong or warnings.');
+      if (flags['update-baseline']) {
+        const n = writeBaseline(root, g.problems);
+        console.log(`Wrote ${modelDir(root)}/baseline.json: ${n} warning${n === 1 ? ' is' : 's are'} the baseline now. "armature check --new" shows only what comes after; commit the file.`);
+        return;
+      }
+      // With --new, warnings the baseline already holds are set aside: the question is whether the model got worse.
+      let pool = g.problems;
+      let known = 0;
+      if (flags.new) {
+        const base = readBaseline(root);
+        if (!base) return fail(`No baseline yet. Run "armature check --update-baseline" first.`);
+        pool = newSince(g.problems, base);
+        known = g.problems.length - pool.length;
+      }
+      const shown = only ? pool.filter((p) => (only === 'errors' ? p.level === 'error' : p.level === 'warning' && p.group === only)) : pool;
       if (flags.json) console.log(JSON.stringify(shown, null, 2));
-      else console.log(formatProblems(shown));
+      else {
+        console.log(formatProblems(shown, g.accepted));
+        if (known) console.log(`${known} warning${known === 1 ? '' : 's'} already in the baseline ${known === 1 ? 'is' : 'are'} not shown.`);
+      }
       if (flags.annotate) {
         // GitHub Actions workflow commands: each problem shows on the pull request at its file.
         const esc = (t: string): string => t.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
@@ -296,6 +360,7 @@ async function main(): Promise<void> {
         }
       }
       if (g.problems.some((p) => p.level === 'error')) process.exit(1);
+      if (failOn && pool.some((p) => p.level === 'warning' && (failOn === 'warnings' || p.group === 'wrong'))) process.exit(1);
       return;
     }
     case 'confirm': {

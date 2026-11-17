@@ -1,0 +1,42 @@
+kind: library
+shared: false
+role: text answers for agents
+tech: [typescript]
+code:
+  - src/render.ts
+  - src/codeview.ts
+  - src/context.ts
+  - src/diff.ts
+  - src/summarize.ts
+  - src/eval.ts
+tests: [test/deep.test.ts, test/tools.test.ts, test/sound.test.ts]
+
+accepts:
+  - id: text
+    via: in-process
+    takes: Graph
+    gives: Answer
+    note: orient, show, impact, path, trace, drift, context and the rest. Each takes a compiled graph and returns plain text.
+
+reads: [project.cache#summaries]
+writes: [project.cache#summaries]
+calls:
+  - to: core.compiler#compile
+    note: diff compiles the model at a git ref beside the one in the working tree.
+  - to: outside.git#commands
+  - to: outside.claude-cli#prompt
+    note: File summaries and the live-agent evaluation. Both cost money and run only with --yes.
+
+rules:
+  - An answer is read by an agent with a budget. Say the most useful thing first, and cap every list.
+  - When an answer rests on something that was not checked, say so in the answer.
+
+requirements:
+  - id: diff-lists-model-changes
+    text: The diff against a git ref lists what was added, changed and removed, in the model's own terms.
+    tests: test/tools.test.ts
+    match: lists what a branch adds, changes and removes
+  - id: follows-data
+    text: Path, trace and impact follow data across several links, through shapes that embed a shape, and to where it leaves the system.
+    tests: test/sound.test.ts
+    match: follows data across several links

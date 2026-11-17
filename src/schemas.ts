@@ -1,5 +1,7 @@
 // Data shapes read from code: Drizzle tables, Zod objects, Pydantic models, and SQL tables with
 // every later ALTER TABLE replayed onto the CREATE.
+import nodeFs from 'node:fs';
+import nodePath from 'node:path';
 import type { CodeIndex, SchemaField } from './code.js';
 
 export interface CodeShape {
@@ -49,6 +51,19 @@ export function sameName(a: string, b: string): boolean {
   return a.replace(/_/g, '').toLowerCase() === b.replace(/_/g, '').toLowerCase();
 }
 
+/** The state a change file gives, or undefined when there is no such change. */
+function changeState(archDir: string, id: string): string | undefined {
+  for (const ext of ['yaml', 'yml']) {
+    try {
+      const text = nodeFs.readFileSync(nodePath.join(archDir, 'changes', `${id}.${ext}`), 'utf8');
+      return text.match(/^state:\s*["']?([a-z]+)/m)?.[1] ?? 'proposed';
+    } catch {
+      /* try the other extension */
+    }
+  }
+  return undefined;
+}
+
 /**
  * Rewrites the `fields:` of every shape that has a `source:` the code index can read, so the model
  * file matches the code. Keeps the model's tags (such as @pii). Returns the shapes changed.
@@ -76,6 +91,11 @@ export async function syncShapeFiles(archDir: string, idx: CodeIndex, only: stri
         const prev = Object.entries(old).find(([k]) => sameName(k, f.name));
         const tags = prev ? String(prev[1]).split(/\s+/).filter((p) => p.startsWith('@')) : [];
         fields[f.name] = [f.type, ...tags].join(' ');
+      }
+      // A shape that an unfinished change is altering keeps the fields the code does not have yet: they are planned.
+      const modify = item.value.get('modify');
+      if (modify && changeState(archDir, String(modify)) !== 'done') {
+        for (const [k, v] of Object.entries(old)) if (!code.fields.some((f) => sameName(f.name, k))) fields[k] = String(v);
       }
       if (JSON.stringify(fields) === JSON.stringify(old)) continue;
       item.value.set('fields', doc.createNode(fields));

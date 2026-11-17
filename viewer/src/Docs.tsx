@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Marked } from 'marked';
 import type { Change, DocInfo, DocLink, DocRef, Graph } from '../../src/types.ts';
+import { refIndexOf, resolveRef as resolveModelRef } from '../../src/refs.ts';
 import type { Index } from './view.ts';
 
 const escapeHtml = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -38,32 +39,10 @@ md.use({
   ],
 });
 
-/** Resolves a reference written in a document the way the compiler does. */
+/** Resolves a reference written in a document with the compiler's own resolver. */
 export function resolveRef(graph: Graph, text: string): Omit<DocRef, 'text' | 'count'> | null {
-  const node = (ref: string): string | null => {
-    if (graph.nodes.some((n) => n.id === ref)) return ref;
-    const hits = graph.nodes.filter((n) => n.id.endsWith(`.${ref}`));
-    return hits.length === 1 ? hits[0].id : null;
-  };
-  if (graph.nodes.some((n) => n.id === text)) return { type: 'node', id: text, node: text };
-  if (text.includes('#')) {
-    const [n, i] = text.split('#');
-    const nid = node(n);
-    return nid && graph.nodes.find((x) => x.id === nid)!.interfaces.some((x) => x.id === i) ? { type: 'interface', id: `${nid}#${i}`, node: nid } : null;
-  }
-  if (text.includes(':')) {
-    const [n, q] = text.split(':');
-    const nid = node(n);
-    return nid && graph.nodes.find((x) => x.id === nid)!.requirements.some((x) => x.id === q) ? { type: 'requirement', id: `${nid}:${q}`, node: nid } : null;
-  }
-  if (graph.shapes.some((x) => x.id === text)) return { type: 'shape', id: text };
-  if (graph.flows.some((f) => f.id === text)) return { type: 'flow', id: text };
-  if (graph.changes.some((c) => c.id === text)) return { type: 'change', id: text };
-  const nid = node(text);
-  if (nid) return { type: 'node', id: nid, node: nid };
-  const dot = text.indexOf('.');
-  const shape = dot > 0 ? graph.shapes.find((x) => x.id === text.slice(0, dot)) : undefined;
-  return shape?.fields.some((f) => f.name === text.slice(dot + 1)) ? { type: 'shape', id: shape.id } : null;
+  const r = resolveModelRef(refIndexOf(graph), text);
+  return r ? { type: r.type, id: r.id, node: r.node } : null;
 }
 
 /** What a document says about itself in one line: its computed plan status, or the status typed in it. */

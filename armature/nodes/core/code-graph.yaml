@@ -1,0 +1,40 @@
+kind: library
+shared: false
+role: symbols, imports, run-time hints
+tech: [typescript, tree-sitter]
+code:
+  - src/code.ts
+  - src/reach.ts
+  - src/runtime.ts
+  - src/schemas.ts
+  - src/history.ts
+  - src/watch.ts
+tests: [test/code.test.ts, test/islands.test.ts, test/deep.test.ts]
+
+accepts:
+  - id: index
+    via: in-process
+    gives: CodeIndex
+    note: buildCodeIndex(root) parses changed files; the compiler reads the result and asks for drift and dead code.
+
+reads: [project.source#files, project.cache#history]
+writes: [project.cache#code-index, project.cache#history]
+calls:
+  - to: outside.git#commands
+
+rules:
+  - A detector is a heuristic. When it cannot tell, it reports nothing and the node stays unchecked.
+  - Bump EXTRACTOR in src/code.ts when extraction changes, so unchanged files are parsed again.
+
+requirements:
+  - id: finds-dead-code
+    text: A code file no entry point reaches is reported, and one that an entry point reaches is not.
+    tests: test/islands.test.ts
+    match: finds entry points and reports only truly dead files
+  - id: skips-unchanged-files
+    text: A second index run reads only the files that changed.
+    tests: test/code.test.ts
+    match: reuses unchanged files
+  - id: reads-shapes-from-code
+    text: A shape bound to a Drizzle, Zod, Pydantic or SQL source takes its fields from that source.
+    tests: test/deep.test.ts

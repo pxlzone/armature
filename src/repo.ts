@@ -117,6 +117,8 @@ export interface TestCase {
   name: string;
   file: string;
   state: 'passed' | 'failed' | 'skipped';
+  /** When the report holding this case was written (ms). */
+  at?: number;
 }
 
 function arr<T>(v: T | T[] | undefined): T[] {

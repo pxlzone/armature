@@ -235,7 +235,8 @@ export function driftText(g: Graph, ref?: string): string {
   if (!g.code) return NO_INDEX;
   const inside = (id: string): boolean => !ref || id === ref || id.startsWith(`${ref}.`);
   const reports = g.runtime.filter((r) => inside(r.node) && (r.undeclared.length || r.unseen.length));
-  if (!reports.length) return ref ? `The code of ${ref} matches the declared links.` : 'The code matches the declared links.';
+  const cover = detectorNote(g, inside);
+  if (!reports.length) return [ref ? `Nothing found in the code of ${ref} contradicts the declared links.` : 'Nothing found in the code contradicts the declared links.', ...cover].join('\n');
   const out: string[] = [];
   if (!ref) {
     const und = reports.reduce((n, r) => n + r.undeclared.length, 0);
@@ -249,7 +250,25 @@ export function driftText(g: Graph, ref?: string): string {
     for (const u of r.unseen.slice(0, ref ? 40 : 4)) out.push(`  in model, not seen in code: ${u.kind} ${u.what} (${u.op})`);
   }
   out.push('Detected from route registrations, HTTP paths in strings, Temporal task queues and workflow starts, Drizzle and Supabase table access, and SQL text. Fix the model or the code, whichever is wrong.');
+  out.push(...cover);
   return out.join('\n');
+}
+
+/** What the drift check could see, per node: no finding on a node it cannot read means nothing. */
+function detectorNote(g: Graph, inside: (id: string) => boolean): string[] {
+  const all = g.detectors.filter((d) => inside(d.node));
+  if (!all.length) return [];
+  const names: Record<string, string> = { route: 'routes', http: 'HTTP calls', queue: 'queues', workflow: 'workflows', table: 'tables' };
+  const seen = all.filter((d) => d.kinds.length);
+  const unread = all.filter((d) => !d.kinds.length && d.indexed === 0);
+  const blank = all.filter((d) => !d.kinds.length && d.indexed > 0);
+  const out: string[] = [];
+  if (seen.length) out.push(`Checked: ${seen.map((d) => `${d.node} (${d.kinds.map((k) => names[k] ?? k).join(', ')})`).join('; ')}.`);
+  const not: string[] = [];
+  if (unread.length) not.push(`${unread.map((d) => d.node).join(', ')} (no file in a language the code index reads)`);
+  if (blank.length) not.push(`${blank.map((d) => d.node).join(', ')} (no route, table, queue or HTTP pattern the index knows)`);
+  if (not.length) out.push(`Not checked: ${not.join('; ')}. Their links and interfaces are unverified, not confirmed.`);
+  return out;
 }
 
 export function hotspotsText(g: Graph, idx: CodeIndex | null, root: string, ref?: string): string {
@@ -476,7 +495,8 @@ export function contextPack(g: Graph, idx: CodeIndex, root: string, task: string
   const tests = testsForFiles(idx, topFiles.slice(0, 8)).slice(0, 6);
   if (tests.length) push('', '## Tests to run', ...tests.map((t) => `- ${t}`));
   const docs = new Set<string>();
-  for (const n of shown) for (const d of n.docs.filter((x) => x.how !== 'mentions').slice(0, 2)) docs.add(d.path);
+  const replaced = new Set(g.docs.filter((d) => d.supersededBy).map((d) => d.path));
+  for (const n of shown) for (const d of n.docs.filter((x) => x.how !== 'mentions' && !replaced.has(x.path)).slice(0, 2)) docs.add(d.path);
   if (docs.size) push('', '## Documents', ...[...docs].slice(0, 4).map((d) => `- ${d}: ${g.docs.find((x) => x.path === d)?.title ?? ''}`));
   push('', 'More: armature map <node or file>, armature callers <symbol>, armature docs <node>.');
   return { nodes: topNodes, files, text: out.join('\n') };
