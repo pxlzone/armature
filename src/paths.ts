@@ -1,0 +1,46 @@
+// Where the model lives in a repo. Kept apart from the compiler so hooks that run before a tool
+// call can find the folder without loading everything else.
+import fs from 'node:fs';
+import path from 'node:path';
+import YAML from 'yaml';
+
+/** The folder that holds the model. */
+export const MODEL_DIR = 'armature';
+/** The name the folder had before. A repo that still uses it is read, with a notice to rename it. */
+export const LEGACY_DIR = 'arch';
+
+/** The model folder of a repo: armature/, or arch/ where the folder has not been renamed yet. */
+export function modelDir(root: string): string {
+  if (fs.existsSync(path.join(root, MODEL_DIR, 'system.yaml'))) return MODEL_DIR;
+  return fs.existsSync(path.join(root, LEGACY_DIR, 'system.yaml')) ? LEGACY_DIR : MODEL_DIR;
+}
+
+/** True when a repo has a model, under either name. */
+export function hasModel(dir: string): boolean {
+  return fs.existsSync(path.join(dir, MODEL_DIR, 'system.yaml')) || fs.existsSync(path.join(dir, LEGACY_DIR, 'system.yaml'));
+}
+
+/** A `docs:` value from system.yaml as a clean folder relative to the repo, or null when it cannot be one. */
+export function cleanDocsSetting(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const s = value.trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+  if (!s || s.startsWith('/') || /^[a-z]:/i.test(s) || s.split('/').includes('..')) return null;
+  return s;
+}
+
+/** The folder that holds the documents: `docs:` in system.yaml, or the docs folder inside the model. */
+export function docsDir(root: string): string {
+  const dir = modelDir(root);
+  let value: unknown;
+  try {
+    value = YAML.parse(fs.readFileSync(path.join(root, dir, 'system.yaml'), 'utf8'))?.docs;
+  } catch {
+    value = undefined;
+  }
+  return cleanDocsSetting(value) ?? `${dir}/docs`;
+}
+
+/** Where a new plan goes: one folder per kind inside the model, or beside the plans in a repo's own folder. */
+export function newPlanPath(docs: string, dir: string): string {
+  return docs === `${dir}/docs` ? `${docs}/plans/<id>.md` : `${docs}/<id>-plan.md`;
+}

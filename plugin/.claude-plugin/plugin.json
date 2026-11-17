@@ -1,0 +1,13 @@
+{
+  "name": "armature",
+  "version": "0.1.0",
+  "description": "Architecture model in armature/: orientation at session start, context for the first prompt, planning through the model, model and document checks after edits, path-scoped rules, and an MCP server for the code graph.",
+  "author": {
+    "name": "armature"
+  },
+  "keywords": [
+    "architecture",
+    "code-graph",
+    "documentation"
+  ]
+}

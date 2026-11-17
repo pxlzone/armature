@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "armature": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/bin/armature.mjs",
+        "mcp"
+      ]
+    }
+  }
+}

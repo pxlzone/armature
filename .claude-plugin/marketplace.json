@@ -1,0 +1,11 @@
+{
+  "name": "armature",
+  "owner": { "name": "armature" },
+  "plugins": [
+    {
+      "name": "armature",
+      "source": "./plugin",
+      "description": "Architecture model in armature/: orientation at session start, context for the first prompt, planning through the model, model and document checks after edits, path-scoped rules, and an MCP server for the code graph."
+    }
+  ]
+}

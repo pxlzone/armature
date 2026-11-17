@@ -1,0 +1,5 @@
+/node_modules
+/dist
+viewer/dist
+.cache
+.claude/launch.json

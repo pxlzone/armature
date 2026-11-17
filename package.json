@@ -1,0 +1,46 @@
+{
+  "name": "armature",
+  "version": "0.1.0",
+  "private": true,
+  "engines": { "node": ">=22" },
+  "type": "module",
+  "description": "A small language for describing a software system once and reading it as a diagram (people) or queryable context (agents).",
+  "bin": {
+    "armature": "bin/armature.mjs"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && vite build --config viewer/vite.config.ts",
+    "build:cli": "tsc -p tsconfig.json",
+    "build:viewer": "vite build --config viewer/vite.config.ts",
+    "build:plugin": "node scripts/build-plugin.mjs",
+    "prepare": "npm run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p viewer/tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@vscode/tree-sitter-wasm": "^0.3.1",
+    "ajv": "^8.20.0",
+    "fast-xml-parser": "^5.12.1",
+    "marked": "^18.2.1",
+    "picomatch": "^4.0.7",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@tabler/icons-react": "^3.52.0",
+    "@types/node": "^26.6.6",
+    "@types/picomatch": "^4.0.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "elkjs": "^0.12.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vite-plugin-singlefile": "^2.3.4",
+    "vitest": "^5.1.0"
+  }
+}
