@@ -264,13 +264,17 @@ export function App() {
       }
     };
     if (lens === 'flow' && flow) {
-      const steps = step >= 0 ? [flow.steps[step]].filter(Boolean) : flow.steps;
-      for (const s of steps) {
-        if (s.edge) addEdge(s.edge);
-        addNode(s.from);
-        addNode(s.to);
-      }
-      return { nodes, edges };
+      const add = (steps: typeof flow.steps): { nodes: Set<string>; edges: Set<string> } => {
+        for (const s of steps) {
+          if (s.edge) addEdge(s.edge);
+          addNode(s.from);
+          addNode(s.to);
+        }
+        return { nodes: new Set(nodes), edges: new Set(edges) };
+      };
+      const current = add(step >= 0 ? [flow.steps[step]].filter(Boolean) : flow.steps);
+      // `whole` is every step of the flow, whichever one is playing.
+      return { ...current, whole: step >= 0 ? add(flow.steps) : current };
     }
     if (lens === 'data' && shapeId) {
       for (const e of graph.edges) if (e.shapes.includes(shapeId) || e.returns.includes(shapeId)) addEdge(e.id);
@@ -325,6 +329,23 @@ export function App() {
     setTf({ k, x: width / 2 - ((x1 + x2) / 2) * k, y: height / 2 - ((y1 + y2) / 2) * k });
   }, [view]);
 
+  // A selected flow owns the map: only its own nodes and lines react to the pointer.
+  const flowSet = lensSet && 'whole' in lensSet ? lensSet.whole : null;
+  const hotNode = hover && (!flowSet || flowSet.nodes.has(hover)) ? hover : null;
+  const hotEdge = hoverEdge && (!flowSet || flowSet.edges.has(hoverEdge)) ? hoverEdge : null;
+
+  // Picking a flow brings the whole of it into view. Its lines are drawn unmerged, so the map may be
+  // laid out again just after the pick; the camera follows that redraw too.
+  const flowZoomUntil = useRef(0);
+  useEffect(() => {
+    flowZoomUntil.current = flowId ? Date.now() + 2000 : 0;
+  }, [flowId]);
+  useEffect(() => {
+    if (!flowSet || step >= 0 || Date.now() > flowZoomUntil.current) return;
+    glideTo([...flowSet.nodes], [...flowSet.edges]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flowId, version, !!flowSet]);
+
   // While a flow is stepped through, the camera follows the active step.
   const followKey = lens === 'flow' && follow && flow && step >= 0 && lensSet ? `${flow.id}|${step}|${version}` : '';
   useEffect(() => {
@@ -350,9 +371,13 @@ export function App() {
       for (const v of view.nodes) if (isInside(v.id, id)) nodes.add(v.id);
       return { nodes, edges };
     };
-    if (hover && view.nodes.some((v) => v.id === hover)) return around(hover);
-    if (hoverEdge) {
-      const m = view.edges.find((e) => e.id === hoverEdge);
+    if (hotNode && view.nodes.some((v) => v.id === hotNode)) {
+      const a = around(hotNode);
+      // Inside a selected flow, a hover narrows to that node's part of the flow.
+      return flowSet ? { nodes: new Set([...a.nodes].filter((x) => flowSet.nodes.has(x))), edges: new Set([...a.edges].filter((x) => flowSet.edges.has(x))) } : a;
+    }
+    if (hotEdge) {
+      const m = view.edges.find((e) => e.id === hotEdge);
       if (m) return { nodes: new Set([m.from, m.to]), edges: new Set([m.id]) };
     }
     if (lensSet) return lensSet;
@@ -362,7 +387,7 @@ export function App() {
       if (m) return { nodes: new Set([m.from, m.to]), edges: new Set([m.id]) };
     }
     return null;
-  }, [view, hover, hoverEdge, lensSet, sel]);
+  }, [view, hotNode, hotEdge, flowSet, lensSet, sel]);
 
   const maxActivity = useMemo(() => {
     if (!view) return 1;
@@ -530,7 +555,7 @@ export function App() {
     const strong = active || selected;
     const undeclared = m.codeKind === 'undeclared';
     const color = strong ? (undeclared ? 'var(--red)' : 'var(--accent)') : undeclared ? 'var(--red)' : m.planned ? 'var(--ink-3)' : 'var(--line-2)';
-    const hovered = hoverEdge === m.id;
+    const hovered = hotEdge === m.id;
     // Moving dots show which way the data goes. "Active" moves only what is in focus; "All" moves every built link.
     const moving = motion === 'all' ? !m.planned && !m.retiring : motion === 'active' && strong;
     const playing = lens === 'flow' && flow && step >= 0 && flow.steps[step]?.edge ? { edge: flow.steps[step].edge as string, reply: !!flow.steps[step].reply } : undefined;
@@ -545,8 +570,7 @@ export function App() {
         className={`ve${raised ? ' lift' : ''}${hovered ? ' hot' : ''}`}
         opacity={m.retiring ? 0.4 : strong ? 1 : emphasis ? DIM : m.ghost ? 0.7 : 1}
         onClick={(e) => { e.stopPropagation(); setSel({ type: 'edge', id: m.id }); }}
-        onMouseEnter={() => { if (!dragging) setHoverEdge(m.id); }}
-        onMouseLeave={() => setHoverEdge((h) => (h === m.id ? null : h))}
+        data-hover-edge={m.id}
       >
         <path d={d} fill="none" stroke="transparent" strokeWidth={14} />
         {hovered && <path d={d} className="e-glow" />}
@@ -619,8 +643,7 @@ export function App() {
       if (v.ghost) goTo(v.id);
       else toggle(v.id);
     },
-    onMouseEnter: () => { if (!dragging) setHover(v.id); },
-    onMouseLeave: () => setHover((h) => (h === v.id ? null : h)),
+    'data-hover-node': v.id,
   });
 
   const renderContainer = (v: VNode) => {
@@ -628,7 +651,7 @@ export function App() {
     const Icon = iconOf(n);
     const color = colorOf(n, ix);
     const selected = sel?.type === 'node' && sel.id === v.id;
-    const hot = hover === v.id;
+    const hot = hotNode === v.id;
     const planned = n.status === 'planned';
     const badge = badgeFor(n);
     // Nesting levels alternate between a tinted and a near-white body, so a container never
@@ -679,7 +702,7 @@ export function App() {
     const on = lit(v.id, 'node');
     const strong = !!emphasis && on;
     const selected = sel?.type === 'node' && sel.id === v.id;
-    const hot = hover === v.id;
+    const hot = hotNode === v.id;
     const st = n.status;
     const planned = st === 'planned';
     const building = st === 'building';
@@ -810,7 +833,14 @@ export function App() {
             onPointerDown={(e) => { drag.current = { x: e.clientX, y: e.clientY, moved: false }; }}
             onPointerMove={(e) => {
               const d = drag.current;
-              if (!d) return;
+              if (!d) {
+                // Hover is read from what is under the pointer right now. A hovered line is redrawn in a
+                // higher layer, so enter and leave events on the line itself get lost and the hover sticks.
+                const hit = (e.target as Element).closest?.('[data-hover-node], [data-hover-edge]');
+                setHover(hit?.getAttribute('data-hover-node') ?? null);
+                setHoverEdge(hit?.getAttribute('data-hover-edge') ?? null);
+                return;
+              }
               const dx = e.clientX - d.x;
               const dy = e.clientY - d.y;
               if (!d.moved && Math.hypot(dx, dy) < 4) return;
@@ -824,7 +854,7 @@ export function App() {
               setTf((t) => ({ ...t, x: t.x + dx, y: t.y + dy }));
             }}
             onPointerUp={() => { drag.current = null; setTimeout(() => setDragging(false), 0); }}
-            onPointerLeave={() => { drag.current = null; setDragging(false); }}
+            onPointerLeave={() => { drag.current = null; setDragging(false); setHover(null); setHoverEdge(null); }}
             onClick={() => { if (!dragging) setSel(null); }}
             onDoubleClick={(e) => { const r = svgRef.current!.getBoundingClientRect(); zoomAt(e.clientX - r.left, e.clientY - r.top, e.shiftKey ? 0.6 : 1.6, true); }}
           >
