@@ -51,7 +51,7 @@ export function splitHeader(text: string): { front: string; header: Record<strin
   return { front: m[1], header: header as Record<string, unknown>, body: text.slice(m[0].length) };
 }
 
-const REF = /\[\[\s*([A-Za-z0-9][A-Za-z0-9_.#:-]*)\s*(?:\|[^[\]\n]*)?\]\]/g;
+export const REF = /\[\[\s*([A-Za-z0-9][A-Za-z0-9_.#:~-]*)\s*(?:\|[^[\]\n]*)?\]\]/g;
 
 /** Every [[reference]] in the prose of a document. Code blocks and inline code are skipped. */
 export function inlineRefs(body: string): string[] {
@@ -64,7 +64,8 @@ function strings(v: unknown): string[] {
   return (Array.isArray(v) ? v : [v]).filter((x) => typeof x === 'string' || typeof x === 'number').map((x) => String(x).trim()).filter(Boolean);
 }
 
-export type DocResolver = (text: string) => Omit<DocRef, 'text' | 'count'> | null;
+/** `also` lists the other things a bare name could mean, each written so that it resolves to exactly that. */
+export type DocResolver = (text: string) => (Omit<DocRef, 'text' | 'count'> & { also?: string[] }) | null;
 
 export interface DocIssue {
   code: string;
@@ -158,7 +159,7 @@ export function collectDocs(
     const kind = DOC_KINDS.includes(kindRaw as DocKind) ? (kindRaw as DocKind) : undefined;
     const about = strings(header.about);
     const headerChanges = strings(header.change);
-    const model = inHome || !!kind || about.length > 0 || headerChanges.length > 0;
+    const model = inHome || !!kind || about.length > 0 || headerChanges.length > 0 || strings(header.supersedes).length > 0;
     if (model && !kind && (inHome || kindRaw)) {
       issues.push({
         code: 'doc-header',
@@ -182,18 +183,27 @@ export function collectDocs(
     // References the document itself makes: the header's "about", then [[names]] in the text.
     const refs = new Map<string, DocRef>();
     const broken = new Set<string>();
+    const ambiguous = new Set<string>();
     for (const t of [...about, ...inlineRefs(body)]) {
-      const hit = resolve(t);
-      if (!hit) {
+      const found = resolve(t);
+      if (!found) {
         if (model) broken.add(t);
         continue;
       }
+      const { also, ...hit } = found;
+      if (model && also?.length) ambiguous.add(`${t} (read as the ${hit.type}; also ${also.join(', ')})`);
       const key = `${hit.type} ${hit.id}`;
       const prev = refs.get(key);
       if (prev) prev.count++;
       else refs.set(key, { text: t, ...hit, count: 1 });
       if (hit.node && nodes.has(hit.node)) link(hit.node, 'declared');
     }
+    // A decision that replaces an earlier one names it: a path from the repo root, or a file beside this one.
+    const supersedes = strings(header.supersedes).map((x) => {
+      const clean = x.replace(/^\.\//, '');
+      const beside = path.posix.join(path.posix.dirname(file), clean);
+      return !files.includes(clean) && files.includes(beside) ? beside : clean;
+    });
 
     const plans = [...(docsByChange.get(file) ?? [])];
     for (const id of headerChanges) {
@@ -232,8 +242,18 @@ export function collectDocs(
       links: sorted,
       refs: [...refs.values()],
       broken: [...broken],
+      ambiguous: [...ambiguous],
+      supersedes,
       loose: isLoose({ path: file, model, changes: plans.map((c) => c.id), links: sorted }),
     });
+  }
+  const byPath = new Map(out.map((d) => [d.path, d]));
+  for (const d of out) {
+    for (const old of d.supersedes) {
+      const target = byPath.get(old);
+      if (target) target.supersededBy = d.path;
+      else issues.push({ code: 'doc-reference', file: d.path, message: `"${d.path}" supersedes "${old}", which is not a document in the repo.` });
+    }
   }
   return { docs: out.sort((a, b) => a.path.localeCompare(b.path)), issues };
 }

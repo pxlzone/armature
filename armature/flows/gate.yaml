@@ -1,0 +1,12 @@
+headline: Before a file is written, the hook answers from the model's YAML alone.
+trigger: The agent calls a tool that writes a file or runs a shell command
+steps:
+  - outside.claude-code -> agent.hooks#events
+  - step: project.model#nodes -> agent.hooks
+    note: Who owns the path.
+  - step: project.model#changes -> agent.hooks
+    note: Whether the change behind that node is approved.
+  - step: project.model#approvals -> agent.hooks
+    note: Whether the node was among the elements approved.
+  - step: agent.hooks#events -> outside.claude-code
+    note: Refuse, ask the person, or say nothing.

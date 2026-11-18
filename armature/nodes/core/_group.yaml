@@ -1,0 +1,4 @@
+kind: group
+role: reads and checks a model
+color: blue
+docs: [SPEC.md]

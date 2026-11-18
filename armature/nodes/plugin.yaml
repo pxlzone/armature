@@ -1,0 +1,14 @@
+kind: job
+role: builds the Claude Code plugin
+tech: [node, vite]
+code: [scripts/**]
+description: Bundles the CLI, the viewer, the schema, the skills, the hooks and the MCP server definition into plugin/, which the marketplace file points at.
+
+rules:
+  - The hooks the plugin registers must match the ones a local install writes (mergeHooks in src/agent.ts).
+
+requirements:
+  - id: same-hooks-as-local-install
+    text: The plugin registers the same hooks, for the same tools, as a local install.
+    tests: test/consistency.test.ts
+    match: gives the plugin the same hooks

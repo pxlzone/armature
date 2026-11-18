@@ -92,7 +92,7 @@ export interface CodeFile {
 }
 
 /** Bump when extraction changes, so unchanged files are parsed again with the new rules. */
-export const EXTRACTOR = 6;
+export const EXTRACTOR = 9;
 
 export interface CodeIndex {
   version: 3;
@@ -461,8 +461,10 @@ function tsTypeSchemas(root: any, out: Record<string, CodeSchema>, enums: Record
   }
 }
 
-function tsHints(source: string): RuntimeHint[] {
+function tsHints(raw: string): RuntimeHint[] {
   const out: RuntimeHint[] = [];
+  // A comment that mentions a route or a path is not code that serves or calls it.
+  const source = withoutComments(raw);
   const lineAt = (i: number): number => source.slice(0, i).split('\n').length;
   for (const m of source.matchAll(/\b(?:app|fastify|server|router|instance|api|f|r)\s*\.\s*(get|post|put|patch|delete)\s*(?:<[^>]*>)?\(\s*["'`](\/[^"'`]*)["'`]/g)) out.push({ k: 'route', v: m[2], op: m[1].toUpperCase(), l: lineAt(m.index ?? 0) });
   for (const m of source.matchAll(/method\s*:\s*["'`](GET|POST|PUT|PATCH|DELETE)["'`]\s*,\s*url\s*:\s*["'`](\/[^"'`]*)["'`]/g)) out.push({ k: 'route', v: m[2], op: m[1], l: lineAt(m.index ?? 0) });
@@ -497,13 +499,58 @@ function dedupeHints(list: RuntimeHint[]): RuntimeHint[] {
   });
 }
 
-/** Table names in SQL text. Kept as candidates; the compiler keeps only names that are real tables. */
+/**
+ * Comments blanked out, with every line break kept so line numbers still hold. A block comment is
+ * one only outside a string: the slash and star in '/static/*' or "src/**" start nothing.
+ */
+export function withoutComments(source: string): string {
+  const blank = (m: string): string => m.replace(/[^\n]/g, ' ');
+  const out: string[] = [];
+  const n = source.length;
+  let kept = 0;
+  let i = 0;
+  while (i < n) {
+    const c = source[i];
+    if (c === '/' && source[i + 1] === '*' && source[i - 1] !== '\\') {
+      const end = source.indexOf('*/', i + 2);
+      // Never closed: not a comment this can blank.
+      if (end < 0) break;
+      out.push(source.slice(kept, i), blank(source.slice(i, end + 2)));
+      i = kept = end + 2;
+    } else if (c === '/' && source[i + 1] === '/') {
+      // A line comment: nothing in it opens a string or a block comment. Whole-line ones are blanked below.
+      const eol = source.indexOf('\n', i);
+      i = eol < 0 ? n : eol;
+    } else if (c === '"' || c === "'" || c === '`') {
+      const close = c !== '`' && source.startsWith(c.repeat(3), i) ? c.repeat(3) : c;
+      // A quote left open ends with its line, so an apostrophe in prose does not swallow what follows.
+      const oneLine = close.length === 1 && c !== '`';
+      let j = i + close.length;
+      while (j < n && !source.startsWith(close, j) && !(oneLine && source[j] === '\n')) j += source[j] === '\\' ? 2 : 1;
+      i = Math.min(n, source.startsWith(close, j) ? j + close.length : j);
+    } else i++;
+  }
+  out.push(source.slice(kept));
+  return out.join('').replace(/^[ \t]*(?:\/\/|#|--).*$/gm, blank);
+}
+
+/**
+ * Table names in SQL text. Kept as candidates; the compiler keeps only names that are real tables.
+ * English prose is full of "from the" and "update them", so a match counts only where it reads as
+ * SQL: outside comments, "from" and "join" after a select, update or delete, and "update" before a set.
+ */
 function sqlHints(source: string, out: RuntimeHint[], lineAt: (i: number) => number): void {
-  for (const m of source.matchAll(/\b(insert\s+into|update|delete\s+from|from|join)\s+(?:"?public"?\.)?("?)([a-z_][a-z0-9_]{2,})"?/gi)) {
+  const text = withoutComments(source);
+  for (const m of text.matchAll(/\b(insert\s+into|update|delete\s+from|from|join)\s+(?:"?public"?\.)?("?)([a-z_][a-z0-9_]{2,})"?/gi)) {
     // Table names are lowercase unless quoted; "from Acme Holdings" in a sentence is prose, not SQL.
     if (!m[2] && m[3] !== m[3].toLowerCase()) continue;
     const kw = m[1].toLowerCase();
-    out.push({ k: 'table', v: m[3].toLowerCase(), op: kw.startsWith('insert') || kw === 'update' || kw.startsWith('delete') ? 'write' : 'read', l: lineAt(m.index ?? 0) });
+    const at = m.index ?? 0;
+    // The statement so far: back to the last full stop, semicolon or the like, which SQL has none of inside a statement.
+    const before = text.slice(Math.max(0, at - 400), at).split(/[.;!?](?=\s|$)/).pop() as string;
+    if ((kw === 'from' || kw === 'join') && !/\b(select|update|delete)\b/i.test(before)) continue;
+    if (kw === 'update' && !/^[\s\S]{0,200}?\bset\b/i.test(text.slice(at + m[0].length))) continue;
+    out.push({ k: 'table', v: m[3].toLowerCase(), op: kw.startsWith('insert') || kw === 'update' || kw.startsWith('delete') ? 'write' : 'read', l: lineAt(at) });
   }
 }
 
@@ -651,7 +698,7 @@ function extractPy(root: any, source: string): Raw {
   }
   const hints: RuntimeHint[] = [];
   const lineAt = (i: number): number => source.slice(0, i).split('\n').length;
-  for (const m of source.matchAll(/@\w+\.(get|post|put|patch|delete)\(\s*["'](\/[^"']*)["']/g)) hints.push({ k: 'route', v: m[2], op: m[1].toUpperCase(), l: lineAt(m.index ?? 0) });
+  for (const m of withoutComments(source).matchAll(/@\w+\.(get|post|put|patch|delete)\(\s*["'](\/[^"']*)["']/g)) hints.push({ k: 'route', v: m[2], op: m[1].toUpperCase(), l: lineAt(m.index ?? 0) });
   if (/^if\s+__name__\s*==\s*["']__main__["']/m.test(source)) hints.push({ k: 'main', v: '__main__', l: 1 });
   sqlHints(source, hints, lineAt);
   return { symbols, imports, refs: [...seen.values()], schemas, hints: dedupeHints(hints).slice(0, 200) };

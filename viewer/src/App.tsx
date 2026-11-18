@@ -159,7 +159,7 @@ export function App() {
     const f = focus && ix.nodes.has(focus) ? focus : null;
     // The Code lens draws what the code imports, node to node, in place of the declared data links.
     const codeEdges: Edge[] | undefined = lens === 'code'
-      ? graph.codeDeps.map((d) => ({ id: `code:${d.from}>${d.to}>${d.via ?? 'import'}`, from: d.from, to: d.to, owner: d.from, verb: 'calls' as const, async: false, shapes: [], returns: [], status: 'built' as const, code: { count: d.count, kind: d.kind, via: d.via ?? 'import' } }))
+      ? graph.codeDeps.map((d) => ({ id: `code:${d.from}>${d.to}>${d.via ?? 'import'}`, from: d.from, to: d.to, owner: d.from, verb: 'calls' as const, async: false, shapes: [], returns: [], status: 'built' as const, evidence: 'seen' as const, code: { count: d.count, kind: d.kind, via: d.via ?? 'import' } }))
       : undefined;
     buildView(graph, ix, { focus: f, expanded, showLibraries: showLibs, hidePlanned, edges: codeEdges, bundle: bundled }).then((v) => {
       if (!live) return;
@@ -533,7 +533,8 @@ export function App() {
     const hovered = hoverEdge === m.id;
     // Moving dots show which way the data goes. "Active" moves only what is in focus; "All" moves every built link.
     const moving = motion === 'all' ? !m.planned && !m.retiring : motion === 'active' && strong;
-    const dir = moving ? dataDirection(m) : { fwd: false, back: false };
+    const playing = lens === 'flow' && flow && step >= 0 && flow.steps[step]?.edge ? { edge: flow.steps[step].edge as string, reply: !!flow.steps[step].reply } : undefined;
+    const dir = moving ? dataDirection(m, playing) : { fwd: false, back: false };
     const dotKind = `${m.async ? 'dots async' : 'dots'}${strong ? '' : ' quiet'}`;
     // In the merged overview, labels appear only on what is highlighted.
     const label = strong && m.fullLabel ? clip(m.fullLabel, 44) : bundled ? '' : m.label;
@@ -749,7 +750,9 @@ export function App() {
     if (lens === 'flow' && flow && step >= 0 && lensSet && lensSet.edges.size === 1) return view.edges.find((m) => lensSet.edges.has(m.id)) ?? null;
     return null;
   })();
-  const stepEdge: Edge | null = lens === 'flow' && flow && step >= 0 && flow.steps[step]?.edge ? ix.edges.get(flow.steps[step].edge as string) ?? null : null;
+  const rawStepEdge: Edge | null = lens === 'flow' && flow && step >= 0 && flow.steps[step]?.edge ? ix.edges.get(flow.steps[step].edge as string) ?? null : null;
+  // A reply step is the answer to a call: the card shows what comes back, not what was sent.
+  const stepEdge: Edge | null = rawStepEdge && flow?.steps[step]?.reply ? { ...rawStepEdge, shapes: [], returns: rawStepEdge.returns } : rawStepEdge;
 
   return (
     <div className="app">

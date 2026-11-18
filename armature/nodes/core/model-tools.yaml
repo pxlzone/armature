@@ -1,0 +1,39 @@
+kind: library
+shared: false
+role: rename, approve, baseline
+tech: [typescript, yaml]
+code: [src/rename.ts, src/approve.ts, src/baseline.ts]
+tests: [test/tools.test.ts, test/gate-holes.test.ts]
+description: The few places where the tool writes to a model. Everything else only reads.
+
+accepts:
+  - id: edit
+    via: in-process
+    takes: Command
+    gives: Answer
+    note: rename(root, ref, to), approveChange(root, id), writeBaseline(root, problems).
+
+writes:
+  - project.model#nodes
+  - project.model#shapes
+  - project.model#flows
+  - project.model#changes
+  - project.model#documents
+  - project.model#approvals
+  - project.model#baseline
+calls:
+  - to: core.compiler#compile
+
+rules:
+  - Rewrite YAML through the document API, so comments and layout survive.
+  - An approval is recorded only where a person ran the command or confirmed the edit.
+
+requirements:
+  - id: rename-rewrites-every-reference
+    text: After a rename, no reference to the old name is left in the model or its documents, and the model has no errors.
+    tests: test/tools.test.ts
+    match: moves a node into a group and rewrites every reference
+  - id: approval-records-elements
+    text: An approval records the elements of the change, and what joins the change later is reported and not built.
+    tests: test/gate-holes.test.ts
+    match: records the elements, and holds back what joins the change later

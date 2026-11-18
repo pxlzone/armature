@@ -1,0 +1,4 @@
+kind: group
+role: wires Claude Code
+color: purple
+docs: [skills/*/SKILL.md]

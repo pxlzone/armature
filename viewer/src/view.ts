@@ -343,11 +343,17 @@ export function pathOf(points: Array<{ x: number; y: number }>, radius = 8): str
 }
 
 /** Which way data travels on a drawn line: a read brings data back from the store, a call with a reply goes both ways. */
-export function dataDirection(m: VEdge): { fwd: boolean; back: boolean } {
+export function dataDirection(m: VEdge, step?: { edge: string; reply: boolean }): { fwd: boolean; back: boolean } {
   if (m.codeKind) return { fwd: false, back: false };
   let fwd = false;
   let back = false;
   const atFrom = (id: string): boolean => id === m.from || isInside(id, m.from);
+  // One step of a flow moves one way only: the request along its link, or the answer against it.
+  const one = step ? m.edges.find((e) => e.id === step.edge) : undefined;
+  if (one && step) {
+    const along = atFrom(one.verb === 'reads' ? one.to : one.from) !== step.reply;
+    return { fwd: along, back: !along };
+  }
   for (const e of m.edges) {
     if (e.status === 'planned') continue;
     const source = e.verb === 'reads' ? e.to : e.from;

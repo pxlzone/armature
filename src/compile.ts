@@ -5,7 +5,7 @@ import { Ajv, type ValidateFunction } from 'ajv';
 import YAML from 'yaml';
 import picomatch from 'picomatch';
 import type {
-  Activity, ActivityItem, Change, CodeDep, Coverage, Deployment, DocInfo, Edge, Flow, FlowStep, GNode, Graph, Interface, NodeKind, Problem, Requirement, Rule, Shape, Snapshot, Status, Tech, Verb,
+  Activity, ActivityItem, Boundary, Change, CodeDep, Coverage, Deployment, DetectorCoverage, DocInfo, Edge, Flow, FlowStep, GNode, Graph, Interface, NodeKind, Problem, Requirement, Rule, Shape, Snapshot, Status, Tech, Verb,
 } from './types.js';
 import { warningGroup } from './types.js';
 import { expand, git, matcher, parseConventional, readCommits, readJunit, readLcov, readPullRequests, readRepo, sourceHash, type TestCase } from './repo.js';
@@ -17,9 +17,10 @@ import { sameName, schemaFor } from './schemas.js';
 import { collectDocs, type DocResolver } from './docs.js';
 import { DEFAULT_COMPOSE, looseDockerCommands, readCompose } from './deploy.js';
 import { reach } from './reach.js';
-import { cleanDocsSetting, hasModel, LEGACY_DIR, MODEL_DIR, modelDir } from './paths.js';
+import { cleanDocsSetting, hasModel, LEGACY_DIR, MODEL_DIR, modelDir, readApprovals } from './paths.js';
+import { findNode, nodeProblem, resolveRef, type RefIndex } from './refs.js';
 
-export { LEGACY_DIR, MODEL_DIR, modelDir } from './paths.js';
+export { APPROVALS_FILE, LEGACY_DIR, MODEL_DIR, modelDir, readApprovals } from './paths.js';
 export const LOCK_FILE = 'shapes.lock.json';
 const SCHEMA_ID = 'https://armature.local/armature.schema.json';
 const BUILTIN_TYPES = new Set(['string', 'int', 'float', 'bool', 'uuid', 'timestamp', 'date', 'money', 'email', 'url', 'json', 'bytes']);
@@ -38,7 +39,51 @@ export interface CompileOptions {
   days?: number;
 }
 
+/**
+ * Warnings that say a change went past its approval. What the planning gate cannot stop before the
+ * fact is reported by these afterwards, so no `accept:` entry may silence them.
+ */
+const NEVER_ACCEPTED = new Set(['scope-changed', 'unrecorded-approval', 'built-unapproved']);
+
+/** In armature/.cache: the requirements that failed in the last test report the compiler read. */
+export const FAILED_FILE = 'failing.json';
+
+function readFailures(file: string): string[] {
+  try {
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return Array.isArray(data?.requirements) ? data.requirements.filter((x: unknown): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberFailures(file: string, refs: string[]): void {
+  const next = [...refs].sort();
+  if (JSON.stringify(readFailures(file)) === JSON.stringify(next)) return;
+  try {
+    if (next.length === 0) fs.rmSync(file, { force: true });
+    else {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, `${JSON.stringify({ requirements: next }, null, 2)}\n`);
+    }
+  } catch {
+    /* a checkout that cannot be written to: the memory helps, the check does not need it */
+  }
+}
+
 const isInside = (id: string, anc: string): boolean => id === anc || id.startsWith(`${anc}.`);
+
+/**
+ * The literal start of a glob: a file that does not begin with it cannot match. Empty when there is
+ * none, or when the text of the glob is not what it matches: an escape ("app/\[id\]/**") or an
+ * extglob changes its meaning, and the matcher drops a leading "./".
+ */
+function fixedStart(glob: string): string {
+  if (/[(\\]/.test(glob)) return '';
+  const plain = glob.replace(/^(?:\.\/)+/, '');
+  const cut = plain.search(/[*?[{]/);
+  return cut < 0 ? plain : plain.slice(0, cut);
+}
 
 export function findRoot(start: string): string | null {
   let dir = path.resolve(start);
@@ -225,7 +270,9 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
         ? { text: t, kind: 'task' as const, priority: 'medium' as const, node: r.id }
         : { text: t.text ?? '', kind: t.kind ?? 'task', priority: t.priority ?? 'medium', owner: t.owner, issue: t.issue, change: t.change, node: r.id })),
       change: d.change,
+      modify: d.modify,
       retire: d.retire,
+      never: [],
       status: 'built',
       statusWhy: '',
       coverage: null,
@@ -268,11 +315,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     }
   }
   const ids = [...nodes.keys()];
-  const resolveNode = (ref: string): string | null => {
-    if (nodes.has(ref)) return ref;
-    const hits = ids.filter((i) => i.endsWith(`.${ref}`));
-    return hits.length === 1 ? hits[0] : null;
-  };
+  const resolveNode = (ref: string): string | null => findNode(ids, ref).id;
   const ancestors = (id: string): string[] => {
     const out: string[] = [];
     let cur = nodes.get(id)?.parent ?? null;
@@ -301,9 +344,30 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       why: data.why,
       doneWhen: toArr<string>(data.done_when),
       nodes: [], edges: [], interfaces: [], requirements: [], shapes: [], flows: [],
+      after: toArr<string>(data.after), waits: [], elements: [], approval: null,
       progress: { total: 0, built: 0, reqTotal: 0, reqVerified: 0 },
     });
     if (data.doc && !fs.existsSync(path.join(root, data.doc))) warn('reference', `Change doc "${data.doc}" does not exist.`, id, rel(abs));
+  }
+  // Order between changes: `after` names the ones that must be done first.
+  for (const c of changes.values()) {
+    for (const a of c.after) if (!changes.has(a)) err('reference', `Change "${c.id}" comes after "${a}", which does not exist.`, c.id);
+    c.after = c.after.filter((a) => changes.has(a) && a !== c.id);
+    c.waits = c.after.filter((a) => changes.get(a)!.state !== 'done');
+  }
+  {
+    const mark = new Map<string, 1 | 2>();
+    const visit = (id: string, trail: string[]): void => {
+      if (mark.get(id) === 2) return;
+      if (mark.get(id) === 1) {
+        err('cycle', `Changes wait for each other: ${[...trail.slice(trail.indexOf(id)), id].join(' -> ')}.`, id);
+        return;
+      }
+      mark.set(id, 1);
+      for (const a of changes.get(id)!.after) visit(a, [...trail, id]);
+      mark.set(id, 2);
+    };
+    for (const id of changes.keys()) visit(id, []);
   }
   const checkChange = (id: string | undefined, ref: string, file: string): void => {
     if (id && !changes.has(id)) err('reference', `Change "${id}" does not exist.`, ref, file);
@@ -338,8 +402,9 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
         const parts = String(spec).trim().split(/\s+/);
         return { name, type: parts[0], tags: parts.slice(1).filter((p) => p.startsWith('@')).map((p) => p.slice(1)) };
       });
-      const shape: Shape = { id, fields, source: s.source, note: s.note, change: s.change, stale: false, bound: false, file: rel(abs) };
+      const shape: Shape = { id, fields, source: s.source, note: s.note, change: s.change, modify: s.modify, stale: false, bound: false, file: rel(abs) };
       checkChange(s.change, id, rel(abs));
+      checkChange(s.modify, id, rel(abs));
       const fromCode = codeIdx && s.source ? schemaFor(codeIdx, s.source) : null;
       if (fromCode) {
         // The code is the truth: its fields replace the hand-written ones, keeping the model's tags (such as @pii).
@@ -348,8 +413,13 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
         pendingTypes.push(shape);
         shape.fromCode = fromCode.kind;
         shape.bound = true;
-        const onlyModel = declared.filter((d) => !fromCode.fields.some((f) => sameName(f.name, d.name))).map((d) => d.name);
+        let onlyModel = declared.filter((d) => !fromCode.fields.some((f) => sameName(f.name, d.name))).map((d) => d.name);
         const onlyCode = fromCode.fields.filter((f) => !declared.some((d) => sameName(d.name, f.name))).map((f) => f.name);
+        if (open(s.modify)) {
+          // A change is altering the shape: fields only the model lists are planned, and are kept beside the code's.
+          for (const d of declared) if (onlyModel.includes(d.name)) shape.fields.push({ ...d, tags: [...d.tags, 'planned'] });
+          onlyModel = [];
+        }
         if (declared.length && (onlyModel.length || onlyCode.length)) {
           shape.drift = { onlyModel, onlyCode };
           warn('shape-fields', `Shape "${id}" lists fields the code does not have (${onlyModel.slice(0, 5).join(', ') || 'none'}) or misses fields it has (${onlyCode.slice(0, 5).join(', ') || 'none'}). The code's fields are used; run "armature shapes --sync" to rewrite the file.`, id, rel(abs));
@@ -410,9 +480,12 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     const d = rawById.get(n.id)!.data;
     checkChange(n.change, n.id, n.source);
     checkChange(n.retire, n.id, n.source);
+    checkChange(n.modify, n.id, n.source);
     const add = (i: Interface): void => {
       if (ifaces.has(i.ref)) err('duplicate', `Interface "${i.ref}" is declared more than once.`, i.ref, n.source);
       checkChange(i.change, i.ref, n.source);
+      checkChange(i.modify, i.ref, n.source);
+      checkChange(i.retire, i.ref, n.source);
       ifaces.set(i.ref, i);
       n.interfaces.push(i);
     };
@@ -422,7 +495,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       add({
         id: a.id, ref, node: n.id, holds: false, via: a.via, route: a.route, queue: a.queue,
         takes: shapeList(a.takes, ref, n.source), gives: shapeList(a.gives, ref, n.source),
-        dlq: a.dlq, note: a.note, change: a.change, retire: a.retire, status: 'built',
+        dlq: a.dlq, note: a.note, change: a.change, modify: a.modify, retire: a.retire, status: 'built', evidence: 'unchecked',
       });
     }
     for (const h of toArr<any>(d.holds)) {
@@ -431,7 +504,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       const ref = `${n.id}#${o.id}`;
       add({
         id: o.id, ref, node: n.id, holds: true, takes: shapeList(o.shape, ref, n.source), gives: [],
-        note: o.note, change: o.change, retire: o.retire, status: 'built',
+        note: o.note, change: o.change, modify: o.modify, retire: o.retire, status: 'built', evidence: 'unchecked',
       });
     }
     for (const r of toArr<any>(d.requirements)) {
@@ -439,7 +512,8 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       const ref = `${n.id}:${r.id}`;
       if (reqs.has(ref)) err('duplicate', `Requirement "${ref}" is declared more than once.`, ref, n.source);
       checkChange(r.change, ref, n.source);
-      const q: Requirement = { id: r.id, ref, node: n.id, text: r.text ?? '', change: r.change, tests: toArr<string>(r.tests), match: toArr<string>(r.match), state: 'unverified', evidence: [] };
+      checkChange(r.modify, ref, n.source);
+      const q: Requirement = { id: r.id, ref, node: n.id, text: r.text ?? '', change: r.change, modify: r.modify, tests: toArr<string>(r.tests), match: toArr<string>(r.match), covers: toArr<string>(r.covers), state: 'unverified', evidence: [] };
       reqs.set(ref, q);
       n.requirements.push(q);
     }
@@ -451,10 +525,27 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     const inherited = n.parent ? nodes.get(n.parent)!.rules : sysRules;
     n.rules = [...inherited, ...own];
   }
+  // Boundaries: nodes this one must never touch. Checked against links and imports further down.
+  const ownNever = new Map<string, Boundary[]>();
+  for (const n of byDepth) {
+    const own: Boundary[] = [];
+    for (const item of toArr<any>(rawById.get(n.id)!.data.never)) {
+      const o = typeof item === 'string' ? { to: item } : item;
+      if (!o?.to) continue;
+      const target = resolveNode(String(o.to));
+      if (!target) err('reference', `${n.id} never "${o.to}": ${nodeProblem(ids, String(o.to))}`, n.id, n.source);
+      else if (isInside(target, n.id) || isInside(n.id, target)) err('boundary', `"${n.id}" cannot rule out "${target}": one is inside the other.`, n.id, n.source);
+      else own.push({ node: target, why: o.why, from: n.id });
+    }
+    if (own.length) ownNever.set(n.id, own);
+    n.never = [...(n.parent ? nodes.get(n.parent)!.never : []), ...own];
+  }
 
   // ---- links --------------------------------------------------------------
   const edges: Edge[] = [];
   const edgeIds = new Set<string>();
+  /** Named links: node~name to the edge id. */
+  const linkRefs = new Map<string, string>();
   const noShape = new Map<string, string[]>();
   for (const n of nodes.values()) {
     const d = rawById.get(n.id)!.data;
@@ -465,7 +556,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
         const [nodeRef, ifaceId] = String(l.to).split('#');
         const target = resolveNode(nodeRef);
         if (!target) {
-          err('reference', `${n.id} ${verb} "${l.to}": node "${nodeRef}" does not exist.`, n.id, n.source);
+          err('reference', `${n.id} ${verb} "${l.to}": ${nodeProblem(ids, nodeRef)}`, n.id, n.source);
           continue;
         }
         let iface: Interface | undefined;
@@ -477,10 +568,15 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
         }
         const label = `${n.id} ${verb} ${l.to}`;
         checkChange(l.change, label, n.source);
+        checkChange(l.modify, label, n.source);
         checkChange(l.retire, label, n.source);
         const tnode = nodes.get(target)!;
         const store = verb === 'reads' || verb === 'writes';
-        if (store && tnode.kind !== 'store') warn('verb', `${label}: "${target}" is a ${tnode.kind}, not a store.`, n.id, n.source);
+        // Reading from a queue is consuming from it: the consumer's code does it, so the consumer declares it.
+        const consumes = verb === 'reads' && tnode.kind === 'queue';
+        if (store && tnode.kind !== 'store' && !consumes) {
+          warn('verb', `${label}: "${target}" is a ${tnode.kind}, not a store.${verb === 'writes' && tnode.kind === 'queue' ? ' Publishing to a queue is "sends".' : ''}`, n.id, n.source);
+        }
         let takes: string[];
         let gives: string[] = [];
         if (store) {
@@ -495,14 +591,22 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
         let id = `${n.id}>${verb}>${target}${ifaceId ? `#${ifaceId}` : ''}`;
         for (let k = 2; edgeIds.has(id); k++) id = `${n.id}>${verb}>${target}${ifaceId ? `#${ifaceId}` : ''}~${k}`;
         edgeIds.add(id);
+        const name: string | undefined = typeof l.id === 'string' ? l.id : undefined;
+        const ref = name ? `${n.id}~${name}` : undefined;
+        if (ref) {
+          if (linkRefs.has(ref)) err('duplicate', `Link "${ref}" is declared more than once.`, ref, n.source);
+          linkRefs.set(ref, id);
+        }
         edges.push({
           id, from, to, owner: n.id, verb,
-          async: verb === 'sends',
-          via, iface: iface?.ref, shapes: takes, returns: gives, note: l.note, change: l.change, retire: l.retire, status: 'built',
+          async: verb === 'sends' || consumes,
+          via, iface: iface?.ref, shapes: takes, returns: gives, note: l.note, name, ref,
+          change: l.change, modify: l.modify, retire: l.retire, status: 'built', evidence: 'unchecked',
         });
         if (n.kind !== 'actor') {
           if (!ifaceId) warn('coarse-link', `${label}: points at a node, not an interface.`, n.id, n.source);
-          else if (takes.length === 0 && !store) noShape.set(n.id, [...(noShape.get(n.id) ?? []), String(l.to)]);
+          // A call that only brings something back carries data too.
+          else if (takes.length === 0 && gives.length === 0 && !store) noShape.set(n.id, [...(noShape.get(n.id) ?? []), String(l.to)]);
         }
       }
     }
@@ -516,32 +620,65 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
   // ---- repository facts ---------------------------------------------------
   const repo = readRepo(root);
   const owner = new Map<string, string>();
-  const codeNodes = [...nodes.values()].filter((n) => n.code.length > 0).sort((a, b) => b.depth - a.depth);
+  // Deepest node first, then by id, so a file always goes to the same node. The planning gate sorts the same way.
+  const codeNodes = [...nodes.values()].filter((n) => n.code.length > 0).sort((a, b) => b.depth - a.depth || a.id.localeCompare(b.id));
   const codeMatch = new Map<string, (f: string) => boolean>();
   const testMatch = new Map<string, (f: string) => boolean>();
+  const codeStart = new Map<string, string[] | null>();
   for (const n of nodes.values()) {
-    if (n.code.length) codeMatch.set(n.id, matcher(n.code));
+    if (n.code.length) {
+      codeMatch.set(n.id, matcher(n.code));
+      const starts = n.code.filter((g) => !g.startsWith('!')).map(fixedStart);
+      codeStart.set(n.id, starts.every(Boolean) ? starts : null);
+    }
     if (n.tests.length) testMatch.set(n.id, matcher(n.tests));
   }
+  const claims = (id: string, f: string): boolean => {
+    const starts = codeStart.get(id);
+    return (!starts || starts.some((p) => f.startsWith(p))) && codeMatch.get(id)!(f);
+  };
   const testOwned = new Set<string>();
+  /** Files per node, code and tests: what a test report has to be newer than. */
+  const filesOf = new Map<string, string[]>();
+  const fileList = (id: string): string[] => {
+    let list = filesOf.get(id);
+    if (!list) filesOf.set(id, (list = []));
+    return list;
+  };
+  const overlaps = new Map<string, { count: number; sample: string }>();
   for (const f of repo.files) {
+    let won: GNode | null = null;
     for (const n of codeNodes) {
-      if (codeMatch.get(n.id)!(f)) {
+      if (!claims(n.id, f)) continue;
+      if (!won) {
+        won = n;
         owner.set(f, n.id);
         n.files++;
-        break;
+        fileList(n.id).push(f);
+      } else if (!isInside(won.id, n.id)) {
+        // A second node claims the file, and it is not a parent of the first.
+        const key = `${won.id}|${n.id}`;
+        const o = overlaps.get(key) ?? { count: 0, sample: f };
+        o.count++;
+        overlaps.set(key, o);
       }
     }
     for (const [id, m] of testMatch) {
       if (m(f)) {
         nodes.get(id)!.testFiles++;
         testOwned.add(f);
+        fileList(id).push(f);
       }
     }
   }
+  for (const [key, o] of overlaps) {
+    const [a, b] = key.split('|');
+    warn('overlap', `"${a}" and "${b}" both claim ${o.count} file${o.count === 1 ? '' : 's'} (${o.sample}${o.count > 1 ? ', …' : ''}). They go to "${a}". Give them to one node, or move shared code to a library node.`, b, nodes.get(b)!.source);
+  }
   const deadGlobs = new Map<string, string[]>();
   for (const n of nodes.values()) {
-    if (n.files === 0) continue;
+    // A node still being built by an open change may have globs with no files yet.
+    if (n.files === 0 || open(n.change)) continue;
     const dead = n.code.filter((g) => {
       if (g.startsWith('!')) return false;
       const m = picomatch(g, { dot: true });
@@ -661,13 +798,45 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
   const junitFiles = [...new Set(junitGlobs.flatMap(expandFs))];
   const lcovFiles = [...new Set(lcovGlobs.flatMap(expandFs))];
   const cases: TestCase[] = [];
+  let newestReport = 0;
   for (const f of junitFiles) {
     try {
-      cases.push(...readJunit(root, f));
+      const at = fs.statSync(path.join(root, f)).mtimeMs;
+      newestReport = Math.max(newestReport, at);
+      cases.push(...readJunit(root, f).map((c) => ({ ...c, at })));
     } catch (e: any) {
       warn('report', `Cannot read JUnit report: ${String(e.message).split('\n')[0]}`, undefined, f);
     }
   }
+  // A report proves something about code only when it was written after that code last changed.
+  const newestMemo = new Map<string, number>();
+  const newest = (id: string): number => {
+    const hit = newestMemo.get(id);
+    if (hit !== undefined) return hit;
+    let t = 0;
+    for (const [nid, list] of filesOf) {
+      if (!isInside(nid, id)) continue;
+      for (const f of list) {
+        try {
+          t = Math.max(t, fs.statSync(path.join(root, f)).mtimeMs);
+        } catch {
+          /* removed since the file list was read */
+        }
+      }
+    }
+    newestMemo.set(id, t);
+    return t;
+  };
+  const proof = new Map<string, { failed: boolean; fresh: boolean; old: boolean }>();
+  const note = (q: Requirement, c: TestCase): void => {
+    const p = proof.get(q.ref) ?? { failed: false, fresh: false, old: false };
+    const current = (c.at ?? Infinity) >= newest(q.node);
+    if (c.state === 'failed') p.failed = true;
+    else if (c.state === 'passed' && current) p.fresh = true;
+    else if (c.state === 'passed') p.old = true;
+    proof.set(q.ref, p);
+    q.evidence.push(`${c.state}${c.state === 'passed' && !current ? ' (report older than the code)' : ''}: ${c.name}`);
+  };
   const nodeOfTest = (file: string): string | null => {
     if (!file) return null;
     let best: GNode | null = null;
@@ -696,7 +865,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
         warn('reference', `Test "${c.name}" tags unknown requirement "${m[1]}".`, undefined, c.file);
         continue;
       }
-      q.evidence.push(`${c.state}: ${c.name}`);
+      note(q, c);
     }
   }
   for (const q of reqs.values()) {
@@ -705,13 +874,33 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     if (inFiles || q.match.length) {
       // `tests` narrows by file, `match` narrows by test title. Either alone is enough.
       const hits = cases.filter((c) => (!inFiles || inFiles(c.file)) && (q.match.length === 0 || q.match.some((m) => c.name.includes(m))));
-      for (const c of hits) q.evidence.push(`${c.state}: ${c.name}`);
+      for (const c of hits) note(q, c);
       if (q.match.length && cases.length > 0 && hits.length === 0 && !open(q.change)) {
         warn('no-test-match', `Requirement "${q.ref}": no test title in the latest report contains ${q.match.map((m) => `"${m}"`).join(' or ')}.`, q.ref);
       }
     }
-    if (q.evidence.some((e) => e.startsWith('failed'))) q.state = 'failing';
-    else if (q.evidence.some((e) => e.startsWith('passed'))) q.state = 'verified';
+    // A failure stands until a newer run says otherwise; a pass counts only while the report is newer than the code.
+    const p = proof.get(q.ref);
+    if (p?.failed) q.state = 'failing';
+    else if (p?.fresh) q.state = 'verified';
+    else if (p?.old) q.outdated = true;
+  }
+  // A failure is remembered. With a report to read, the memory is brought up to date; with none,
+  // what failed last time still fails, so removing the report does not turn it into "nothing to check".
+  const failedFile = path.join(archAbs, '.cache', FAILED_FILE);
+  if (cases.length > 0) rememberFailures(failedFile, [...reqs.values()].filter((q) => q.state === 'failing').map((q) => q.ref));
+  else {
+    for (const ref of readFailures(failedFile)) {
+      const q = reqs.get(ref);
+      if (!q) continue;
+      q.state = 'failing';
+      q.evidence.push('failed: in the last test report seen, which is no longer there. Run the tests again.');
+    }
+  }
+  const outdated = [...reqs.values()].filter((q) => q.outdated);
+  if (outdated.length) {
+    const where = [...new Set(outdated.map((q) => q.node))];
+    warn('outdated-report', `${outdated.length} requirement${outdated.length === 1 ? '' : 's'} of ${where.slice(0, 6).join(', ')}${where.length > 6 ? ', …' : ''} passed in a test report that is older than the code, so ${outdated.length === 1 ? 'it counts' : 'they count'} as unverified. Run the tests again.`);
   }
   const cov = new Map<string, { found: number; hit: number }>();
   for (const f of lcovFiles) {
@@ -856,6 +1045,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
   const deadFiles: Graph['dead'] = [];
   let reachEntries = new Map<string, string>();
   const runtimeReports: Graph['runtime'] = [];
+  const detectors: DetectorCoverage[] = [];
   let codeSummary: Graph['code'] = null;
   const cidx = codeIdx;
   if (cidx) {
@@ -935,8 +1125,18 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       for (const pth of paths) if (!cidx.files[pth].test) for (const x of testsOf(pth)) t.add(x);
       nodes.get(id)!.testedBy = [...t].sort();
     }
-    const rt = analyzeRuntime(cidx, nodes, edges, ifaces, owner, ancestors);
+    const rt = analyzeRuntime(cidx, nodes, edges, ifaces, owner, ancestors, open);
     runtimeReports.push(...rt.reports);
+    // What could be checked at all, per node: a node the index cannot read is unknown, not clean.
+    const indexedBy = new Map<string, number>();
+    for (const f of Object.values(cidx.files)) {
+      const id = owner.get(f.path);
+      if (id) indexedBy.set(id, (indexedBy.get(id) ?? 0) + 1);
+    }
+    for (const n of nodes.values()) {
+      if (n.files === 0 || n.kind === 'store' || n.unused) continue;
+      detectors.push({ node: n.id, files: n.files, indexed: indexedBy.get(n.id) ?? 0, kinds: [...(rt.kinds.get(n.id) ?? [])].sort() });
+    }
     for (const r of rt.reports) nodes.get(r.node)!.runtime = r;
     codeDeps.push(...rt.deps);
     for (const r of rt.reports) {
@@ -974,6 +1174,24 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     if (!n.unused) continue;
     const linked = edges.filter((e) => isInside(e.from, n.id) || isInside(e.to, n.id));
     if (linked.length) warn('unused-linked', `"${n.id}" is marked unused but has ${linked.length} link${linked.length === 1 ? '' : 's'}. Dead code takes part in no flow; remove the links.`, n.id, n.source);
+  }
+
+  // ---- boundaries: what a node must never touch, checked against links and against the code ----
+  for (const [id, own] of ownNever) {
+    for (const b of own) {
+      const hits: string[] = [];
+      for (const e of edges) {
+        const other = e.owner === e.from ? e.to : e.from;
+        if (isInside(e.owner, id) && isInside(other, b.node)) hits.push(`${e.owner} ${e.verb} ${e.iface ?? other}`);
+      }
+      for (const d of codeDeps) {
+        if (!isInside(d.from, id) || !isInside(d.to, b.node)) continue;
+        hits.push(`${d.from} ${!d.via || d.via === 'import' ? 'imports code of' : `uses a ${d.via} of`} ${d.to} (${d.count} time${d.count === 1 ? '' : 's'}${d.samples[0] ? `, e.g. ${d.samples[0].from}` : ''})`);
+      }
+      if (hits.length) {
+        err('boundary', `"${id}" must never touch "${b.node}"${b.why ? ` (${b.why})` : ''}, but: ${hits.slice(0, 4).join('; ')}${hits.length > 4 ? `; and ${hits.length - 4} more` : ''}.`, id, nodes.get(id)!.source);
+      }
+    }
   }
 
   // ---- status -------------------------------------------------------------
@@ -1039,6 +1257,13 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     const n = nodes.get(i.node)!;
     i.status = i.retire ? 'retiring' : open(i.change) || n.status === 'planned' ? 'planned' : 'built';
   }
+  // An interface is "built" because nothing says it is planned. Where the code can be read, check that claim.
+  const absent = new Map<string, Interface[]>();
+  for (const i of ifaces.values()) if (i.evidence === 'unseen' && !i.holds && i.status === 'built') absent.set(i.node, [...(absent.get(i.node) ?? []), i]);
+  for (const [id, list] of absent) {
+    const named = list.slice(0, 5).map((i) => `${i.ref} (${i.route ?? `queue ${i.queue}`})`).join(', ');
+    warn('not-in-code', `"${id}" declares ${named}${list.length > 5 ? ', …' : ''}, which its code does not register, though it registers others. Fix the model, or tag ${list.length === 1 ? 'it' : 'them'} with the change that adds ${list.length === 1 ? 'it' : 'them'}.`, id, nodes.get(id)!.source);
+  }
   for (const e of edges) {
     const a = nodes.get(e.from)!;
     const b = nodes.get(e.to)!;
@@ -1055,10 +1280,20 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     const id = path.basename(abs).replace(/\.ya?ml$/, '');
     if (data.id && data.id !== id) err('id', `id "${data.id}" does not match file name "${id}".`, id, rel(abs));
     checkChange(data.change, id, rel(abs));
+    checkChange(data.modify, id, rel(abs));
     const steps: FlowStep[] = [];
     for (const item of toArr<any>(data.steps)) {
       const text: string = typeof item === 'string' ? item : item?.step ?? '';
       const note: string | undefined = typeof item === 'string' ? undefined : item?.note;
+      // A step may name one link outright: "billing~refund-card".
+      const named = text.trim().match(/^([^\s~]+)~(\S+)$/);
+      if (named) {
+        const nid = resolveNode(named[1]);
+        const e = nid ? edges.find((x) => x.id === linkRefs.get(`${nid}~${named[2]}`)) : undefined;
+        if (!e) err('reference', `Flow "${id}" step "${text}": there is no link "${text.trim()}". Give a link an "id:" to name it.`, id, rel(abs));
+        else steps.push({ text, from: e.from, to: e.to, iface: e.iface, edge: e.id, note });
+        continue;
+      }
       const m = text.match(/^\s*(\S+)\s*->\s*(\S+)\s*$/);
       if (!m) {
         err('flow-step', `Flow "${id}": cannot read step "${text}". Write "a -> b#interface".`, id, rel(abs));
@@ -1069,37 +1304,131 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       const a = resolveNode(aRef);
       const b = resolveNode(bRef);
       if (!a || !b) {
-        err('reference', `Flow "${id}" step "${text}": node "${!a ? aRef : bRef}" does not exist.`, id, rel(abs));
+        err('reference', `Flow "${id}" step "${text}": ${nodeProblem(ids, !a ? aRef : bRef)}`, id, rel(abs));
         continue;
       }
       const wantIface = bIface ? `${b}#${bIface}` : aIface ? `${a}#${aIface}` : undefined;
-      const pick = (exact: boolean): Edge | undefined =>
-        edges.find((e) =>
+      const pick = (exact: boolean): Edge[] =>
+        edges.filter((e) =>
           (exact ? e.from === a && e.to === b : within(e.from, a) && within(e.to, b)) && (!wantIface || e.iface === wantIface));
-      const edge = pick(true) ?? pick(false);
+      let found = pick(true);
+      if (!found.length) found = pick(false);
+      let edge: Edge | undefined = found[0];
+      let reply = false;
+      if (!edge) {
+        // The answer to a call travels against its link: "api -> web" after web calls api.
+        const back = (exact: boolean): Edge | undefined =>
+          edges.find((e) => e.verb === 'calls' && (exact ? e.from === b && e.to === a : within(e.from, b) && within(e.to, a)) && (!wantIface || e.iface === wantIface));
+        edge = back(true) ?? back(false);
+        reply = !!edge;
+      }
       if (!edge) err('flow-step', `Flow "${id}" step "${text}" matches no declared link.`, id, rel(abs));
-      steps.push({ text, from: a, to: b, iface: wantIface, edge: edge?.id ?? null, note });
+      else if (wantIface && found.length > 1 && new Set(found.map((e) => `${e.verb} ${e.shapes.join(',')}`)).size > 1) {
+        warn('ambiguous-step', `Flow "${id}" step "${text}" matches ${found.length} links that carry different data (${found.map((e) => e.shapes.join(', ') || 'no shape').join(' / ')}). Give the one you mean an "id:" and write the step as node~id.`, id, rel(abs));
+      }
+      steps.push({ text, from: a, to: b, iface: wantIface, edge: edge?.id ?? null, ...(reply ? { reply } : {}), note });
     }
-    flows.push({ id, title: data.title ?? titleOf(id), headline: data.headline ?? '', trigger: data.trigger, change: data.change, steps });
+    flows.push({ id, title: data.title ?? titleOf(id), headline: data.headline ?? '', trigger: data.trigger, change: data.change, modify: data.modify, steps, requirements: [] });
+  }
+
+  // ---- references that can name anything: requirement `covers`, and documents further down ----
+  const refIx: RefIndex = {
+    nodeIds: ids,
+    ifaces: new Set(ifaces.keys()),
+    reqs: new Set(reqs.keys()),
+    links: linkRefs,
+    shapes: new Map([...shapes.values()].map((sh) => [sh.id, sh.fields.map((f) => f.name)])),
+    flows: new Set(flows.map((f) => f.id)),
+    changes: new Set(changes.keys()),
+  };
+  const COVERABLE = ['interface', 'link', 'shape', 'flow'];
+  for (const q of reqs.values()) {
+    const out: string[] = [];
+    for (const t of q.covers) {
+      let r = resolveRef(refIx, t);
+      // A bare name that is also a node or a change means the flow or the shape here.
+      if (r && !COVERABLE.includes(r.type)) r = r.also.map((x) => resolveRef(refIx, x)).find((x) => x && COVERABLE.includes(x.type)) ?? null;
+      if (!r) {
+        warn('reference', `Requirement "${q.ref}" covers "${t}", which is not an interface, a link, a shape or a flow in the model.`, q.ref, nodes.get(q.node)!.source);
+        continue;
+      }
+      out.push(r.id);
+      if (r.type === 'flow') flows.find((f) => f.id === r!.id)!.requirements.push(q.ref);
+    }
+    q.covers = out;
   }
 
   // ---- changes: membership, progress, the "done" gate ----------------------
-  for (const n of nodes.values()) if (n.change && changes.has(n.change)) changes.get(n.change)!.nodes.push(n.id);
-  for (const e of edges) if (e.change && changes.has(e.change)) changes.get(e.change)!.edges.push(e.id);
-  for (const i of ifaces.values()) if (i.change && changes.has(i.change)) changes.get(i.change)!.interfaces.push(i.ref);
-  for (const q of reqs.values()) if (q.change && changes.has(q.change)) changes.get(q.change)!.requirements.push(q.ref);
-  for (const s of shapes.values()) if (s.change && changes.has(s.change)) changes.get(s.change)!.shapes.push(s.id);
-  for (const f of flows) if (f.change && changes.has(f.change)) changes.get(f.change)!.flows.push(f.id);
+  // An element joins a change three ways: `change` adds it, `modify` alters it, `retire` removes it.
+  // A node added by a change brings everything inside it along.
+  const addedBy = (n: GNode): string | undefined => {
+    for (let cur: GNode | undefined = n; cur; cur = cur.parent ? nodes.get(cur.parent) : undefined) if (cur.change) return cur.change;
+    return undefined;
+  };
+  const join = <T>(list: (c: Change) => T[], item: T, what: string, tags: { change?: string; modify?: string; retire?: string }): void => {
+    for (const [how, id] of [['add', tags.change], ['modify', tags.modify], ['retire', tags.retire]] as const) {
+      const c = id ? changes.get(id) : undefined;
+      if (!c) continue;
+      c.elements.push(`${how} ${what}`);
+      if (how !== 'retire' && !list(c).includes(item)) list(c).push(item);
+    }
+  };
+  for (const n of nodes.values()) join((c) => c.nodes, n.id, `node ${n.id}${n.code.length ? ` [${n.code.join(', ')}]` : ''}`, { change: addedBy(n), modify: n.modify, retire: n.retire });
+  for (const e of edges) join((c) => c.edges, e.id, `link ${e.ref ?? e.id}`, e);
+  for (const i of ifaces.values()) join((c) => c.interfaces, i.ref, `interface ${i.ref}`, i);
+  for (const q of reqs.values()) join((c) => c.requirements, q.ref, `requirement ${q.ref}`, q);
+  for (const sh of shapes.values()) join((c) => c.shapes, sh.id, `shape ${sh.id}`, sh);
+  for (const f of flows) join((c) => c.flows, f.id, `flow ${f.id}`, f);
+  const approvals = readApprovals(root);
   for (const c of changes.values()) {
+    c.elements.sort();
     const codeful = c.nodes.map((id) => nodes.get(id)!).filter((n) => n.code.length > 0);
     const builtNodes = codeful.filter((n) => n.files > 0);
     const rq = c.requirements.map((r) => reqs.get(r)!);
     c.progress = { total: codeful.length, built: builtNodes.length, reqTotal: rq.length, reqVerified: rq.filter((q) => q.state === 'verified').length };
-    const size = c.nodes.length + c.edges.length + c.interfaces.length + c.requirements.length + c.shapes.length + c.flows.length;
+    const size = c.elements.length;
     if (size === 0 && c.state !== 'dropped') warn('empty-change', `Change "${c.id}" has no elements. Tag elements with "change: ${c.id}".`, c.id);
+
+    // What the person approved, against what the change holds now.
+    const rec = approvals[c.id];
+    if (rec && (c.state === 'approved' || c.state === 'done')) {
+      const was = new Set(rec.elements ?? []);
+      const now = new Set(c.elements);
+      c.approval = { by: String(rec.by ?? ''), at: String(rec.at ?? ''), added: c.elements.filter((x) => !was.has(x)), removed: [...was].filter((x) => !now.has(x)) };
+      if (c.state === 'approved' && (c.approval.added.length || c.approval.removed.length)) {
+        const parts = [c.approval.added.length ? `added: ${c.approval.added.slice(0, 4).join('; ')}${c.approval.added.length > 4 ? '; …' : ''}` : '', c.approval.removed.length ? `removed: ${c.approval.removed.slice(0, 4).join('; ')}${c.approval.removed.length > 4 ? '; …' : ''}` : ''].filter(Boolean);
+        warn('scope-changed', `Change "${c.id}" is not what ${c.approval.by || 'the person'} approved (${parts.join('. ')}). Ask for it to be approved again: "armature approve ${c.id}".`, c.id);
+      }
+    } else if (c.state === 'approved') {
+      warn('unrecorded-approval', `Change "${c.id}" is approved, but nothing records who approved which elements. Run "armature approve ${c.id}".`, c.id);
+    }
+
+    // Code written before anyone approved the change.
+    if (c.state === 'proposed') {
+      const early = c.nodes.map((id) => nodes.get(id)!).filter((n) => addedBy(n) === c.id && n.files > 0);
+      if (early.length) {
+        warn('built-unapproved', `Change "${c.id}" is still proposed, but ${early.map((n) => `"${n.id}"`).join(', ')} already ${early.length === 1 ? 'has' : 'have'} code. Ask the person to approve the change; if a node existed before it, tag it "modify: ${c.id}" in place of "change:".`, c.id);
+      }
+    }
+
     if (c.state === 'done') {
+      for (const a of c.waits) err('not-done', `Change "${c.id}" is marked done, but it comes after "${a}", which is not done.`, c.id);
       for (const n of codeful) if (n.files === 0) err('not-done', `Change "${c.id}" is marked done, but node "${n.id}" has no code.`, c.id);
-      for (const q of rq) if (q.state !== 'verified') err('not-done', `Change "${c.id}" is marked done, but requirement "${q.ref}" is not verified.`, c.id);
+      const mine = c.interfaces.map((r) => ifaces.get(r)!);
+      for (const i of mine) if (i.evidence === 'unseen') err('not-done', `Change "${c.id}" is marked done, but interface "${i.ref}" is not in the code of "${i.node}".`, c.id);
+      // A requirement blocks "done" when a current report says it fails or has no test. With no
+      // report at all (a fresh checkout, CI without a test step) nothing can be said either way.
+      let unproven = 0;
+      for (const q of rq) {
+        if (q.state === 'verified') continue;
+        if (q.state === 'failing' || (cases.length > 0 && !q.outdated)) err('not-done', `Change "${c.id}" is marked done, but requirement "${q.ref}" is not verified.`, c.id);
+        else unproven++;
+      }
+      if (unproven) {
+        warn('done-unchecked', `Change "${c.id}" is marked done, but ${unproven} of its requirements cannot be checked here: ${cases.length ? 'the test report is older than the code' : 'there is no test report'}. Run the tests with a JUnit reporter.`, c.id);
+      } else if (size > 0 && codeful.length === 0 && rq.length === 0 && !mine.some((i) => i.evidence === 'seen')) {
+        warn('done-unchecked', `Change "${c.id}" is marked done, but nothing in it can be checked: it has no node with code, no requirement, and no interface the code index can see. Give it a requirement with a test.`, c.id);
+      }
     }
     if (c.state === 'dropped' && size > 0) warn('dropped', `Change "${c.id}" is dropped but ${size} element${size === 1 ? '' : 's'} still carry it.`, c.id);
   }
@@ -1114,30 +1443,12 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     }
   }
   // A document names parts of the model in its header and as [[references]]; they resolve like any other reference.
-  const flowIds = new Set(flows.map((f) => f.id));
   const resolveDocRef: DocResolver = (text) => {
-    if (nodes.has(text)) return { type: 'node', id: text, node: text };
-    if (text.includes('#')) {
-      const [n, i] = text.split('#');
-      const nid = resolveNode(n);
-      return nid && ifaces.has(`${nid}#${i}`) ? { type: 'interface', id: `${nid}#${i}`, node: nid } : null;
-    }
-    if (text.includes(':')) {
-      const [n, q] = text.split(':');
-      const nid = resolveNode(n);
-      return nid && reqs.has(`${nid}:${q}`) ? { type: 'requirement', id: `${nid}:${q}`, node: nid } : null;
-    }
-    if (shapes.has(text)) return { type: 'shape', id: text };
-    if (flowIds.has(text)) return { type: 'flow', id: text };
-    if (changes.has(text)) return { type: 'change', id: text };
-    const nid = resolveNode(text);
-    if (nid) return { type: 'node', id: nid, node: nid };
-    // "Shape.field" names one field of a shape.
-    const dot = text.indexOf('.');
-    const shape = dot > 0 ? shapes.get(text.slice(0, dot)) : undefined;
-    return shape?.fields.some((f) => f.name === text.slice(dot + 1)) ? { type: 'shape', id: shape.id } : null;
+    const r = resolveRef(refIx, text);
+    return r ? { type: r.type, id: r.id, node: r.node, also: r.also } : null;
   };
-  const { docs, issues: docIssues } = collectDocs(root, repo.files, nodes, [...changes.values()], declaredDocs, resolveDocRef, docsHome);
+  // A path the project ignores is not part of the system, and neither are the documents under it (generated copies, vendored text).
+  const { docs, issues: docIssues } = collectDocs(root, repo.files.filter((f) => !isIgnored(f)), nodes, [...changes.values()], declaredDocs, resolveDocRef, docsHome);
   for (const d of docs) for (const l of d.links) nodes.get(l.node)!.docs.push({ path: d.path, how: l.how, count: l.count });
   const rankHow = { declared: 3, inside: 2, mentions: 1 } as const;
   for (const n of nodes.values()) n.docs.sort((a, b) => rankHow[b.how] - rankHow[a.how] || b.count - a.count);
@@ -1145,6 +1456,9 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
   for (const d of docs) {
     if (d.broken.length) {
       warn('doc-reference', `"${d.path}" names ${d.broken.map((b) => `[[${b}]]`).join(', ')}, which ${d.broken.length === 1 ? 'is' : 'are'} not in the model.`, undefined, d.path);
+    }
+    if (d.ambiguous.length) {
+      warn('ambiguous-reference', `"${d.path}" uses names that mean more than one thing: ${d.ambiguous.join('; ')}. The first meaning is used; write the kind in front to say which, as in [[flow:checkout]].`, undefined, d.path);
     }
     if (d.changes.length && d.status) {
       warn('typed-status', `"${d.path}" types its status by hand ("${d.status.slice(0, 60)}"). It is the plan of ${d.changes.join(', ')}, so its status is computed (${d.state}). Remove the line.`, undefined, d.path);
@@ -1190,6 +1504,32 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     }
   }
 
+  // ---- accepted warnings: looked at by the team and kept, each with a reason ------------
+  let accepted = 0;
+  const accepts = toArr<any>(sys.accept).filter((a) => a && typeof a === 'object' && typeof a.code === 'string');
+  if (accepts.length) {
+    const used = new Set<number>();
+    const under = (file: string | undefined, where: string): boolean => !!file && (file === where || file.startsWith(`${where.replace(/\/+$/, '')}/`));
+    for (const a of accepts.filter((x) => NEVER_ACCEPTED.has(x.code))) {
+      err('accept', `accept: "${a.code}" cannot be accepted. It says a change is not what a person approved, and only an approval answers it: "armature approve <change>". Remove the entry.`, typeof a.ref === 'string' ? a.ref : undefined, `${mdir}/system.yaml`);
+    }
+    const kept = problems.filter((p) => {
+      if (p.level !== 'warning' || NEVER_ACCEPTED.has(p.code)) return true;
+      const i = accepts.findIndex((a) => a.code === p.code && (!a.ref || a.ref === p.ref) && (!a.file || under(p.file, String(a.file))) && (!a.match || p.message.includes(String(a.match))));
+      if (i < 0) return true;
+      used.add(i);
+      accepted++;
+      return false;
+    });
+    problems.length = 0;
+    problems.push(...kept);
+    const describe = (a: any): string => [a.code, a.ref, a.file, a.match ? `"${a.match}"` : ''].filter(Boolean).join(' ');
+    const idle = accepts.filter((a, i) => !used.has(i) && !NEVER_ACCEPTED.has(a.code));
+    if (idle.length) warn('stale-accept', `${idle.length} accept entr${idle.length === 1 ? 'y matches' : 'ies match'} no warning any more: ${idle.slice(0, 5).map(describe).join(', ')}${idle.length > 5 ? ', …' : ''}. Remove ${idle.length === 1 ? 'it' : 'them'}.`, undefined, `${mdir}/system.yaml`);
+    const bare = accepts.filter((a) => !String(a.why ?? '').trim());
+    if (bare.length) warn('accept-reason', `${bare.length} accept entr${bare.length === 1 ? 'y gives' : 'ies give'} no reason: ${bare.slice(0, 5).map(describe).join(', ')}${bare.length > 5 ? ', …' : ''}.`, undefined, `${mdir}/system.yaml`);
+  }
+
   const order = [...nodes.values()].sort((a, b) => a.id.localeCompare(b.id));
   return {
     version: 1,
@@ -1205,7 +1545,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       hasGit: repo.hasGit,
       hasRemote: repo.hasRemote,
       branch: repo.branch,
-      reports: { junit: junitFiles.length, lcov: lcovFiles.length },
+      reports: { junit: junitFiles.length, lcov: lcovFiles.length, ...(newestReport ? { at: new Date(newestReport).toISOString() } : {}) },
     },
     nodes: order,
     edges,
@@ -1224,6 +1564,8 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     codeDeps,
     docs,
     runtime: runtimeReports,
+    detectors,
+    accepted,
   };
 }
 

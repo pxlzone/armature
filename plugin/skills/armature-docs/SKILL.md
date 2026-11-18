@@ -22,7 +22,8 @@ change: refunds         # plans only: the change this document explains
 The [[api.server]] calls [[billing#refund]] directly and passes an [[Order]].
 ```
 
-- `about` and `[[references]]` take a node (`api.server`, or its last segment when unique), `node#interface`, a `Shape` or `Shape.field`, `node:requirement`, a flow id or a change id. `[[ref|shown text]]` sets the words shown.
+- `about` and `[[references]]` take a node (`api.server`, or its last segment when unique), `node#interface`, `node~link` for a link that has an `id`, a `Shape` or `Shape.field`, `node:requirement`, a flow id or a change id. `[[ref|shown text]]` sets the words shown.
+- A name that is several things at once (a node, a flow and a change called `refunds`) means the node. Write the kind in front for the others: `[[flow:refunds]]`, `[[change:refunds]]`. `armature check` reports a bare one as `ambiguous-reference`.
 - Use a reference the first time a part of the system is named in a section. Do not wrap every mention.
 - A reference inside code (backticks or a fenced block) is left alone.
 - New documents go in the documents folder: `armature/docs/`, or the folder that `docs:` in `armature/system.yaml` names (`armature orient` says which). In `armature/docs/`, use a folder per kind: `plans/`, `decisions/`, `guides/`, `runbooks/`, `reviews/`, `research/`. In a repo's own folder, follow the layout and naming already there. A README inside a package stays where it is.
@@ -33,7 +34,7 @@ The [[api.server]] calls [[billing#refund]] directly and passes an [[Order]].
 | Kind | Holds | Named |
 |---|---|---|
 | `plan` | Why a change is made and how: goal, approach, options rejected, open questions. Needs `change:` | the change id |
-| `decision` | One choice and its reasons. Never rewritten: a new decision replaces it and says so | what was decided |
+| `decision` | One choice and its reasons. Never rewritten: a new decision replaces it and says so with `supersedes: <the older file>` in its header | what was decided |
 | `guide` | How a part works, or how to work on it | the part |
 | `runbook` | Steps to operate something: deploy, restore, switch a domain | the task |
 | `review` | A dated audit and its findings. Open findings also go in the node's `todos:` | the subject and date |
@@ -73,4 +74,4 @@ Report what you deleted and why. Never delete a document on the strength of a mo
 
 ## When code changes
 
-`armature impact <ref>` lists the documents that name a node, interface or shape. Update them in the same change. When you rename or remove a part of the model, `armature check` reports every document that still names it.
+`armature impact <ref>` lists the documents that name a node, interface or shape. Update them in the same change. To rename a part of the model, use `armature rename <ref> <new>`: it rewrites the headers and `[[references]]` of every document. When you remove a part, `armature check` reports every document that still names it.

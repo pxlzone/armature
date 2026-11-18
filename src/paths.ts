@@ -44,3 +44,23 @@ export function docsDir(root: string): string {
 export function newPlanPath(docs: string, dir: string): string {
   return docs === `${dir}/docs` ? `${docs}/plans/<id>.md` : `${docs}/<id>-plan.md`;
 }
+
+/** Who approved which elements of each change. Written by "armature approve"; never edited by hand. */
+export const APPROVALS_FILE = 'approvals.lock.json';
+
+export interface Approval {
+  by: string;
+  at: string;
+  /** Everything the change added, altered or retired when it was approved, one line each. */
+  elements: string[];
+}
+
+/** The approvals recorded for a repo, by change id. */
+export function readApprovals(root: string): Record<string, Approval> {
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(root, modelDir(root), APPROVALS_FILE), 'utf8'));
+    return data && typeof data === 'object' ? data : {};
+  } catch {
+    return {};
+  }
+}

@@ -1,0 +1,7 @@
+headline: The page asks the server for the graph; the server compiles it on each request.
+trigger: A person opens armature view
+steps:
+  - developer -> viewer.app#diagram
+  - viewer.app -> viewer.server#graph
+  - viewer.server -> core.compiler#compile
+  - viewer.server#graph -> viewer.app

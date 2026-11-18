@@ -1,0 +1,53 @@
+kind: job
+role: gate and checks around tools
+tech: [node, typescript, claude-code]
+code: [src/agent.ts, src/gate.ts]
+tests: [test/gate.test.ts, test/gate-holes.test.ts, test/team.test.ts]
+never:
+  - to: viewer
+    why: A hook runs around every tool call and must load as little as it can.
+
+accepts:
+  - id: events
+    via: cli
+    takes: HookInput
+    gives: GateDecision
+    note: session-start, prompt, pre-write, pre-bash, pre-plan, post-edit and stop.
+
+reads:
+  - project.model#system
+  - project.model#nodes
+  - project.model#changes
+  - project.model#approvals
+  - project.source#files
+writes: [project.cache#hook-state]
+calls:
+  - to: core.compiler#compile
+  - to: core.answers#text
+  - to: core.code-graph#index
+  - to: core.model-tools#edit
+    note: Records an approval after the person confirmed the edit.
+
+rules:
+  - A hook must never block a session because the model is broken. Catch, say why on stderr, and let the tool call through.
+  - The gate reads only the YAML the question needs. It runs before every write and every shell command.
+  - Approving a change is the person's decision. No code path may record an approval the person did not confirm.
+  - What the gate cannot see before the fact, the checker must report after it.
+
+requirements:
+  - id: approval-is-asked
+    text: An edit that approves a change is put to the person, however the edit is written.
+    tests: test/gate-holes.test.ts
+    match: asks when only the word changes
+  - id: new-files-need-a-node
+    text: A new source file that no node owns is refused, and one in an existing node is not.
+    tests: test/gate.test.ts
+    match: lets new files into nodes that exist
+  - id: shell-commands-are-gated
+    text: A shell command that creates a source file or approves a change meets the same rules as an edit.
+    tests: test/gate-holes.test.ts
+    match: applies the gate to files a command creates
+  - id: silent-without-a-model
+    text: In a repo with no model a hook says nothing and does not load the CLI.
+    tests: test/gate-holes.test.ts
+    match: stays silent and quick where there is no model

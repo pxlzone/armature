@@ -1,0 +1,18 @@
+# What the compiler returns. Everything else reads this.
+Graph:
+  source: src/types.ts#Graph
+
+Problem:
+  source: src/types.ts#Problem
+
+CodeIndex:
+  source: src/code.ts#CodeIndex
+
+Approval:
+  source: src/paths.ts#Approval
+
+GateDecision:
+  source: src/gate.ts#GateDecision
+
+PullRequest:
+  source: src/repo.ts#PrInfo

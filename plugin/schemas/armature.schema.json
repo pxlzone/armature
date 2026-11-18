@@ -72,6 +72,10 @@
         },
         "retire": {
           "type": "string"
+        },
+        "modify": {
+          "type": "string",
+          "description": "The change that alters this interface. It exists today and stays built."
         }
       }
     },
@@ -100,6 +104,9 @@
               "type": "string"
             },
             "retire": {
+              "type": "string"
+            },
+            "modify": {
               "type": "string"
             }
           }
@@ -140,6 +147,13 @@
               "type": "string"
             },
             "retire": {
+              "type": "string"
+            },
+            "id": {
+              "$ref": "#/$defs/slug",
+              "description": "A name for the link, so flows and documents can point at it as node~id."
+            },
+            "modify": {
               "type": "string"
             }
           }
@@ -230,6 +244,13 @@
         },
         "match": {
           "$ref": "#/$defs/strings"
+        },
+        "modify": {
+          "type": "string"
+        },
+        "covers": {
+          "$ref": "#/$defs/strings",
+          "description": "What else the requirement is about: node#interface, node~link, Shape or a flow."
         }
       }
     },
@@ -365,6 +386,36 @@
         "shared": {
           "type": "boolean",
           "description": "Libraries only. false marks a domain's own part (a rendering engine, a pricing package), which stays on the map when shared libraries are hidden. Inherited by children."
+        },
+        "modify": {
+          "type": "string",
+          "description": "The change that alters this node. It exists today and keeps its status."
+        },
+        "never": {
+          "type": "array",
+          "description": "Nodes this node's code must never import from and that no link of it may reach. Inherited by children.",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "to"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "to": {
+                    "type": "string"
+                  },
+                  "why": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
         }
       }
     },
@@ -482,6 +533,37 @@
         "docs": {
           "type": "string",
           "description": "The folder that holds the documents, relative to the repo. Every Markdown file in it needs a kind. Default: docs inside the model folder (armature/docs)."
+        },
+        "accept": {
+          "type": "array",
+          "description": "Warnings the team has looked at and accepts, each with a reason.",
+          "items": {
+            "type": "object",
+            "required": [
+              "code"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "ref": {
+                "type": "string",
+                "description": "The node, shape or change the warning is about."
+              },
+              "file": {
+                "type": "string",
+                "description": "The file or folder the warning is reported on."
+              },
+              "match": {
+                "type": "string",
+                "description": "Text the warning message contains."
+              },
+              "why": {
+                "type": "string"
+              }
+            }
+          }
         }
       }
     },
@@ -508,6 +590,10 @@
             "additionalProperties": {
               "type": "string"
             }
+          },
+          "modify": {
+            "type": "string",
+            "description": "The change that alters this shape. Fields only the model lists are then planned."
           }
         }
       }
@@ -560,6 +646,9 @@
               }
             ]
           }
+        },
+        "modify": {
+          "type": "string"
         }
       }
     },
@@ -605,6 +694,10 @@
           "items": {
             "type": "string"
           }
+        },
+        "after": {
+          "$ref": "#/$defs/strings",
+          "description": "Changes that must be done before this one."
         }
       }
     },
@@ -680,7 +773,7 @@
         },
         "about": {
           "$ref": "#/$defs/strings",
-          "description": "References to what the document is about: a node, node#interface, Shape, node:requirement, flow or change."
+          "description": "References to what the document is about: a node, node#interface, node~link, Shape, node:requirement, flow or change."
         },
         "change": {
           "$ref": "#/$defs/strings",
@@ -691,6 +784,10 @@
         },
         "summary": {
           "type": "string"
+        },
+        "supersedes": {
+          "$ref": "#/$defs/strings",
+          "description": "Documents this one replaces, as paths from the repo root."
         }
       }
     }

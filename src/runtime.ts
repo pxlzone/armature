@@ -1,5 +1,8 @@
 // Compares what the code does at run time (tables it reads and writes, queues it starts or serves,
-// HTTP routes it serves and calls) with the links the model declares.
+// HTTP routes it serves and calls) with the links the model declares, in both directions:
+// what the code does that the model does not declare, and what the model declares that the code
+// does not show. The second only counts where a detector works on that node's code; everywhere
+// else the answer is "not checked", never "fine".
 import type { CodeIndex } from './code.js';
 import type { CodeDep, Edge, GNode, Interface, RuntimeItem, RuntimeReport } from './types.js';
 
@@ -22,9 +25,16 @@ function pathEndsWith(full: string, tail: string): boolean {
   return b.every((s, i) => s === ':' || a[off + i] === ':' || s === a[off + i]);
 }
 
+/** True when a route registered in code (`op` and `path`) is the route an interface declares. */
+function sameRoute(declared: string, op: string | undefined, path: string): boolean {
+  return pathEndsWith(routePath(declared), path) && (!/^[A-Z]+\s/.test(declared) || !op || declared.toUpperCase().startsWith(`${op} `));
+}
+
 export interface RuntimeResult {
   reports: RuntimeReport[];
   deps: CodeDep[];
+  /** Per node, what was recognised in its own files: route, http, queue, workflow, table. */
+  kinds: Map<string, Set<string>>;
 }
 
 export function analyzeRuntime(
@@ -34,17 +44,25 @@ export function analyzeRuntime(
   ifaces: Map<string, Interface>,
   owner: Map<string, string>,
   ancestors: (id: string) => string[],
+  /** True for an element that is still planned: it is not expected in the code yet. */
+  planned: (change: string | undefined) => boolean = () => false,
 ): RuntimeResult {
-  // Real table names, and which Drizzle constant names which table.
+  // Real table names, which Drizzle constant names which table, and which node's files define each table.
   const tables = new Set<string>();
   const constToTable = new Map<string, string | null>();
+  const definedBy = new Map<string, Set<string>>();
+  const define = (file: string, table: string): void => {
+    tables.add(table);
+    const id = owner.get(file);
+    if (id) definedBy.set(id, (definedBy.get(id) ?? new Set()).add(table));
+  };
   for (const f of Object.values(idx.files)) {
     for (const [name, s] of Object.entries(f.schemas ?? {})) {
       if (s.kind !== 'drizzle' || !s.table) continue;
-      tables.add(s.table);
+      define(f.path, s.table);
       constToTable.set(name, constToTable.has(name) && constToTable.get(name) !== s.table ? null : s.table);
     }
-    for (const op of f.sql ?? []) if (op.op === 'create') tables.add(op.table);
+    for (const op of f.sql ?? []) if (op.op === 'create') define(f.path, op.table);
   }
   const tableIface = new Map<string, Interface>();
   for (const i of ifaces.values()) {
@@ -52,7 +70,13 @@ export function analyzeRuntime(
     tables.add(i.id.replace(/-/g, '_'));
     tableIface.set(i.id.replace(/-/g, '_'), i);
   }
-  const family = (id: string): string[] => [id, ...ancestors(id), ...[...nodes.keys()].filter((k) => k.startsWith(`${id}.`))];
+  const allIds = [...nodes.keys()];
+  const families = new Map<string, string[]>();
+  const family = (id: string): string[] => {
+    let f = families.get(id);
+    if (!f) families.set(id, (f = [id, ...ancestors(id), ...allIds.filter((k) => k.startsWith(`${id}.`))]));
+    return f;
+  };
 
   // Declared links, indexed by the declaring node and its relatives.
   const declaredFrom = new Map<string, Edge[]>();
@@ -60,7 +84,6 @@ export function analyzeRuntime(
   const declaredBy = (id: string): Edge[] => family(id).flatMap((x) => declaredFrom.get(x) ?? []);
 
   const reports = new Map<string, RuntimeReport>();
-  const seenTables = new Map<string, Set<string>>();
   const deps = new Map<string, CodeDep>();
   const report = (id: string): RuntimeReport => {
     let r = reports.get(id);
@@ -80,6 +103,22 @@ export function analyzeRuntime(
     if (!r.undeclared.some((u) => u.kind === item.kind && u.what === item.what && u.op === item.op)) r.undeclared.push(item);
   };
 
+  // What each node's own files do, kept for the reverse check below.
+  const kinds = new Map<string, Set<string>>();
+  const seenTables = new Map<string, Set<string>>();
+  const routes = new Map<string, Array<{ op?: string; path: string }>>();
+  const served = new Map<string, Set<string>>();
+  const started = new Map<string, Set<string>>();
+  const httpCalls = new Map<string, string[]>();
+  const put = <T>(m: Map<string, Set<T>>, id: string, v: T): void => void m.set(id, (m.get(id) ?? new Set<T>()).add(v));
+  const across = <T>(m: Map<string, Set<T>>, id: string): Set<T> => new Set(family(id).flatMap((x) => [...(m.get(x) ?? [])]));
+  // The node and what is inside it: its own code. A match anywhere in the family counts as seen (a
+  // parent's server file may register a child's route), but "not there" is said only where a
+  // detector found the same kind of thing in the node's own code. A parent's routes say nothing
+  // about a child whose routes the index cannot read.
+  const own = (id: string): string[] => family(id).filter((x) => x === id || x.startsWith(`${id}.`));
+  const inOwn = <T>(m: Map<string, Set<T>>, id: string): boolean => own(id).some((x) => (m.get(x)?.size ?? 0) > 0);
+
   for (const f of Object.values(idx.files)) {
     if (f.test) continue;
     const id = owner.get(f.path);
@@ -92,27 +131,32 @@ export function analyzeRuntime(
       if (h.k === 'table') {
         const table = h.v.startsWith('const:') ? constToTable.get(h.v.slice(6)) ?? null : h.v;
         if (!table || !tables.has(table)) continue;
+        put(kinds, id, 'table');
         const iface = tableIface.get(table);
-        const seen = seenTables.get(id) ?? new Set<string>();
-        seen.add(table);
-        seenTables.set(id, seen);
+        put(seenTables, id, table);
         const ok = mine.some((e) => (e.iface === iface?.ref || (!e.iface && iface && (e.to === iface.node || e.from === iface.node))) && (h.op === 'write' ? e.verb === 'writes' : e.verb === 'reads' || e.verb === 'writes'));
         if (iface) dep(id, iface.node, 'table', ok, f.path, table);
         if (ok) report(id).confirmed++;
         else add(report(id), { kind: 'table', what: iface ? iface.ref : `${table} (not in the model)`, op: h.op, file: f.path, line: h.l });
       } else if (h.k === 'queue') {
+        put(kinds, id, 'queue');
         const target = [...ifaces.values()].find((i) => i.queue === h.v);
         if (h.op === 'consume') {
-          const ok = family(id).some((x) => nodes.get(x)!.interfaces.some((i) => i.queue === h.v));
+          put(served, id, h.v);
+          // Declared as an interface of the node, or as a read from a queue node that carries it.
+          const ok = family(id).some((x) => nodes.get(x)!.interfaces.some((i) => i.queue === h.v)) || mine.some((e) => e.verb === 'reads' && !!target && e.iface === target.ref);
           if (ok) report(id).confirmed++;
           else add(report(id), { kind: 'queue', what: h.v, op: 'serves', file: f.path, line: h.l });
-        } else if (target) {
+        } else {
+          put(started, id, h.v);
+          if (!target) continue;
           const ok = mine.some((e) => e.iface === target.ref || e.to === target.node);
           dep(id, target.node, 'queue', ok, f.path, h.v);
           if (ok) report(id).confirmed++;
           else if (!family(id).includes(target.node)) add(report(id), { kind: 'queue', what: target.ref, op: 'starts', file: f.path, line: h.l });
         }
       } else if (h.k === 'workflow') {
+        put(kinds, id, 'workflow');
         const name = kebab(h.v.replace(/Workflow$/, ''));
         const target = [...ifaces.values()].find((i) => i.id === name || i.id === kebab(h.v));
         if (!target || family(id).includes(target.node)) continue;
@@ -121,6 +165,8 @@ export function analyzeRuntime(
         if (ok) report(id).confirmed++;
         else add(report(id), { kind: 'workflow', what: target.ref, op: 'starts', file: f.path, line: h.l });
       } else if (h.k === 'http') {
+        put(kinds, id, 'http');
+        httpCalls.set(id, [...(httpCalls.get(id) ?? []), h.v]);
         const target = [...ifaces.values()].find((i) => i.route && i.via !== 'pgmq' && pathEndsWith(routePath(i.route), h.v));
         if (!target || family(id).includes(target.node)) continue;
         const ok = mine.some((e) => e.iface === target.ref || e.to === target.node || family(target.node).includes(e.to));
@@ -128,24 +174,69 @@ export function analyzeRuntime(
         if (ok) report(id).confirmed++;
         else add(report(id), { kind: 'http', what: `${target.ref} (${h.v})`, op: 'calls', file: f.path, line: h.l });
       } else if (h.k === 'route') {
-        const served = family(id).some((x) => nodes.get(x)!.interfaces.some((i) => i.route && pathEndsWith(routePath(i.route), h.v) && (!/^[A-Z]+\s/.test(i.route) || i.route.toUpperCase().startsWith(`${h.op} `))));
-        if (served) report(id).confirmed++;
+        put(kinds, id, 'route');
+        routes.set(id, [...(routes.get(id) ?? []), { op: h.op, path: h.v }]);
+        const ok = family(id).some((x) => nodes.get(x)!.interfaces.some((i) => i.route && sameRoute(i.route, h.op, h.v)));
+        if (ok) report(id).confirmed++;
         else add(report(id), { kind: 'route', what: `${h.op} ${h.v}`, op: 'serves', file: f.path, line: h.l });
       }
     }
   }
 
-  // Declared table links whose table never appears in the node's code. Only for nodes that own code.
-  for (const n of nodes.values()) {
-    if (n.files === 0 || n.kind === 'store') continue;
-    const seen = new Set<string>();
-    for (const x of family(n.id)) for (const t of seenTables.get(x) ?? []) seen.add(t);
-    for (const e of declaredFrom.get(n.id) ?? []) {
-      if ((e.verb !== 'reads' && e.verb !== 'writes') || !e.iface || e.status === 'planned') continue;
-      const table = e.iface.split('#')[1].replace(/-/g, '_');
-      if (!tables.has(table) || seen.has(table)) continue;
-      report(n.id).unseen.push({ kind: 'table', what: e.iface, op: e.verb === 'writes' ? 'write' : 'read' });
+  // The other direction: does the code show what the model declares? An answer is given only
+  // where the same kind of thing was recognised in that node's code; otherwise it stays unchecked.
+  const unusedNode = (id: string): boolean => [id, ...ancestors(id)].some((x) => nodes.get(x)?.unused);
+  for (const i of ifaces.values()) {
+    const n = nodes.get(i.node)!;
+    if (i.holds) {
+      // A store's tables can be checked when the store owns the files that define tables.
+      if (across(definedBy, i.node).has(i.id.replace(/-/g, '_'))) i.evidence = 'seen';
+      else if (inOwn(definedBy, i.node)) i.evidence = planned(i.change) ? 'unchecked' : 'unseen';
+      continue;
     }
+    if (n.kind === 'store' || unusedNode(i.node)) continue;
+    let seen: boolean | null = null;
+    if (i.route && i.via !== 'pgmq') {
+      if (family(i.node).some((x) => (routes.get(x) ?? []).some((r) => sameRoute(i.route as string, r.op, r.path)))) seen = true;
+      else if (own(i.node).some((x) => (routes.get(x) ?? []).length > 0)) seen = false;
+    } else if (i.queue && i.via === 'temporal') {
+      if (across(served, i.node).has(i.queue)) seen = true;
+      else if (inOwn(served, i.node)) seen = false;
+    }
+    if (seen === null) continue;
+    i.evidence = seen ? 'seen' : planned(i.change) ? 'unchecked' : 'unseen';
+    if (i.evidence === 'unseen') report(i.node).unseen.push({ kind: i.route ? 'route' : 'queue', what: i.ref, op: 'serves' });
   }
-  return { reports: [...reports.values()].sort((a, b) => b.undeclared.length - a.undeclared.length || a.node.localeCompare(b.node)), deps: [...deps.values()] };
+  for (const e of edges) {
+    const iface = e.iface ? ifaces.get(e.iface) : undefined;
+    const n = nodes.get(e.owner)!;
+    if (!iface || n.kind === 'store' || unusedNode(e.owner)) continue;
+    let seen: boolean | null = null;
+    let kind: RuntimeItem['kind'] = 'table';
+    if (e.verb === 'reads' || e.verb === 'writes') {
+      if (iface.holds) {
+        const table = iface.id.replace(/-/g, '_');
+        if (across(seenTables, e.owner).has(table)) seen = true;
+        else if (tables.has(table) && inOwn(seenTables, e.owner)) seen = false;
+      } else if (iface.queue && iface.via === 'temporal') {
+        kind = 'queue';
+        if (across(served, e.owner).has(iface.queue)) seen = true;
+        else if (inOwn(served, e.owner)) seen = false;
+      }
+    } else if (iface.queue && iface.via === 'temporal') {
+      kind = 'queue';
+      if (across(started, e.owner).has(iface.queue)) seen = true;
+      else if (inOwn(started, e.owner)) seen = false;
+    } else if (iface.route && iface.via !== 'pgmq' && iface.route.includes('/api/')) {
+      // Outgoing HTTP is recognised only as "/api/..." paths in strings.
+      kind = 'http';
+      if (family(e.owner).some((x) => (httpCalls.get(x) ?? []).some((v) => pathEndsWith(routePath(iface.route as string), v)))) seen = true;
+      else if (own(e.owner).some((x) => (httpCalls.get(x) ?? []).length > 0)) seen = false;
+    }
+    if (seen === null) continue;
+    e.evidence = seen ? 'seen' : planned(e.change) ? 'unchecked' : 'unseen';
+    // The access may go through shared code, so this is reported by "armature drift" and never warned about.
+    if (e.evidence === 'unseen') report(e.owner).unseen.push({ kind, what: iface.ref, op: e.verb === 'writes' ? 'write' : e.verb === 'reads' ? 'read' : e.verb });
+  }
+  return { reports: [...reports.values()].sort((a, b) => b.undeclared.length - a.undeclared.length || a.node.localeCompare(b.node)), deps: [...deps.values()], kinds };
 }
