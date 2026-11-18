@@ -826,11 +826,12 @@ export function traceText(g: Graph, what: string): string {
   const nodes = new Map(g.nodes.map((n) => [n.id, n]));
   const held = g.nodes.flatMap((n) => n.interfaces).filter((i) => i.holds && has(i.takes));
   if (held.length) out.push('held in:', ...held.map((i) => `  ${i.ref}${i.status !== 'built' ? ` [${i.status}]` : ''}`));
-  // Who ends up with the data: the far end of a link, or the caller when it comes back as an answer.
+  // Who ends up with the data: the far end of a link, and the caller when it comes back as an answer.
+  // A call can do both, and each direction is its own move.
   const moves: Array<{ to: string; line: string }> = [];
   for (const e of g.edges) {
     if (has(e.shapes)) moves.push({ to: e.to, line: arrow(e) });
-    else if (has(e.returns)) moves.push({ to: e.from, line: `${arrow(e)}  (comes back to ${e.from})` });
+    if (has(e.returns)) moves.push({ to: e.from, line: `${arrow(e)}  (comes back to ${e.from})` });
   }
   const outside = moves.filter((m) => nodes.get(m.to)?.kind === 'external');
   if (outside.length) out.push('leaves the system to:', ...outside.map((m) => `  ${m.to}: ${m.line}`));

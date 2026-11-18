@@ -240,7 +240,7 @@ When your code change adds, removes or alters an interface, a link between nodes
 
 When what a document says stops being true, update the document in the same change. `armature impact <ref>` names the documents to look at.
 
-A warning that is a false positive is not fixed by bending the model. Tell the person; they can accept it in `system.yaml` under `accept:` with a reason.
+A warning that is a false positive is not fixed by bending the model. Tell the person; they can accept it in `system.yaml` under `accept:` with a reason. The warnings about approval (`scope-changed`, `unrecorded-approval`, `built-unapproved`) cannot be accepted: ask the person to approve the change.
 
 ## Todos and tech debt
 

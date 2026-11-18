@@ -111,7 +111,8 @@ class Rewriter {
       kind === 'node' ? this.mapNode(ref)
       : kind === 'interface' ? this.part(ref, '#', 'interface')
       : kind === 'requirement' ? this.part(ref, ':', 'requirement')
-      : kind === 'link' ? (ref.includes('~') ? this.part(ref, '~', 'link') : ref.split('>').map((p, i) => (i === 1 ? p : this.target(p.replace(/~\d+$/, '')) + (p.match(/~\d+$/)?.[0] ?? ''))).join('>'))
+      // A named link is node~name. One with no name is known by its ends, "a>calls>b#c", with "~2" after it when two links share them.
+      : kind === 'link' ? (!ref.includes('>') ? this.part(ref, '~', 'link') : ref.split('>').map((p, i) => (i === 1 ? p : this.target(p.replace(/~\d+$/, '')) + (p.match(/~\d+$/)?.[0] ?? ''))).join('>'))
       : kind === 'shape' ? this.shape(ref)
       : this.ren.type === kind && ref === this.ren.from ? this.ren.to : ref;
     return `${how} ${kind} ${fixed}${rest}`;
@@ -214,7 +215,8 @@ function rewriteDoc(text: string, rw: Rewriter): string | null {
         }
       },
     });
-    if (touched) head = head.replace(front, doc.toString({ lineWidth: 0, flowCollectionPadding: false }).replace(/\n$/, ''));
+    // As a function, so a "$" in the header (a title with "US$") is text and not a replacement pattern.
+    if (touched) head = head.replace(front, () => doc.toString({ lineWidth: 0, flowCollectionPadding: false }).replace(/\n$/, ''));
   }
   const parts = body.split(/(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)/);
   const prose = parts.map((part, i) => (i % 2 ? part : part.replace(new RegExp(REF.source, 'g'), (whole, ref: string) => whole.replace(ref, rw.any(ref)))));

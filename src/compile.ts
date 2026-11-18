@@ -39,13 +39,50 @@ export interface CompileOptions {
   days?: number;
 }
 
+/**
+ * Warnings that say a change went past its approval. What the planning gate cannot stop before the
+ * fact is reported by these afterwards, so no `accept:` entry may silence them.
+ */
+const NEVER_ACCEPTED = new Set(['scope-changed', 'unrecorded-approval', 'built-unapproved']);
+
+/** In armature/.cache: the requirements that failed in the last test report the compiler read. */
+export const FAILED_FILE = 'failing.json';
+
+function readFailures(file: string): string[] {
+  try {
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return Array.isArray(data?.requirements) ? data.requirements.filter((x: unknown): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberFailures(file: string, refs: string[]): void {
+  const next = [...refs].sort();
+  if (JSON.stringify(readFailures(file)) === JSON.stringify(next)) return;
+  try {
+    if (next.length === 0) fs.rmSync(file, { force: true });
+    else {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, `${JSON.stringify({ requirements: next }, null, 2)}\n`);
+    }
+  } catch {
+    /* a checkout that cannot be written to: the memory helps, the check does not need it */
+  }
+}
+
 const isInside = (id: string, anc: string): boolean => id === anc || id.startsWith(`${anc}.`);
 
-/** The literal start of a glob: a file that does not begin with it cannot match. Empty when there is none. */
+/**
+ * The literal start of a glob: a file that does not begin with it cannot match. Empty when there is
+ * none, or when the text of the glob is not what it matches: an escape ("app/\[id\]/**") or an
+ * extglob changes its meaning, and the matcher drops a leading "./".
+ */
 function fixedStart(glob: string): string {
-  if (glob.includes('(')) return '';
-  const cut = glob.search(/[*?[{]/);
-  return cut < 0 ? glob : glob.slice(0, cut);
+  if (/[(\\]/.test(glob)) return '';
+  const plain = glob.replace(/^(?:\.\/)+/, '');
+  const cut = plain.search(/[*?[{]/);
+  return cut < 0 ? plain : plain.slice(0, cut);
 }
 
 export function findRoot(start: string): string | null {
@@ -848,6 +885,18 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     else if (p?.fresh) q.state = 'verified';
     else if (p?.old) q.outdated = true;
   }
+  // A failure is remembered. With a report to read, the memory is brought up to date; with none,
+  // what failed last time still fails, so removing the report does not turn it into "nothing to check".
+  const failedFile = path.join(archAbs, '.cache', FAILED_FILE);
+  if (cases.length > 0) rememberFailures(failedFile, [...reqs.values()].filter((q) => q.state === 'failing').map((q) => q.ref));
+  else {
+    for (const ref of readFailures(failedFile)) {
+      const q = reqs.get(ref);
+      if (!q) continue;
+      q.state = 'failing';
+      q.evidence.push('failed: in the last test report seen, which is no longer there. Run the tests again.');
+    }
+  }
   const outdated = [...reqs.values()].filter((q) => q.outdated);
   if (outdated.length) {
     const where = [...new Set(outdated.map((q) => q.node))];
@@ -1461,8 +1510,11 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
   if (accepts.length) {
     const used = new Set<number>();
     const under = (file: string | undefined, where: string): boolean => !!file && (file === where || file.startsWith(`${where.replace(/\/+$/, '')}/`));
+    for (const a of accepts.filter((x) => NEVER_ACCEPTED.has(x.code))) {
+      err('accept', `accept: "${a.code}" cannot be accepted. It says a change is not what a person approved, and only an approval answers it: "armature approve <change>". Remove the entry.`, typeof a.ref === 'string' ? a.ref : undefined, `${mdir}/system.yaml`);
+    }
     const kept = problems.filter((p) => {
-      if (p.level !== 'warning') return true;
+      if (p.level !== 'warning' || NEVER_ACCEPTED.has(p.code)) return true;
       const i = accepts.findIndex((a) => a.code === p.code && (!a.ref || a.ref === p.ref) && (!a.file || under(p.file, String(a.file))) && (!a.match || p.message.includes(String(a.match))));
       if (i < 0) return true;
       used.add(i);
@@ -1472,7 +1524,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     problems.length = 0;
     problems.push(...kept);
     const describe = (a: any): string => [a.code, a.ref, a.file, a.match ? `"${a.match}"` : ''].filter(Boolean).join(' ');
-    const idle = accepts.filter((_a, i) => !used.has(i));
+    const idle = accepts.filter((a, i) => !used.has(i) && !NEVER_ACCEPTED.has(a.code));
     if (idle.length) warn('stale-accept', `${idle.length} accept entr${idle.length === 1 ? 'y matches' : 'ies match'} no warning any more: ${idle.slice(0, 5).map(describe).join(', ')}${idle.length > 5 ? ', …' : ''}. Remove ${idle.length === 1 ? 'it' : 'them'}.`, undefined, `${mdir}/system.yaml`);
     const bare = accepts.filter((a) => !String(a.why ?? '').trim());
     if (bare.length) warn('accept-reason', `${bare.length} accept entr${bare.length === 1 ? 'y gives' : 'ies give'} no reason: ${bare.slice(0, 5).map(describe).join(', ')}${bare.length > 5 ? ', …' : ''}.`, undefined, `${mdir}/system.yaml`);

@@ -270,8 +270,8 @@ An element joins a change in one of three ways:
 A node added by a change brings everything inside it along. `after: [other-change]` on a change names the changes that must be done first; a cycle is an error.
 
 - `proposed` to `approved` is a human decision. Agents implement only approved changes. An agent's edit that sets `approved` is put to the person to confirm (section 9.4), and a person can run `armature approve <id>`.
-- **An approval covers what was approved.** `armature/approvals.lock.json` records who approved a change, when, and the list of its elements at that moment (nodes with their `code` globs, interfaces, links, shapes, requirements, flows, each as added, modified or retired). Elements that join or leave afterwards are a `scope-changed` warning until the change is approved again, and new files in a node that joined afterwards are refused. An approved change with no record is `unrecorded-approval`.
-- `done` is set by the agent and enforced by the checker. It is an error while a node of the change has no code, an interface of it is known to be missing from the code, a change it comes `after` is not done, or a requirement of it fails or has no test in a current test report. Where nothing can be checked (no test report on this machine, a report older than the code, or a change with no node, requirement or interface a check can see) the checker says so with `done-unchecked` in place of passing silently or failing a clean checkout.
+- **An approval covers what was approved.** `armature/approvals.lock.json` records who approved a change, when, and the list of its elements at that moment (nodes with their `code` globs, interfaces, links, shapes, requirements, flows, each as added, modified or retired). Elements that join or leave afterwards are a `scope-changed` warning until the change is approved again, and new files in a node that joined afterwards are refused. `modify:` on a node covers the nodes inside it, which the record does not list one by one: they take new files once the change is approved, as long as they already have code. An approved change with no record is `unrecorded-approval`.
+- `done` is set by the agent and enforced by the checker. It is an error while a node of the change has no code, an interface of it is known to be missing from the code, a change it comes `after` is not done, or a requirement of it fails or has no test in a current test report. A requirement that failed in the last report the tool read keeps failing when that report is removed: the tool keeps the list in `armature/.cache/failing.json`, and only a newer run clears it. Where nothing can be checked (no test report on this machine, a report older than the code, or a change with no node, requirement or interface a check can see) the checker says so with `done-unchecked` in place of passing silently or failing a clean checkout.
 - A plan with phases is one change per phase, linked with `after:`, so each phase has its own computed status.
 - Code in a node whose change is still `proposed` is `built-unapproved`: it was written before anyone approved it.
 
@@ -558,6 +558,7 @@ One diagram, switchable overlays.
 - A change marked `done` that is not (section 5.5).
 - A node touching what its `never:` rules out (`boundary`).
 - Changes that wait for each other in a circle (`cycle`).
+- An `accept:` entry for a warning that cannot be accepted (`accept`).
 
 **Warnings** never block by themselves. They fall in two groups, so the ones that matter are not buried under the ones that only ask for more detail:
 
@@ -580,7 +581,7 @@ One diagram, switchable overlays.
       why: The admin console builds SQL from user input; the table name is not ours.
   ```
 
-  It is then dropped from the list and counted in the summary. An entry with no reason is `accept-reason`, and one that matches nothing any more is `stale-accept`. Errors cannot be accepted.
+  It is then dropped from the list and counted in the summary. An entry with no reason is `accept-reason`, and one that matches nothing any more is `stale-accept`. Errors cannot be accepted. Neither can `scope-changed`, `unrecorded-approval` and `built-unapproved`: they report what the planning gate could not stop, so only an approval answers them, and an entry that names one is an `accept` error.
 
 ## 9. Agent interface (Claude Code)
 
@@ -733,7 +734,8 @@ Say so if any is wrong.
 - What a change alters is tagged `modify:`. The model does not hold the state before and the state after.
 - The boundary a tool can check is called `never:`. There is no "only": a list of everything a node may touch goes stale faster than a list of what it must not.
 - A test report is current when its file is newer than the files of the node it speaks for. This reads modification times, so a fresh checkout makes every older report outdated, which is the safe direction.
-- An approval confirmed through the agent covers what the change holds when the agent's turn ends, so the elements written straight after the yes are part of it.
+- A failed requirement is remembered in `armature/.cache/`, so removing a test report does not clear it. The cache is not committed: a clean checkout has no such memory, and deleting the whole cache folder forgets it.
+- An approval confirmed through the agent covers what the change holds when the confirmed edit goes through. What is added afterwards, in the same turn or a later one, is a `scope-changed` warning and is asked about again. A question the person declines leaves no record.
 - Approvals are a file in the model folder (`approvals.lock.json`), like confirmed shapes, and are committed.
 - A warning is accepted in `system.yaml` with a reason, and the baseline is a separate file that `--new` compares against. Neither changes what `armature check` exits with unless `--fail-on` is given.
 - The gate treats SQL, schema files, Terraform and shell scripts as source.

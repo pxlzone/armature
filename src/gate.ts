@@ -5,6 +5,7 @@
 // the fact (a script that writes files, a tool it does not know), the checker reports afterwards:
 // "built-unapproved", "scope-changed", "unrecorded-approval".
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import YAML from 'yaml';
 import { matcher, readRepo } from './repo.js';
@@ -32,6 +33,8 @@ export interface WriteInput {
   file_path?: string;
   path?: string;
   destination?: string;
+  /** The file a move takes its content from (MCP move_file). */
+  source?: string;
   notebook_path?: string;
   content?: string;
   old_string?: string;
@@ -146,10 +149,18 @@ export function targetOf(input: WriteInput | undefined): string | undefined {
 }
 
 /** The text a file would hold after the write, or null when the edit cannot be replayed from what the hook was given. */
-function resultOf(before: string, input: WriteInput): string | null {
+function resultOf(root: string, before: string, input: WriteInput): string | null {
   if (typeof input.content === 'string') return input.content;
   const edits = input.edits ?? (input.new_string !== undefined ? [{ old_string: input.old_string, new_string: input.new_string, replace_all: input.replace_all }] : []);
-  if (!edits.length) return null;
+  if (!edits.length) {
+    // A move brings the content of the file it moves.
+    if (typeof input.source !== 'string') return null;
+    try {
+      return fs.readFileSync(path.resolve(root, input.source), 'utf8');
+    } catch {
+      return null;
+    }
+  }
   let text = before;
   for (const e of edits) {
     const from = e.old_string ?? e.oldText;
@@ -199,11 +210,22 @@ export function writeGate(root: string, input: WriteInput): GateDecision | null 
 
   const mdir = modelDir(root);
   const before = fs.existsSync(abs) && fs.statSync(abs).isFile() ? fs.readFileSync(abs, 'utf8') : '';
-  const after = resultOf(before, input);
+  const after = resultOf(root, before, input);
+  // A write the gate was given no text for (a tool whose input it does not know): it cannot say what the file will hold.
+  const blind = after === null && !writtenText(input).trim();
+
+  // Moving the approval record away removes it as surely as editing it.
+  const from = typeof input.source === 'string' ? path.relative(root, path.resolve(root, input.source)).replace(/\\/g, '/') : '';
+  if (from === `${mdir}/${APPROVALS_FILE}`) {
+    return { decision: 'ask', reason: `This moves ${from}, the record of which elements of a change a person approved. Without it, nothing holds a change to what was approved. Allow it only if you mean to remove that record.` };
+  }
 
   const change = rel.startsWith(`${mdir}/changes/`) ? rel.slice(mdir.length + 9).match(/^([^/]+)\.ya?ml$/)?.[1] : undefined;
   if (change) {
     const was = before ? yamlValue(before, 'state') || 'proposed' : '';
+    if (blind && was !== 'approved' && was !== 'done') {
+      return { decision: 'ask', approves: change, reason: `This writes change "${change}" in a way the gate cannot read, so it may set it to approved. Approving a change is a person's decision: allow it only if you know what this write puts in the file.${elementsNote(root, change)}` };
+    }
     // Without the result, go by what the write adds: "state: approved", or the bare word replacing another.
     const added = writtenText(input);
     const guess = /^\s*(?:state:\s*)?["']?(approved|done)\b["']?\s*$/m.exec(added)?.[1] ?? '';
@@ -228,6 +250,9 @@ export function writeGate(root: string, input: WriteInput): GateDecision | null 
   }
   if (rel === `${mdir}/system.yaml`) {
     const was = yamlValue(before, 'gate');
+    if (blind && was !== 'off') {
+      return { decision: 'ask', reason: `This writes ${rel} in a way the gate cannot read, so it may set "gate: off" and switch the planning gate off for everyone who works in this repo. Allow it only if you know what this write puts in the file.` };
+    }
     const now = after !== null ? yamlValue(after, 'gate') : /^\s*gate:\s*["']?off\b/m.test(writtenText(input)) ? 'off' : was;
     if (now === 'off' && was !== 'off') {
       return { decision: 'ask', reason: 'This sets "gate: off" in system.yaml, which switches the planning gate off for everyone who works in this repo: new source files would no longer need a node or an approved change. Allow it only if that is what you want.' };
@@ -268,8 +293,13 @@ export function writeGate(root: string, input: WriteInput): GateDecision | null 
   if (tag && state === 'approved') {
     // The person approved a list of elements. A node that joined the change afterwards is not on it.
     const rec = readApprovals(root)[tag.id];
-    const listed = new RegExp(`^(?:add|modify) node ${owner.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?: |$)`);
-    if (rec && !(rec.elements ?? []).some((e) => listed.test(e))) {
+    const elements = rec?.elements ?? [];
+    const names = (how: string, id: string): RegExp => new RegExp(`^(?:${how}) node ${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?: |$)`);
+    const self = elements.some((e) => names('add|modify', owner.id).test(e));
+    // "modify:" on a node covers what is inside it, and the record lists only the node that
+    // carries the tag: a node inside it is covered by that entry.
+    const around = tag.how === 'modify' && owner.id.split('.').slice(0, -1).some((_, i, all) => elements.some((e) => names('modify', all.slice(0, i + 1).join('.')).test(e)));
+    if (rec && !self && !around) {
       return {
         decision: 'deny',
         reason:
@@ -277,7 +307,9 @@ export function writeGate(root: string, input: WriteInput): GateDecision | null 
           `The approval covers the elements the change had then. Ask the person to approve it again ("armature approve ${tag.id}"); do not run that yourself.`,
       };
     }
-    return null;
+    // Covered only through the node around it: altering that node adds no new node, so this one
+    // must already be part of the system, which the check below settles.
+    if (!rec || self) return null;
   }
   // No open change stands behind the node. It can take new files only if it is already part of the system.
   if (!readRepo(root).files.some((f) => owner.code(f) || owner.tests(f))) {
@@ -325,6 +357,32 @@ function shellWords(text: string): string[] {
 
 const unquote = (w: string): string => w.replace(/^(['"])(.*)\1$/, '$2');
 
+/** A path as the shell reads it from `dir`: "~" is the home folder, not a folder here. Null for another user's home. */
+function shellPath(dir: string, w: string): string | null {
+  if (w === '~' || w.startsWith('~/')) return path.join(os.homedir(), w.slice(1));
+  if (w.startsWith('~')) return null;
+  return path.resolve(dir, w);
+}
+
+/**
+ * Every path a command names, each read from the folder the command stands in at that point
+ * ("cd" is followed). Text inside quotes counts too: a script given inline names its files there.
+ */
+function shellPaths(command: string, cwd: string): string[] {
+  const out: string[] = [];
+  let dir = cwd;
+  for (const part of command.split(/&&|\|\||;|\n|\|/)) {
+    const words = shellWords(part.trim().replace(/^[({]\s*/, '')).map(unquote);
+    if ((words[0] === 'cd' || words[0] === 'pushd') && words[1]) dir = shellPath(dir, words[1]) ?? dir;
+    for (const token of part.split(/[\s'"`()=<>,]+/)) {
+      if (!token || token.startsWith('-') || token.includes('$')) continue;
+      const p = shellPath(dir, token);
+      if (p) out.push(p);
+    }
+  }
+  return out;
+}
+
 /** Files a shell command would create, as far as a reading of the command can tell: redirects, tee, touch, cp, mv. */
 export function shellTargets(command: string, cwd: string): string[] {
   // Heredoc bodies are file content, not commands.
@@ -336,11 +394,12 @@ export function shellTargets(command: string, cwd: string): string[] {
     if (!words.length) continue;
     const bare = words.map(unquote);
     if (bare[0] === 'cd' && bare[1]) {
-      dir = path.resolve(dir, bare[1]);
+      dir = shellPath(dir, bare[1]) ?? dir;
       continue;
     }
     const add = (w: string | undefined): void => {
-      if (w && !/[$*?`]/.test(w) && w !== '/dev/null') out.push(path.resolve(dir, w));
+      const p = w && !/[$*?`]/.test(w) && w !== '/dev/null' ? shellPath(dir, w) : null;
+      if (p) out.push(p);
     };
     // Redirects: "> file", ">> file", ">file".
     for (let i = 0; i < words.length; i++) {
@@ -354,8 +413,8 @@ export function shellTargets(command: string, cwd: string): string[] {
     if (cmd === 'touch' || cmd === 'tee') args.forEach(add);
     else if ((cmd === 'cp' || cmd === 'mv' || cmd === 'install' || cmd === 'ln') && args.length >= 2) {
       const dest = args[args.length - 1];
-      const destAbs = path.resolve(dir, dest);
-      const isDir = dest.endsWith('/') || (fs.existsSync(destAbs) && fs.statSync(destAbs).isDirectory());
+      const destAbs = shellPath(dir, dest);
+      const isDir = dest.endsWith('/') || (!!destAbs && fs.existsSync(destAbs) && fs.statSync(destAbs).isDirectory());
       if (isDir) for (const src of args.slice(0, -1)) add(path.join(dest, path.basename(src)));
       else add(dest);
     }
@@ -371,15 +430,26 @@ export function shellTargets(command: string, cwd: string): string[] {
 export function bashGate(root: string, command: string, cwd: string = root): GateDecision | null {
   if (!command || !command.trim()) return null;
   const mdir = modelDir(root);
-  if (/\barmature(?:\.mjs)?["']?\s+(?:--root\s+\S+\s+)?approve\b/.test(command)) {
+  // The command by its name, or the CLI file the launcher loads, run directly.
+  if (/(?:\barmature(?:\.mjs)?|\b(?:dist|src)\/cli\.(?:mjs|js|ts))["']?\s+(?:--root\s+\S+\s+)?approve\b/.test(command)) {
     return ask('This runs "armature approve", which records that a person approved a change. Approving a change is your decision: allow it only if you have reviewed the plan and want it built.');
   }
-  const writes = /(?:^|[^<>&|\d-])>{1,2}(?!&)|\b(?:sed|perl)\b[^|;&\n]*\s-[A-Za-z]*i|\btee\b|\b(?:mv|cp|rm|truncate|dd|install)\b|\byq\b[^|;&\n]*\s-i|\b(?:python3?|node|ruby|deno|bun|tsx)\b/.test(command);
-  const touched = new RegExp(`${mdir}/(changes/[^\\s'"]+\\.ya?ml|${APPROVALS_FILE.replace(/\./g, '\\.')})`).exec(command);
+  const writes =
+    /(?:^|[^<>&|\d-])>{1,2}(?!&)|\b(?:sed|perl)\b[^|;&\n]*\s(?:-[A-Za-z]*i|--in-place)|\btee\b|\b(?:mv|cp|rm|truncate|dd|install|sponge)\b|\byq\b[^|;&\n]*\s(?:-i|--inplace)|\bawk\b[^|;&\n]*\s-i\s*inplace|\b(?:python3?|node|ruby|deno|bun|tsx)\b/.test(command);
+  // The files the command names, wherever it stands: "changes/mail.yaml" from inside the model folder is the same file.
+  const named = writes ? shellPaths(command, cwd).map((p) => path.relative(root, p).replace(/\\/g, '/')) : [];
+  const isRecord = (rel: string): boolean => {
+    if (rel === `${mdir}/${APPROVALS_FILE}`) return true;
+    const name = rel.startsWith(`${mdir}/changes/`) ? rel.slice(mdir.length + 9) : '';
+    return !!name && !name.includes('/') && (/\.ya?ml$/.test(name) || /[*?[{]/.test(name));
+  };
+  const touched = named.find(isRecord) ?? new RegExp(`${mdir}/(?:changes/[^\\s'"]+\\.ya?ml|${APPROVALS_FILE.replace(/\./g, '\\.')})`).exec(command)?.[0];
   if (touched && writes) {
-    return ask(`This command writes to ${mdir}/${touched[1]}. Approving a change, and the record of what was approved, are a person's decisions: allow it only if you know what it changes there.`);
+    return ask(`This command writes to ${touched}. Approving a change, and the record of what was approved, are a person's decisions: allow it only if you know what it changes there.`);
   }
-  if (writes && new RegExp(`${mdir}/system\\.ya?ml`).test(command) && /gate:\s*["']?off\b/.test(command) && gateOn(root)) {
+  const system = named.includes(`${mdir}/system.yaml`) || new RegExp(`${mdir}/system\\.ya?ml`).test(command);
+  // As YAML ("gate: off") or as an assignment a tool such as yq takes (.gate = "off").
+  if (writes && system && /\bgate["']?\s*[:=]\s*["']?off\b/.test(command) && gateOn(root)) {
     return ask('This command sets "gate: off" in system.yaml, which switches the planning gate off for everyone who works in this repo. Allow it only if that is what you want.');
   }
   for (const target of shellTargets(command, cwd)) {
@@ -421,10 +491,28 @@ export function planGate(plan: string, dir: string = MODEL_DIR, planPath = newPl
   }
   if (root) {
     const made: string[] = [];
+    // What the repo holds, read once and only if a path needs it: it tells a new file from a short name for an old one.
+    let held: { files: string[]; dirs: string[] } | null = null;
+    const repo = (): { files: string[]; dirs: string[] } => {
+      if (!held) {
+        const files = readRepo(root).files;
+        held = { files, dirs: [...new Set(files.map((f) => path.posix.dirname(f)))] };
+      }
+      return held;
+    };
     for (const m of plan.matchAll(/[\w@.\-/]+\/[\w@.\-/]+\.[A-Za-z]+\b/g)) {
       const file = m[0].replace(/^\.\//, '');
       if (made.includes(file) || !CODE_FILE.test(file) || fs.existsSync(path.resolve(root, file))) continue;
-      if (writeGate(root, { file_path: file, content: '' })?.decision === 'deny') made.push(file);
+      // A package or a module path, not a file of this repo: "@scope/pkg/x.js", "github.com/org/x.go", "pkg/x.js" from node_modules.
+      const first = file.split('/')[0];
+      if (first && !fs.existsSync(path.join(root, first)) && (first.startsWith('@') || first.indexOf('.') > 0 || fs.existsSync(path.join(root, 'node_modules', first)))) continue;
+      // A file that exists, named by the end of its path ("api/server.ts" for packages/server/src/api/server.ts).
+      if (repo().files.some((f) => f.endsWith(`/${file}`))) continue;
+      // A new file named the same way is judged in each folder its path could mean.
+      const dir = path.posix.dirname(file);
+      const homes = repo().dirs.filter((d) => d.endsWith(`/${dir}`)).slice(0, 20);
+      const places = [file, ...homes.map((h) => `${h}/${path.posix.basename(file)}`)];
+      if (places.every((p) => writeGate(root, { file_path: p, content: '' })?.decision === 'deny')) made.push(file);
     }
     if (made.length) {
       return (

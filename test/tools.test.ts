@@ -142,6 +142,25 @@ describe('armature rename', () => {
     expect(compile(root).problems.map((p) => p.code)).not.toContain('scope-changed');
   });
 
+  it('leaves a "$" in a document header as it is', () => {
+    // "$'" in a replacement string means "what follows the match"; the header must not be read that way.
+    write('armature/docs/notes/prices.md', "---\nkind: note\ntitle: 'Costs in US$'\nabout: [billing]\n---\nThe [[billing]] worker charges in dollars.\n");
+    rename(root, 'billing', 'payments');
+    expect(read('armature/docs/notes/prices.md')).toBe("---\nkind: note\ntitle: 'Costs in US$'\nabout: [payments]\n---\nThe [[payments]] worker charges in dollars.\n");
+    expect(compile(root).problems.filter((p) => p.file === 'armature/docs/notes/prices.md')).toEqual([]);
+  });
+
+  it('keeps an approval record true when two links share their ends', () => {
+    write('armature/changes/mail.yaml', 'title: Receipts by email\nstate: proposed\n');
+    write('armature/nodes/mail.yaml', 'kind: worker\nrole: sends receipts\ncode: [src/mail/**]\nchange: mail\ncalls:\n  - to: api#checkout\n    change: mail\n    note: When the order is placed.\n  - to: api#checkout\n    change: mail\n    note: When it is paid.\n');
+    approveChange(root, 'mail', 'Sam');
+    // Two links with no name and the same ends: the second is told apart by "~2".
+    expect(readApprovals(root).mail.elements).toContain('add link mail>calls>api#checkout~2');
+    rename(root, 'api', 'orders');
+    expect(readApprovals(root).mail.elements).toEqual(['add link mail>calls>orders#checkout', 'add link mail>calls>orders#checkout~2', 'add node mail [src/mail/**]']);
+    expect(compile(root).problems.map((p) => p.code)).not.toContain('scope-changed');
+  });
+
   it('refuses a name that is taken or malformed', () => {
     expect(rename(root, 'billing', 'api')).toBe('Node "api" already exists.');
     expect(rename(root, 'billing', 'nowhere.charger')).toContain('"nowhere" is not a node');

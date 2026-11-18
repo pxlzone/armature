@@ -6,6 +6,8 @@ holds:
     shape: CodeIndex
   - id: reports
     note: JUnit and lcov files the project's tests write.
+  - id: failures
+    note: Requirements that failed in the last test report read, so removing a report does not clear a failure.
   - id: history
     note: Recent commits and the files each changed.
   - id: summaries

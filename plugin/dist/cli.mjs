@@ -19939,10 +19939,36 @@ function dedupeHints(list) {
 		return true;
 	});
 }
-/** Comments blanked out, with every line break kept so line numbers still hold. */
+/**
+* Comments blanked out, with every line break kept so line numbers still hold. A block comment is
+* one only outside a string: the slash and star in '/static/*' or "src/**" start nothing.
+*/
 function withoutComments(source) {
 	const blank = (m) => m.replace(/[^\n]/g, " ");
-	return source.replace(/\/\*[\s\S]*?\*\//g, blank).replace(/^[ \t]*(?:\/\/|#|--).*$/gm, blank);
+	const out = [];
+	const n = source.length;
+	let kept = 0;
+	let i = 0;
+	while (i < n) {
+		const c = source[i];
+		if (c === "/" && source[i + 1] === "*" && source[i - 1] !== "\\") {
+			const end = source.indexOf("*/", i + 2);
+			if (end < 0) break;
+			out.push(source.slice(kept, i), blank(source.slice(i, end + 2)));
+			i = kept = end + 2;
+		} else if (c === "/" && source[i + 1] === "/") {
+			const eol = source.indexOf("\n", i);
+			i = eol < 0 ? n : eol;
+		} else if (c === "\"" || c === "'" || c === "`") {
+			const close = c !== "`" && source.startsWith(c.repeat(3), i) ? c.repeat(3) : c;
+			const oneLine = close.length === 1 && c !== "`";
+			let j = i + close.length;
+			while (j < n && !source.startsWith(close, j) && !(oneLine && source[j] === "\n")) j += source[j] === "\\" ? 2 : 1;
+			i = Math.min(n, source.startsWith(close, j) ? j + close.length : j);
+		} else i++;
+	}
+	out.push(source.slice(kept));
+	return out.join("").replace(/^[ \t]*(?:\/\/|#|--).*$/gm, blank);
 }
 /**
 * Table names in SQL text. Kept as candidates; the compiler keeps only names that are real tables.
@@ -20369,7 +20395,7 @@ async function buildCodeIndex(root) {
 	const mdir = modelDir(root);
 	const wanted = repo.files.filter((f) => LANG_OF[path.extname(f)] && !SKIP$2.test(`/${f}`) && !f.endsWith(".d.ts") && !/\.min\.js$/.test(f) && !f.startsWith(`${mdir}/`));
 	const prior = readCodeIndex(root);
-	const old = prior?.extractor === 8 ? prior : null;
+	const old = prior?.extractor === 9 ? prior : null;
 	const files = {};
 	const resolve = makeResolver(root, all);
 	let parsed = 0;
@@ -20456,7 +20482,7 @@ async function buildCodeIndex(root) {
 	}
 	const index = {
 		version: 3,
-		extractor: 8,
+		extractor: 9,
 		builtAt: (/* @__PURE__ */ new Date()).toISOString(),
 		files
 	};
@@ -20600,6 +20626,8 @@ function analyzeRuntime(idx, nodes, edges, ifaces, owner, ancestors, planned = (
 	const httpCalls = /* @__PURE__ */ new Map();
 	const put = (m, id, v) => void m.set(id, (m.get(id) ?? /* @__PURE__ */ new Set()).add(v));
 	const across = (m, id) => new Set(family(id).flatMap((x) => [...m.get(x) ?? []]));
+	const own = (id) => family(id).filter((x) => x === id || x.startsWith(`${id}.`));
+	const inOwn = (m, id) => own(id).some((x) => (m.get(x)?.size ?? 0) > 0);
 	for (const f of Object.values(idx.files)) {
 		if (f.test) continue;
 		const id = owner.get(f.path);
@@ -20699,18 +20727,18 @@ function analyzeRuntime(idx, nodes, edges, ifaces, owner, ancestors, planned = (
 	for (const i of ifaces.values()) {
 		const n = nodes.get(i.node);
 		if (i.holds) {
-			const mine = new Set(family(i.node).flatMap((x) => [...definedBy.get(x) ?? []]));
-			if (mine.size) i.evidence = mine.has(i.id.replace(/-/g, "_")) ? "seen" : planned(i.change) ? "unchecked" : "unseen";
+			if (across(definedBy, i.node).has(i.id.replace(/-/g, "_"))) i.evidence = "seen";
+			else if (inOwn(definedBy, i.node)) i.evidence = planned(i.change) ? "unchecked" : "unseen";
 			continue;
 		}
 		if (n.kind === "store" || unusedNode(i.node)) continue;
 		let seen = null;
 		if (i.route && i.via !== "pgmq") {
-			const found = family(i.node).flatMap((x) => routes.get(x) ?? []);
-			if (found.length) seen = found.some((r) => sameRoute(i.route, r.op, r.path));
+			if (family(i.node).some((x) => (routes.get(x) ?? []).some((r) => sameRoute(i.route, r.op, r.path)))) seen = true;
+			else if (own(i.node).some((x) => (routes.get(x) ?? []).length > 0)) seen = false;
 		} else if (i.queue && i.via === "temporal") {
-			const found = across(served, i.node);
-			if (found.size) seen = found.has(i.queue);
+			if (across(served, i.node).has(i.queue)) seen = true;
+			else if (inOwn(served, i.node)) seen = false;
 		}
 		if (seen === null) continue;
 		i.evidence = seen ? "seen" : planned(i.change) ? "unchecked" : "unseen";
@@ -20730,20 +20758,20 @@ function analyzeRuntime(idx, nodes, edges, ifaces, owner, ancestors, planned = (
 			if (iface.holds) {
 				const table = iface.id.replace(/-/g, "_");
 				if (across(seenTables, e.owner).has(table)) seen = true;
-				else if (tables.has(table) && family(e.owner).some((x) => kinds.get(x)?.has("table"))) seen = false;
+				else if (tables.has(table) && inOwn(seenTables, e.owner)) seen = false;
 			} else if (iface.queue && iface.via === "temporal") {
 				kind = "queue";
-				const found = across(served, e.owner);
-				if (found.size) seen = found.has(iface.queue);
+				if (across(served, e.owner).has(iface.queue)) seen = true;
+				else if (inOwn(served, e.owner)) seen = false;
 			}
 		} else if (iface.queue && iface.via === "temporal") {
 			kind = "queue";
-			const found = across(started, e.owner);
-			if (found.size) seen = found.has(iface.queue);
+			if (across(started, e.owner).has(iface.queue)) seen = true;
+			else if (inOwn(started, e.owner)) seen = false;
 		} else if (iface.route && iface.via !== "pgmq" && iface.route.includes("/api/")) {
 			kind = "http";
-			const found = family(e.owner).flatMap((x) => httpCalls.get(x) ?? []);
-			if (found.length) seen = found.some((v) => pathEndsWith(routePath(iface.route), v));
+			if (family(e.owner).some((x) => (httpCalls.get(x) ?? []).some((v) => pathEndsWith(routePath(iface.route), v)))) seen = true;
+			else if (own(e.owner).some((x) => (httpCalls.get(x) ?? []).length > 0)) seen = false;
 		}
 		if (seen === null) continue;
 		e.evidence = seen ? "seen" : planned(e.change) ? "unchecked" : "unseen";
@@ -21621,12 +21649,47 @@ var BUILTIN_SKIP = [
 	"**/.gitkeep",
 	"**/{pnpm-lock.yaml,package-lock.json,npm-shrinkwrap.json,yarn.lock,bun.lock,bun.lockb,poetry.lock,uv.lock,Cargo.lock,Gemfile.lock,composer.lock,go.sum}"
 ];
+/**
+* Warnings that say a change went past its approval. What the planning gate cannot stop before the
+* fact is reported by these afterwards, so no `accept:` entry may silence them.
+*/
+var NEVER_ACCEPTED = /* @__PURE__ */ new Set([
+	"scope-changed",
+	"unrecorded-approval",
+	"built-unapproved"
+]);
+/** In armature/.cache: the requirements that failed in the last test report the compiler read. */
+var FAILED_FILE = "failing.json";
+function readFailures(file) {
+	try {
+		const data = JSON.parse(fs.readFileSync(file, "utf8"));
+		return Array.isArray(data?.requirements) ? data.requirements.filter((x) => typeof x === "string") : [];
+	} catch {
+		return [];
+	}
+}
+function rememberFailures(file, refs) {
+	const next = [...refs].sort();
+	if (JSON.stringify(readFailures(file)) === JSON.stringify(next)) return;
+	try {
+		if (next.length === 0) fs.rmSync(file, { force: true });
+		else {
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, `${JSON.stringify({ requirements: next }, null, 2)}\n`);
+		}
+	} catch {}
+}
 var isInside = (id, anc) => id === anc || id.startsWith(`${anc}.`);
-/** The literal start of a glob: a file that does not begin with it cannot match. Empty when there is none. */
+/**
+* The literal start of a glob: a file that does not begin with it cannot match. Empty when there is
+* none, or when the text of the glob is not what it matches: an escape ("app/\[id\]/**") or an
+* extglob changes its meaning, and the matcher drops a leading "./".
+*/
 function fixedStart(glob) {
-	if (glob.includes("(")) return "";
-	const cut = glob.search(/[*?[{]/);
-	return cut < 0 ? glob : glob.slice(0, cut);
+	if (/[(\\]/.test(glob)) return "";
+	const plain = glob.replace(/^(?:\.\/)+/, "");
+	const cut = plain.search(/[*?[{]/);
+	return cut < 0 ? plain : plain.slice(0, cut);
 }
 function findRoot(start) {
 	let dir = path.resolve(start);
@@ -22554,6 +22617,14 @@ function compile$1(root, opts = {}) {
 		else if (p?.fresh) q.state = "verified";
 		else if (p?.old) q.outdated = true;
 	}
+	const failedFile = path.join(archAbs, ".cache", FAILED_FILE);
+	if (cases.length > 0) rememberFailures(failedFile, [...reqs.values()].filter((q) => q.state === "failing").map((q) => q.ref));
+	else for (const ref of readFailures(failedFile)) {
+		const q = reqs.get(ref);
+		if (!q) continue;
+		q.state = "failing";
+		q.evidence.push("failed: in the last test report seen, which is no longer there. Run the tests again.");
+	}
 	const outdated = [...reqs.values()].filter((q) => q.outdated);
 	if (outdated.length) {
 		const where = [...new Set(outdated.map((q) => q.node))];
@@ -23227,8 +23298,9 @@ function compile$1(root, opts = {}) {
 	if (accepts.length) {
 		const used = /* @__PURE__ */ new Set();
 		const under = (file, where) => !!file && (file === where || file.startsWith(`${where.replace(/\/+$/, "")}/`));
+		for (const a of accepts.filter((x) => NEVER_ACCEPTED.has(x.code))) err("accept", `accept: "${a.code}" cannot be accepted. It says a change is not what a person approved, and only an approval answers it: "armature approve <change>". Remove the entry.`, typeof a.ref === "string" ? a.ref : void 0, `${mdir}/system.yaml`);
 		const kept = problems.filter((p) => {
-			if (p.level !== "warning") return true;
+			if (p.level !== "warning" || NEVER_ACCEPTED.has(p.code)) return true;
 			const i = accepts.findIndex((a) => a.code === p.code && (!a.ref || a.ref === p.ref) && (!a.file || under(p.file, String(a.file))) && (!a.match || p.message.includes(String(a.match))));
 			if (i < 0) return true;
 			used.add(i);
@@ -23243,7 +23315,7 @@ function compile$1(root, opts = {}) {
 			a.file,
 			a.match ? `"${a.match}"` : ""
 		].filter(Boolean).join(" ");
-		const idle = accepts.filter((_a, i) => !used.has(i));
+		const idle = accepts.filter((a, i) => !used.has(i) && !NEVER_ACCEPTED.has(a.code));
 		if (idle.length) warn("stale-accept", `${idle.length} accept entr${idle.length === 1 ? "y matches" : "ies match"} no warning any more: ${idle.slice(0, 5).map(describe).join(", ")}${idle.length > 5 ? ", …" : ""}. Remove ${idle.length === 1 ? "it" : "them"}.`, void 0, `${mdir}/system.yaml`);
 		const bare = accepts.filter((a) => !String(a.why ?? "").trim());
 		if (bare.length) warn("accept-reason", `${bare.length} accept entr${bare.length === 1 ? "y gives" : "ies give"} no reason: ${bare.slice(0, 5).map(describe).join(", ")}${bare.length > 5 ? ", …" : ""}.`, void 0, `${mdir}/system.yaml`);
@@ -24177,14 +24249,16 @@ function traceText(g, what) {
 	const held = g.nodes.flatMap((n) => n.interfaces).filter((i) => i.holds && has(i.takes));
 	if (held.length) out.push("held in:", ...held.map((i) => `  ${i.ref}${i.status !== "built" ? ` [${i.status}]` : ""}`));
 	const moves = [];
-	for (const e of g.edges) if (has(e.shapes)) moves.push({
-		to: e.to,
-		line: arrow(e)
-	});
-	else if (has(e.returns)) moves.push({
-		to: e.from,
-		line: `${arrow(e)}  (comes back to ${e.from})`
-	});
+	for (const e of g.edges) {
+		if (has(e.shapes)) moves.push({
+			to: e.to,
+			line: arrow(e)
+		});
+		if (has(e.returns)) moves.push({
+			to: e.from,
+			line: `${arrow(e)}  (comes back to ${e.from})`
+		});
+	}
 	const outside = moves.filter((m) => nodes.get(m.to)?.kind === "external");
 	if (outside.length) out.push("leaves the system to:", ...outside.map((m) => `  ${m.to}: ${m.line}`));
 	const rest = moves.filter((m) => !outside.includes(m));
@@ -24248,6 +24322,7 @@ function approveChange(root, id, by) {
 	if (!file) return `No change "${id}". "armature status" lists the changes.`;
 	const g = compile$1(root);
 	const c = g.changes.find((x) => x.id === id);
+	if (!c) return `Change "${id}" cannot be read: ${g.problems.find((p) => p.level === "error" && p.file?.endsWith(path.basename(file)))?.message ?? "its file does not parse"}. Fix it ("armature check --only errors"), then approve.`;
 	if (c.state === "done" || c.state === "dropped") return `Change "${id}" is ${c.state}. Only a proposed or approved change can be approved.`;
 	if (c.elements.length === 0) return `Change "${id}" has no elements yet, so there is nothing to approve. Tag the planned elements with "change: ${id}" first.`;
 	const errors = g.problems.filter((p) => p.level === "error");
@@ -24274,31 +24349,45 @@ function approveChange(root, id, by) {
 }
 var PENDING = "pending-approval.json";
 var PENDING_FOR = 36e5;
-/** Notes that the person was just asked to approve a change, so the record can be written once the edit goes through. */
-function notePendingApproval(root, id) {
-	const dir = path.join(root, modelDir(root), ".cache");
-	fs.mkdirSync(dir, { recursive: true });
-	fs.writeFileSync(path.join(dir, PENDING), JSON.stringify({
+var pendingFile = (root) => path.join(root, modelDir(root), ".cache", PENDING);
+/** A fingerprint of one tool call's input, so the edit the person was asked about can be told from any other. */
+function callKey(input) {
+	const stable = (v) => Array.isArray(v) ? v.map(stable) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => [k, stable(x)])) : v;
+	return createHash("sha256").update(JSON.stringify(stable(input ?? null))).digest("hex").slice(0, 32);
+}
+/**
+* Notes that the person was just asked to approve a change with one edit (`key` is that edit's
+* fingerprint), so the record can be written if, and only if, that edit goes through.
+*/
+function notePendingApproval(root, id, key) {
+	fs.mkdirSync(path.dirname(pendingFile(root)), { recursive: true });
+	fs.writeFileSync(pendingFile(root), JSON.stringify({
 		id,
+		key,
 		at: Date.now()
 	}));
 }
+/** Forgets a question that is no longer open: another write began, or the agent stopped. */
+function dropPendingApproval(root) {
+	fs.rmSync(pendingFile(root), { force: true });
+}
 /**
-* After an approval the person confirmed: records it, with what the change holds now. Called after
-* each edit to the model and once more when the agent stops, so elements written straight after the
-* approval are part of it. `final` ends the window.
+* Called after an edit went through. If it is the edit the person was asked about, they said yes:
+* the approval is recorded with what the change holds at that moment, and the question is closed.
+* Nothing written later joins the approval; that is a scope change, and it is asked about again.
+* Returns true when a record was written.
 */
-function settleApproval(root, final) {
-	const file = path.join(root, modelDir(root), ".cache", PENDING);
+function settleApproval(root, key) {
 	let pending;
 	try {
-		pending = JSON.parse(fs.readFileSync(file, "utf8"));
+		pending = JSON.parse(fs.readFileSync(pendingFile(root), "utf8"));
 	} catch {
-		return;
+		return false;
 	}
 	const live = typeof pending.id === "string" && typeof pending.at === "number" && Date.now() - pending.at < PENDING_FOR;
-	if (live) recordApproval(root, pending.id);
-	if (final || !live) fs.rmSync(file, { force: true });
+	if (live && pending.key !== key) return false;
+	dropPendingApproval(root);
+	return live ? recordApproval(root, pending.id) !== null : false;
 }
 // src/baseline.ts
 var BASELINE_FILE = "baseline.json";
@@ -24639,7 +24728,7 @@ var Rewriter = class {
 		const m = text.match(/^(\w+) (\w+) (\S+)(.*)$/);
 		if (!m) return text;
 		const [, how, kind, ref, rest] = m;
-		return `${how} ${kind} ${kind === "node" ? this.mapNode(ref) : kind === "interface" ? this.part(ref, "#", "interface") : kind === "requirement" ? this.part(ref, ":", "requirement") : kind === "link" ? ref.includes("~") ? this.part(ref, "~", "link") : ref.split(">").map((p, i) => i === 1 ? p : this.target(p.replace(/~\d+$/, "")) + (p.match(/~\d+$/)?.[0] ?? "")).join(">") : kind === "shape" ? this.shape(ref) : this.ren.type === kind && ref === this.ren.from ? this.ren.to : ref}${rest}`;
+		return `${how} ${kind} ${kind === "node" ? this.mapNode(ref) : kind === "interface" ? this.part(ref, "#", "interface") : kind === "requirement" ? this.part(ref, ":", "requirement") : kind === "link" ? !ref.includes(">") ? this.part(ref, "~", "link") : ref.split(">").map((p, i) => i === 1 ? p : this.target(p.replace(/~\d+$/, "")) + (p.match(/~\d+$/)?.[0] ?? "")).join(">") : kind === "shape" ? this.shape(ref) : this.ren.type === kind && ref === this.ren.from ? this.ren.to : ref}${rest}`;
 	}
 };
 /** The keys above a scalar in a YAML document, outermost first. A value's own key is the last. */
@@ -24731,7 +24820,7 @@ function rewriteDoc(text, rw) {
 				touched = true;
 			}
 		} });
-		if (touched) head = head.replace(front, doc.toString({
+		if (touched) head = head.replace(front, () => doc.toString({
 			lineWidth: 0,
 			flowCollectionPadding: false
 		}).replace(/\n$/, ""));
@@ -25600,14 +25689,21 @@ function targetOf(input) {
 	return input?.file_path ?? input?.path ?? input?.destination ?? input?.notebook_path;
 }
 /** The text a file would hold after the write, or null when the edit cannot be replayed from what the hook was given. */
-function resultOf(before, input) {
+function resultOf(root, before, input) {
 	if (typeof input.content === "string") return input.content;
 	const edits = input.edits ?? (input.new_string !== void 0 ? [{
 		old_string: input.old_string,
 		new_string: input.new_string,
 		replace_all: input.replace_all
 	}] : []);
-	if (!edits.length) return null;
+	if (!edits.length) {
+		if (typeof input.source !== "string") return null;
+		try {
+			return fs.readFileSync(path.resolve(root, input.source), "utf8");
+		} catch {
+			return null;
+		}
+	}
 	let text = before;
 	for (const e of edits) {
 		const from = e.old_string ?? e.oldText;
@@ -25654,10 +25750,21 @@ function writeGate(root, input) {
 	if (!rel || rel.startsWith("..")) return null;
 	const mdir = modelDir(root);
 	const before = fs.existsSync(abs) && fs.statSync(abs).isFile() ? fs.readFileSync(abs, "utf8") : "";
-	const after = resultOf(before, input);
+	const after = resultOf(root, before, input);
+	const blind = after === null && !writtenText(input).trim();
+	const from = typeof input.source === "string" ? path.relative(root, path.resolve(root, input.source)).replace(/\\/g, "/") : "";
+	if (from === `${mdir}/approvals.lock.json`) return {
+		decision: "ask",
+		reason: `This moves ${from}, the record of which elements of a change a person approved. Without it, nothing holds a change to what was approved. Allow it only if you mean to remove that record.`
+	};
 	const change = rel.startsWith(`${mdir}/changes/`) ? rel.slice(mdir.length + 9).match(/^([^/]+)\.ya?ml$/)?.[1] : void 0;
 	if (change) {
 		const was = before ? yamlValue(before, "state") || "proposed" : "";
+		if (blind && was !== "approved" && was !== "done") return {
+			decision: "ask",
+			approves: change,
+			reason: `This writes change "${change}" in a way the gate cannot read, so it may set it to approved. Approving a change is a person's decision: allow it only if you know what this write puts in the file.${elementsNote(root, change)}`
+		};
 		const added = writtenText(input);
 		const guess = /^\s*(?:state:\s*)?["']?(approved|done)\b["']?\s*$/m.exec(added)?.[1] ?? "";
 		const now = after !== null ? yamlValue(after, "state") : guess;
@@ -25678,6 +25785,10 @@ function writeGate(root, input) {
 	};
 	if (rel === `${mdir}/system.yaml`) {
 		const was = yamlValue(before, "gate");
+		if (blind && was !== "off") return {
+			decision: "ask",
+			reason: `This writes ${rel} in a way the gate cannot read, so it may set "gate: off" and switch the planning gate off for everyone who works in this repo. Allow it only if you know what this write puts in the file.`
+		};
 		if ((after !== null ? yamlValue(after, "gate") : /^\s*gate:\s*["']?off\b/m.test(writtenText(input)) ? "off" : was) === "off" && was !== "off") return {
 			decision: "ask",
 			reason: "This sets \"gate: off\" in system.yaml, which switches the planning gate off for everyone who works in this repo: new source files would no longer need a node or an approved change. Allow it only if that is what you want."
@@ -25706,12 +25817,15 @@ function writeGate(root, input) {
 	};
 	if (tag && state === "approved") {
 		const rec = readApprovals(root)[tag.id];
-		const listed = new RegExp(`^(?:add|modify) node ${owner.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?: |$)`);
-		if (rec && !(rec.elements ?? []).some((e) => listed.test(e))) return {
+		const elements = rec?.elements ?? [];
+		const names = (how, id) => new RegExp(`^(?:${how}) node ${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?: |$)`);
+		const self = elements.some((e) => names("add|modify", owner.id).test(e));
+		const around = tag.how === "modify" && owner.id.split(".").slice(0, -1).some((_, i, all) => elements.some((e) => names("modify", all.slice(0, i + 1).join(".")).test(e)));
+		if (rec && !self && !around) return {
 			decision: "deny",
 			reason: `"${rel}" belongs to the node "${owner.id}", which joined change "${tag.id}" after ${rec.by || "the person"} approved it. The approval covers the elements the change had then. Ask the person to approve it again ("armature approve ${tag.id}"); do not run that yourself.`
 		};
-		return null;
+		if (!rec || self) return null;
 	}
 	if (!readRepo(root).files.some((f) => owner.code(f) || owner.tests(f))) return {
 		decision: "deny",
@@ -25750,6 +25864,30 @@ function shellWords(text) {
 	return text.match(/"(?:[^"\\]|\\.)*"|'[^']*'|[^\s"']+(?:"(?:[^"\\]|\\.)*"|'[^']*')?/g) ?? [];
 }
 var unquote = (w) => w.replace(/^(['"])(.*)\1$/, "$2");
+/** A path as the shell reads it from `dir`: "~" is the home folder, not a folder here. Null for another user's home. */
+function shellPath(dir, w) {
+	if (w === "~" || w.startsWith("~/")) return path.join(os.homedir(), w.slice(1));
+	if (w.startsWith("~")) return null;
+	return path.resolve(dir, w);
+}
+/**
+* Every path a command names, each read from the folder the command stands in at that point
+* ("cd" is followed). Text inside quotes counts too: a script given inline names its files there.
+*/
+function shellPaths(command, cwd) {
+	const out = [];
+	let dir = cwd;
+	for (const part of command.split(/&&|\|\||;|\n|\|/)) {
+		const words = shellWords(part.trim().replace(/^[({]\s*/, "")).map(unquote);
+		if ((words[0] === "cd" || words[0] === "pushd") && words[1]) dir = shellPath(dir, words[1]) ?? dir;
+		for (const token of part.split(/[\s'"`()=<>,]+/)) {
+			if (!token || token.startsWith("-") || token.includes("$")) continue;
+			const p = shellPath(dir, token);
+			if (p) out.push(p);
+		}
+	}
+	return out;
+}
 /** Files a shell command would create, as far as a reading of the command can tell: redirects, tee, touch, cp, mv. */
 function shellTargets(command, cwd) {
 	const text = command.replace(/<<-?\s*(['"]?)(\w+)\1([^\n]*)\n[\s\S]*?\n[ \t]*\2[ \t]*(?=\n|$)/g, "$3");
@@ -25760,11 +25898,12 @@ function shellTargets(command, cwd) {
 		if (!words.length) continue;
 		const bare = words.map(unquote);
 		if (bare[0] === "cd" && bare[1]) {
-			dir = path.resolve(dir, bare[1]);
+			dir = shellPath(dir, bare[1]) ?? dir;
 			continue;
 		}
 		const add = (w) => {
-			if (w && !/[$*?`]/.test(w) && w !== "/dev/null") out.push(path.resolve(dir, w));
+			const p = w && !/[$*?`]/.test(w) && w !== "/dev/null" ? shellPath(dir, w) : null;
+			if (p) out.push(p);
 		};
 		for (let i = 0; i < words.length; i++) {
 			const w = words[i];
@@ -25777,8 +25916,8 @@ function shellTargets(command, cwd) {
 		if (cmd === "touch" || cmd === "tee") args.forEach(add);
 		else if ((cmd === "cp" || cmd === "mv" || cmd === "install" || cmd === "ln") && args.length >= 2) {
 			const dest = args[args.length - 1];
-			const destAbs = path.resolve(dir, dest);
-			if (dest.endsWith("/") || fs.existsSync(destAbs) && fs.statSync(destAbs).isDirectory()) for (const src of args.slice(0, -1)) add(path.join(dest, path.basename(src)));
+			const destAbs = shellPath(dir, dest);
+			if (dest.endsWith("/") || !!destAbs && fs.existsSync(destAbs) && fs.statSync(destAbs).isDirectory()) for (const src of args.slice(0, -1)) add(path.join(dest, path.basename(src)));
 			else add(dest);
 		}
 	}
@@ -25792,11 +25931,18 @@ function shellTargets(command, cwd) {
 function bashGate(root, command, cwd = root) {
 	if (!command || !command.trim()) return null;
 	const mdir = modelDir(root);
-	if (/\barmature(?:\.mjs)?["']?\s+(?:--root\s+\S+\s+)?approve\b/.test(command)) return ask("This runs \"armature approve\", which records that a person approved a change. Approving a change is your decision: allow it only if you have reviewed the plan and want it built.");
-	const writes = /(?:^|[^<>&|\d-])>{1,2}(?!&)|\b(?:sed|perl)\b[^|;&\n]*\s-[A-Za-z]*i|\btee\b|\b(?:mv|cp|rm|truncate|dd|install)\b|\byq\b[^|;&\n]*\s-i|\b(?:python3?|node|ruby|deno|bun|tsx)\b/.test(command);
-	const touched = new RegExp(`${mdir}/(changes/[^\\s'"]+\\.ya?ml|${APPROVALS_FILE.replace(/\./g, "\\.")})`).exec(command);
-	if (touched && writes) return ask(`This command writes to ${mdir}/${touched[1]}. Approving a change, and the record of what was approved, are a person's decisions: allow it only if you know what it changes there.`);
-	if (writes && new RegExp(`${mdir}/system\\.ya?ml`).test(command) && /gate:\s*["']?off\b/.test(command) && gateOn(root)) return ask("This command sets \"gate: off\" in system.yaml, which switches the planning gate off for everyone who works in this repo. Allow it only if that is what you want.");
+	if (/(?:\barmature(?:\.mjs)?|\b(?:dist|src)\/cli\.(?:mjs|js|ts))["']?\s+(?:--root\s+\S+\s+)?approve\b/.test(command)) return ask("This runs \"armature approve\", which records that a person approved a change. Approving a change is your decision: allow it only if you have reviewed the plan and want it built.");
+	const writes = /(?:^|[^<>&|\d-])>{1,2}(?!&)|\b(?:sed|perl)\b[^|;&\n]*\s(?:-[A-Za-z]*i|--in-place)|\btee\b|\b(?:mv|cp|rm|truncate|dd|install|sponge)\b|\byq\b[^|;&\n]*\s(?:-i|--inplace)|\bawk\b[^|;&\n]*\s-i\s*inplace|\b(?:python3?|node|ruby|deno|bun|tsx)\b/.test(command);
+	const named = writes ? shellPaths(command, cwd).map((p) => path.relative(root, p).replace(/\\/g, "/")) : [];
+	const isRecord = (rel) => {
+		if (rel === `${mdir}/approvals.lock.json`) return true;
+		const name = rel.startsWith(`${mdir}/changes/`) ? rel.slice(mdir.length + 9) : "";
+		return !!name && !name.includes("/") && (/\.ya?ml$/.test(name) || /[*?[{]/.test(name));
+	};
+	const touched = named.find(isRecord) ?? new RegExp(`${mdir}/(?:changes/[^\\s'"]+\\.ya?ml|${"approvals.lock.json".replace(/\./g, "\\.")})`).exec(command)?.[0];
+	if (touched && writes) return ask(`This command writes to ${touched}. Approving a change, and the record of what was approved, are a person's decisions: allow it only if you know what it changes there.`);
+	const system = named.includes(`${mdir}/system.yaml`) || new RegExp(`${mdir}/system\\.ya?ml`).test(command);
+	if (writes && system && /\bgate["']?\s*[:=]\s*["']?off\b/.test(command) && gateOn(root)) return ask("This command sets \"gate: off\" in system.yaml, which switches the planning gate off for everyone who works in this repo. Allow it only if that is what you want.");
 	for (const target of shellTargets(command, cwd)) {
 		if (fs.existsSync(target)) continue;
 		const verdict = writeGate(root, {
@@ -25830,13 +25976,28 @@ Make writing those model files the first step of the plan, before any code. Run 
 	if (body.split(/\s+/).length < 4) return "The \"Model change\" section says \"None\" and gives no reason. Add one line on why no node, interface, link, shape or requirement changes, then present the plan again.";
 	if (root) {
 		const made = [];
+		let held = null;
+		const repo = () => {
+			if (!held) {
+				const files = readRepo(root).files;
+				held = {
+					files,
+					dirs: [...new Set(files.map((f) => path.posix.dirname(f)))]
+				};
+			}
+			return held;
+		};
 		for (const m of plan.matchAll(/[\w@.\-/]+\/[\w@.\-/]+\.[A-Za-z]+\b/g)) {
 			const file = m[0].replace(/^\.\//, "");
 			if (made.includes(file) || !CODE_FILE.test(file) || fs.existsSync(path.resolve(root, file))) continue;
-			if (writeGate(root, {
-				file_path: file,
+			const first = file.split("/")[0];
+			if (first && !fs.existsSync(path.join(root, first)) && (first.startsWith("@") || first.indexOf(".") > 0 || fs.existsSync(path.join(root, "node_modules", first)))) continue;
+			if (repo().files.some((f) => f.endsWith(`/${file}`))) continue;
+			const dir = path.posix.dirname(file);
+			if ([file, ...repo().dirs.filter((d) => d.endsWith(`/${dir}`)).slice(0, 20).map((h) => `${h}/${path.posix.basename(file)}`)].every((p) => writeGate(root, {
+				file_path: p,
 				content: ""
-			})?.decision === "deny") made.push(file);
+			})?.decision === "deny")) made.push(file);
 		}
 		if (made.length) return `The "Model change" section says "None", but the plan creates ${made.slice(0, 5).join(", ")}${made.length > 5 ? ", …" : ""}, which ${made.length === 1 ? "is a new source file" : "are new source files"} the model has no place for (no node owns ${made.length === 1 ? "it" : "them"}, or the node is not built or approved yet). That is a model change: list the node and its "code:" globs, or the change that adds it, in the section and present the plan again.`;
 	}
@@ -26017,8 +26178,9 @@ async function hook(name, rootFlag) {
 		}
 		if (name === "pre-write") {
 			const verdict = writeGate(root, input.tool_input ?? {});
+			if (verdict?.approves) notePendingApproval(root, verdict.approves, callKey(input.tool_input));
+			else dropPendingApproval(root);
 			if (!verdict) return;
-			if (verdict.approves) notePendingApproval(root, verdict.approves);
 			decide(verdict.decision, verdict.reason);
 			return;
 		}
@@ -26048,7 +26210,7 @@ async function hook(name, rootFlag) {
 			const inArch = rel.startsWith(`${modelDir(root)}/`);
 			const isDoc = isDocPath(rel);
 			if (!inArch && !isDoc) return;
-			if (inArch) settleApproval(root, false);
+			if (inArch) settleApproval(root, callKey(input.tool_input));
 			const g = compile$1(root);
 			const say = [];
 			if (inArch) {
@@ -26076,7 +26238,7 @@ async function hook(name, rootFlag) {
 			return;
 		}
 		if (name === "stop") {
-			settleApproval(root, true);
+			dropPendingApproval(root);
 			if (input.stop_hook_active) return;
 			const changed = changedFiles(root);
 			if (changed.length === 0) return;

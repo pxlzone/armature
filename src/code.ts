@@ -92,7 +92,7 @@ export interface CodeFile {
 }
 
 /** Bump when extraction changes, so unchanged files are parsed again with the new rules. */
-export const EXTRACTOR = 8;
+export const EXTRACTOR = 9;
 
 export interface CodeIndex {
   version: 3;
@@ -499,10 +499,39 @@ function dedupeHints(list: RuntimeHint[]): RuntimeHint[] {
   });
 }
 
-/** Comments blanked out, with every line break kept so line numbers still hold. */
-function withoutComments(source: string): string {
+/**
+ * Comments blanked out, with every line break kept so line numbers still hold. A block comment is
+ * one only outside a string: the slash and star in '/static/*' or "src/**" start nothing.
+ */
+export function withoutComments(source: string): string {
   const blank = (m: string): string => m.replace(/[^\n]/g, ' ');
-  return source.replace(/\/\*[\s\S]*?\*\//g, blank).replace(/^[ \t]*(?:\/\/|#|--).*$/gm, blank);
+  const out: string[] = [];
+  const n = source.length;
+  let kept = 0;
+  let i = 0;
+  while (i < n) {
+    const c = source[i];
+    if (c === '/' && source[i + 1] === '*' && source[i - 1] !== '\\') {
+      const end = source.indexOf('*/', i + 2);
+      // Never closed: not a comment this can blank.
+      if (end < 0) break;
+      out.push(source.slice(kept, i), blank(source.slice(i, end + 2)));
+      i = kept = end + 2;
+    } else if (c === '/' && source[i + 1] === '/') {
+      // A line comment: nothing in it opens a string or a block comment. Whole-line ones are blanked below.
+      const eol = source.indexOf('\n', i);
+      i = eol < 0 ? n : eol;
+    } else if (c === '"' || c === "'" || c === '`') {
+      const close = c !== '`' && source.startsWith(c.repeat(3), i) ? c.repeat(3) : c;
+      // A quote left open ends with its line, so an apostrophe in prose does not swallow what follows.
+      const oneLine = close.length === 1 && c !== '`';
+      let j = i + close.length;
+      while (j < n && !source.startsWith(close, j) && !(oneLine && source[j] === '\n')) j += source[j] === '\\' ? 2 : 1;
+      i = Math.min(n, source.startsWith(close, j) ? j + close.length : j);
+    } else i++;
+  }
+  out.push(source.slice(kept));
+  return out.join('').replace(/^[ \t]*(?:\/\/|#|--).*$/gm, blank);
 }
 
 /**

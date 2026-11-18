@@ -101,6 +101,44 @@ describe('detectors', () => {
     await buildCodeIndex(root);
     expect(readCodeIndex(root)!.files['src/api/query.ts'].hints.map((h) => `${h.v}:${h.op}`).sort()).toEqual(['approvals:read', 'orders:read', 'orders:write']);
   });
+
+  it('do not take a slash and a star inside a string for the start of a comment', async () => {
+    write('src/api/server.ts', [
+      'export const app = { get: (..._a: unknown[]) => undefined, post: (..._a: unknown[]) => undefined, use: (..._a: unknown[]) => undefined };',
+      "app.use('/static/*', () => undefined);",
+      "app.post('/checkout', () => undefined);",
+      'export const globs = ["src/**/*.ts"];',
+      "app.get('/orders', () => undefined);",
+      '/** In a comment: app.get("/ghost", ...) */',
+      "app.get('/late', () => undefined);",
+      '',
+    ].join('\n'));
+    await buildCodeIndex(root);
+    const { readCodeIndex, withoutComments } = await import('../src/code.js');
+    const routes = readCodeIndex(root)!.files['src/api/server.ts'].hints.filter((h) => h.k === 'route').map((h) => `${h.op} ${h.v}`);
+    expect(routes).toEqual(['POST /checkout', 'GET /orders', 'GET /late']);
+    // Line breaks stay where they were, and an apostrophe in prose does not open a string.
+    const text = "a = 1 /* one\ntwo */ b = '/x/*'\n// don't\nc = 2 /* three */";
+    expect(withoutComments(text)).toBe("a = 1       \n       b = '/x/*'\n        \nc = 2            ");
+  });
+
+  it('do not hold a parent\'s routes against a child whose routes they cannot read', async () => {
+    const iface = (g: ReturnType<typeof compile>, ref: string) => g.nodes.flatMap((n) => n.interfaces).find((i) => i.ref === ref)!;
+    // The parent registers a route with a call the index knows. The child goes through a helper it does not.
+    write('armature/nodes/api/users.yaml', node(['kind: service', 'role: user accounts', 'code: [src/api/users/**]', 'accepts:', '  - id: list', '    via: http', '    route: GET /users']));
+    write('src/api/users/routes.ts', "import { route } from '../kit';\nexport const list = route({ method: 'get', path: '/users' }, async () => []);\n");
+    await buildCodeIndex(root);
+    let g = compile(root);
+    expect(iface(g, 'api#checkout').evidence).toBe('seen');
+    expect(iface(g, 'api.users#list').evidence).toBe('unchecked');
+    expect(messages(g, 'not-in-code')).toEqual([]);
+    // Once the child's own code registers routes that way, one that is missing can be named.
+    write('src/api/users/routes.ts', "export const app = { get: (..._a: unknown[]) => undefined };\napp.get('/users/me', () => undefined);\n");
+    await buildCodeIndex(root);
+    g = compile(root);
+    expect(iface(g, 'api.users#list').evidence).toBe('unseen');
+    expect(messages(g, 'not-in-code')[0]).toContain('api.users#list');
+  });
 });
 
 describe('test reports as evidence', () => {
@@ -145,6 +183,27 @@ describe('test reports as evidence', () => {
     expect(codes(compile(root), 'error')).toEqual([]);
   });
 
+  it('remembers a failure when the report is taken away', () => {
+    write('armature/changes/orders.yaml', 'title: Orders\nstate: done\n');
+    write('armature/nodes/api.yaml', fs.readFileSync(path.join(root, 'armature/nodes/api.yaml'), 'utf8').replace('    tests: tests/api.test.ts', '    tests: tests/api.test.ts\n    change: orders'));
+    const report = path.join(root, 'armature/.cache/reports/junit.xml');
+    junit([['tests/api.test.ts', 'rejects an empty order', false]]);
+    expect(messages(compile(root), 'not-done')[0]).toContain('requirement "api:rejects-empty" is not verified');
+    // Removing the report is not a newer run: what failed still fails.
+    fs.rmSync(report);
+    let g = compile(root);
+    expect(byId(g, 'api').requirements[0].state).toBe('failing');
+    expect(byId(g, 'api').requirements[0].evidence.join(' ')).toContain('no longer there');
+    expect(messages(g, 'not-done')[0]).toContain('requirement "api:rejects-empty" is not verified');
+    // A run that passes clears it, and then a missing report is only "nothing to check".
+    junit([['tests/api.test.ts', 'rejects an empty order', true]]);
+    expect(codes(compile(root), 'error')).toEqual([]);
+    fs.rmSync(report);
+    g = compile(root);
+    expect(codes(g, 'error')).toEqual([]);
+    expect(messages(g, 'done-unchecked')[0]).toContain('there is no test report');
+  });
+
   it('says so when "done" proves nothing', () => {
     write('armature/changes/export.yaml', 'title: Export\nstate: done\n');
     write('armature/nodes/api.yaml', fs.readFileSync(path.join(root, 'armature/nodes/api.yaml'), 'utf8').replace('sends:', '  - id: export\n    via: http\n    route: GET /export\n    change: export\nsends:'));
@@ -164,6 +223,16 @@ describe('ownership', () => {
     write('armature/nodes/api/http.yaml', 'kind: service\nrole: serves HTTP\ncode: [src/api/**]\n');
     fs.rmSync(path.join(root, 'armature/nodes/api.yaml'));
     expect(messages(compile(root), 'overlap').some((m) => m.includes('api.http'))).toBe(false);
+  });
+
+  it('gives a node its files when its glob starts with "./" or escapes a bracket', () => {
+    write('armature/nodes/billing.yaml', node(['kind: worker', 'role: charges the card', 'code: ["./src/billing/**"]', 'accepts:', '  - id: charge', '    via: pgmq', '    takes: Order']));
+    write('armature/nodes/web.yaml', node(['kind: app', 'role: pages', 'code: ["app/\\\\[locale\\\\]/**"]']));
+    write('app/[locale]/page.tsx', 'export default 1;\n');
+    const g = compile(root);
+    expect(byId(g, 'billing').files).toBe(1);
+    expect(byId(g, 'web').files).toBe(1);
+    expect(messages(g, 'unowned').join(' ')).not.toMatch(/"(src|app)/);
   });
 
   it('lets a node that is being built have globs with no files yet', () => {
@@ -343,6 +412,16 @@ describe('the language', () => {
     expect(trace).toContain('leaves the system to:\n  mail:');
     expect(traceText(g, 'Receipt')).toContain('comes back to buyer');
   });
+
+  it('follows data back to an outside caller when the call also takes it', () => {
+    // An outside system sends an Order and is answered with a Receipt, and both carry an email.
+    fs.appendFileSync(path.join(root, 'armature/system.yaml'), 'externals:\n  - id: partner\n    role: partner CRM\n    calls: [api#checkout]\n');
+    write('armature/shapes/order.yaml', 'Order:\n  fields:\n    id: uuid\n    email: email @pii\nReceipt:\n  fields:\n    id: uuid\n    email: email @pii\n');
+    const trace = traceText(compile(root), '@pii');
+    expect(trace).toContain('leaves the system to:\n  partner: partner -> api#checkout');
+    expect(trace).toContain('(comes back to partner)');
+    expect(trace).not.toContain('No declared link carries it to an outside system');
+  });
 });
 
 describe('warnings a team has looked at', () => {
@@ -354,6 +433,19 @@ describe('warnings a team has looked at', () => {
     expect(g.accepted).toBe(1);
     expect(messages(g, 'stale-accept')[0]).toContain('runtime-drift api');
     expect(messages(g, 'accept-reason')[0]).toContain('runtime-drift api');
+  });
+
+  it('never drops a warning that says a change went past its approval', () => {
+    write('armature/changes/mail.yaml', 'title: Receipts by email\nstate: approved\n');
+    write('armature/nodes/mail.yaml', node(['kind: worker', 'role: sends receipts', 'code: [src/mail/**]', 'change: mail']));
+    expect(messages(compile(root), 'unrecorded-approval')).toHaveLength(1);
+    fs.appendFileSync(path.join(root, 'armature/system.yaml'), 'accept:\n  - code: unrecorded-approval\n    ref: mail\n    why: We know.\n');
+    const g = compile(root);
+    // The warning stays, the entry is an error, and it is not reported as stale as well.
+    expect(messages(g, 'unrecorded-approval')).toHaveLength(1);
+    expect(g.accepted).toBe(0);
+    expect(messages(g, 'accept')[0]).toContain('"unrecorded-approval" cannot be accepted');
+    expect(codes(g)).not.toContain('stale-accept');
   });
 });
 

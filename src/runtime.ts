@@ -112,6 +112,12 @@ export function analyzeRuntime(
   const httpCalls = new Map<string, string[]>();
   const put = <T>(m: Map<string, Set<T>>, id: string, v: T): void => void m.set(id, (m.get(id) ?? new Set<T>()).add(v));
   const across = <T>(m: Map<string, Set<T>>, id: string): Set<T> => new Set(family(id).flatMap((x) => [...(m.get(x) ?? [])]));
+  // The node and what is inside it: its own code. A match anywhere in the family counts as seen (a
+  // parent's server file may register a child's route), but "not there" is said only where a
+  // detector found the same kind of thing in the node's own code. A parent's routes say nothing
+  // about a child whose routes the index cannot read.
+  const own = (id: string): string[] => family(id).filter((x) => x === id || x.startsWith(`${id}.`));
+  const inOwn = <T>(m: Map<string, Set<T>>, id: string): boolean => own(id).some((x) => (m.get(x)?.size ?? 0) > 0);
 
   for (const f of Object.values(idx.files)) {
     if (f.test) continue;
@@ -184,18 +190,18 @@ export function analyzeRuntime(
     const n = nodes.get(i.node)!;
     if (i.holds) {
       // A store's tables can be checked when the store owns the files that define tables.
-      const mine = new Set(family(i.node).flatMap((x) => [...(definedBy.get(x) ?? [])]));
-      if (mine.size) i.evidence = mine.has(i.id.replace(/-/g, '_')) ? 'seen' : planned(i.change) ? 'unchecked' : 'unseen';
+      if (across(definedBy, i.node).has(i.id.replace(/-/g, '_'))) i.evidence = 'seen';
+      else if (inOwn(definedBy, i.node)) i.evidence = planned(i.change) ? 'unchecked' : 'unseen';
       continue;
     }
     if (n.kind === 'store' || unusedNode(i.node)) continue;
     let seen: boolean | null = null;
     if (i.route && i.via !== 'pgmq') {
-      const found = family(i.node).flatMap((x) => routes.get(x) ?? []);
-      if (found.length) seen = found.some((r) => sameRoute(i.route as string, r.op, r.path));
+      if (family(i.node).some((x) => (routes.get(x) ?? []).some((r) => sameRoute(i.route as string, r.op, r.path)))) seen = true;
+      else if (own(i.node).some((x) => (routes.get(x) ?? []).length > 0)) seen = false;
     } else if (i.queue && i.via === 'temporal') {
-      const found = across(served, i.node);
-      if (found.size) seen = found.has(i.queue);
+      if (across(served, i.node).has(i.queue)) seen = true;
+      else if (inOwn(served, i.node)) seen = false;
     }
     if (seen === null) continue;
     i.evidence = seen ? 'seen' : planned(i.change) ? 'unchecked' : 'unseen';
@@ -211,21 +217,21 @@ export function analyzeRuntime(
       if (iface.holds) {
         const table = iface.id.replace(/-/g, '_');
         if (across(seenTables, e.owner).has(table)) seen = true;
-        else if (tables.has(table) && family(e.owner).some((x) => kinds.get(x)?.has('table'))) seen = false;
+        else if (tables.has(table) && inOwn(seenTables, e.owner)) seen = false;
       } else if (iface.queue && iface.via === 'temporal') {
         kind = 'queue';
-        const found = across(served, e.owner);
-        if (found.size) seen = found.has(iface.queue);
+        if (across(served, e.owner).has(iface.queue)) seen = true;
+        else if (inOwn(served, e.owner)) seen = false;
       }
     } else if (iface.queue && iface.via === 'temporal') {
       kind = 'queue';
-      const found = across(started, e.owner);
-      if (found.size) seen = found.has(iface.queue);
+      if (across(started, e.owner).has(iface.queue)) seen = true;
+      else if (inOwn(started, e.owner)) seen = false;
     } else if (iface.route && iface.via !== 'pgmq' && iface.route.includes('/api/')) {
       // Outgoing HTTP is recognised only as "/api/..." paths in strings.
       kind = 'http';
-      const found = family(e.owner).flatMap((x) => httpCalls.get(x) ?? []);
-      if (found.length) seen = found.some((v) => pathEndsWith(routePath(iface.route as string), v));
+      if (family(e.owner).some((x) => (httpCalls.get(x) ?? []).some((v) => pathEndsWith(routePath(iface.route as string), v)))) seen = true;
+      else if (own(e.owner).some((x) => (httpCalls.get(x) ?? []).length > 0)) seen = false;
     }
     if (seen === null) continue;
     e.evidence = seen ? 'seen' : planned(e.change) ? 'unchecked' : 'unseen';

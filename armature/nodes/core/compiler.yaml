@@ -34,7 +34,11 @@ reads:
   - project.model#approvals
   - project.cache#code-index
   - project.cache#reports
+  - project.cache#failures
   - project.source#files
+writes:
+  - to: project.cache#failures
+    note: The one thing a compile writes, and only when a test report changes what fails.
 calls:
   - to: core.code-graph#index
     note: Reads the index it built, and asks it for run-time drift and reachability.

@@ -12,7 +12,7 @@ import { contextText } from './context.js';
 import { formatProblems, orient, ownerOf } from './render.js';
 import { isDocPath } from './docs.js';
 import { bashGate, gateOn, PLANNING_WORDS, planGate, planModeNote, planningNote, targetOf, writeGate } from './gate.js';
-import { notePendingApproval, settleApproval } from './approve.js';
+import { callKey, dropPendingApproval, notePendingApproval, settleApproval } from './approve.js';
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = path.join(PKG_ROOT, 'bin', 'armature.mjs');
@@ -190,9 +190,12 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
       // Before a Write or Edit: new source files need a node, planned nodes need an approved change,
       // and approving a change asks the person.
       const verdict = writeGate(root, input.tool_input ?? {});
+      // If the person says yes, this edit goes through and the approval is recorded after it. One
+      // question is open at a time: any other write means the earlier one was answered, so a
+      // question the person declined cannot be settled by something that happens later.
+      if (verdict?.approves) notePendingApproval(root, verdict.approves, callKey(input.tool_input));
+      else dropPendingApproval(root);
       if (!verdict) return;
-      // If the person says yes, the edit goes through and the approval is recorded after it.
-      if (verdict.approves) notePendingApproval(root, verdict.approves);
       decide(verdict.decision, verdict.reason);
       return;
     }
@@ -227,7 +230,8 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
       const isDoc = isDocPath(rel);
       if (!inArch && !isDoc) return;
       // An approval the person has just confirmed is recorded with what the change holds now.
-      if (inArch) settleApproval(root, false);
+      // Only the edit they were asked about does this; what is added afterwards is not part of it.
+      if (inArch) settleApproval(root, callKey(input.tool_input));
       const g = compile(root);
       const say: string[] = [];
       if (inArch) {
@@ -255,7 +259,7 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
       return;
     }
     if (name === 'stop') {
-      settleApproval(root, true);
+      dropPendingApproval(root);
       if (input.stop_hook_active) return;
       const changed = changedFiles(root);
       if (changed.length === 0) return;
