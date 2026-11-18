@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { compile } from './compile.js';
 import { LEGACY_DIR, MODEL_DIR, modelDir } from './paths.js';
-import { guardsOf } from './security.js';
+import { guardsOf, weakenedBetween } from './security.js';
 import type { Graph } from './types.js';
 
 type Facts = Map<string, Record<string, string>>;
@@ -104,11 +104,7 @@ export function diffModel(root: string, ref: string): ModelDiff | string {
   const a = then ? declared(then) : new Map();
   const b = declared(now);
   const diff: ModelDiff = { ref, added: [], removed: [], changed: [], weakened: [] };
-  if (then) {
-    const [was, is] = [guardsOf(then), guardsOf(now)];
-    for (const x of was.guards) if (!is.guards.has(x)) diff.weakened.push(`no longer: ${x}`);
-    for (const x of is.allowances) if (!was.allowances.has(x)) diff.weakened.push(`now allowed: ${x}`);
-  }
+  if (then) diff.weakened.push(...weakenedBetween(guardsOf(then), guardsOf(now)));
   for (const [what, facts] of b) {
     const old = a.get(what);
     if (!old) diff.added.push({ what, facts });

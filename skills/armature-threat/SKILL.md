@@ -48,7 +48,7 @@ For each tagged field that leaves the system in the surface:
 
 ## 5. Protect what must not change by accident
 
-If the change creates a node whose code is security-critical (authentication, payments, permissions, key handling), give it `protect: true`. Edits to its existing files then need an approved change that modifies it.
+If the change creates a node whose code is security-critical (authentication, payments, permissions, key handling), give it `protect: true`. Editing, moving or deleting its existing files then needs an approved change that modifies it.
 
 ## 6. Finish
 
@@ -56,4 +56,4 @@ If the change creates a node whose code is security-critical (authentication, pa
 2. Run `armature surface <change>` again. This is what the person will see when asked to approve.
 3. In the plan document, add a short section "Security" with what you decided and why, and every question you could not answer from the code or the request. Ask the person those questions; do not guess an answer to who may see whose data.
 
-Never remove an `auth:`, an `only:`, a `never:`, `protect`, a requirement or a data policy to make a check pass. If one is wrong, say so and let the person change it.
+Never remove an `auth:`, an `only:`, a `never:`, `protect`, a tag on a field, a requirement or a data policy to make a check pass, and never add a name to an `only:` list for that reason. If one is wrong, say so and let the person change it.

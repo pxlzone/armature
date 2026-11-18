@@ -20,7 +20,7 @@ import { DEFAULT_COMPOSE, looseDockerCommands, readCompose } from './deploy.js';
 import { reach } from './reach.js';
 import { cleanDocsSetting, hasModel, LEGACY_DIR, MODEL_DIR, modelDir, readApprovals } from './paths.js';
 import { findNode, nodeProblem, resolveRef, type RefIndex } from './refs.js';
-import { SECRET_NAME, securityFindings, type SecurityView } from './security.js';
+import { isSecretName, securityFindings, type SecurityView } from './security.js';
 
 export { APPROVALS_FILE, LEGACY_DIR, MODEL_DIR, modelDir, readApprovals } from './paths.js';
 export const LOCK_FILE = 'shapes.lock.json';
@@ -1105,7 +1105,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       const declared = new Set([id, ...ancestors(id)].flatMap((x) => nodes.get(x)?.secrets ?? []));
       for (const h of f.hints ?? []) {
         if (h.k !== 'env' || n.env.length >= 60) continue;
-        if (SECRET_NAME.test(h.v) || declared.has(h.v)) n.env.push({ name: h.v, file: f.path, line: h.l });
+        if (isSecretName(h.v) || declared.has(h.v)) n.env.push({ name: h.v, file: f.path, line: h.l });
       }
     }
     for (const [id, paths] of byNode) {

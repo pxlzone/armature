@@ -18,6 +18,7 @@ tests:
   - test/docs.test.ts
   - test/sound.test.ts
   - test/security.test.ts
+  - test/security-holes.test.ts
   - test/activity.test.ts
 
 accepts:
@@ -72,7 +73,7 @@ requirements:
   - id: entry-points-are-guarded
     kind: security
     text: An entry point open to anyone that reaches sensitive data, tagged data sent where its policy does not allow, and a secret on a client are errors.
-    tests: test/security.test.ts
+    tests: [test/security.test.ts, test/security-holes.test.ts]
   - id: documents-are-tied
     text: A document that names something missing from the model is reported.
     tests: test/docs.test.ts

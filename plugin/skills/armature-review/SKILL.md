@@ -12,7 +12,7 @@ A review here asks three things: did the model change in a way that weakens it, 
 ## 1. What the model says changed
 
 1. Find the base: the pull request's target branch (`gh pr view --json baseRefName`), or `main`.
-2. Run `armature diff <base>`. Read the **Guards removed** section first. Each line is a boundary, `auth:`, `only:` entry, `protect`, requirement or data policy that is gone, or an `ignore:`, `accept:`, `auth: none` or allowed destination that is new. Every one needs a reason in the pull request or the plan document; without one, it is the first finding.
+2. Run `armature diff <base>`. Read the **Guards removed** section first. Each line is a boundary, `auth:`, `only:` list, `protect`, tag on a field, requirement or data policy that is gone; an `auth:` that changed to another scheme; or an `ignore:`, `accept:`, `auth: none`, allowed destination, name added to an `only:` list or `protect: false` inside a protected node that is new. Every one needs a reason in the pull request or the plan document; without one, it is the first finding.
 3. Run `armature surface` and, for the change the branch builds, `armature surface <change>`. New entry points, data leaving the system and new secrets are the parts to read most carefully in the code.
 
 ## 2. Does the code match the plan

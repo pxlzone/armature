@@ -139,7 +139,7 @@ Rules of thumb:
 - Events: the publisher `sends` to an interface of a `queue` node; each consumer `reads` that interface in its own file. The publisher does not list its consumers.
 - Each file belongs to one node. Two nodes that are not parent and child must not claim the same files (`overlap`); put shared code in a library node.
 - A store uses `holds:` in place of `accepts:`; each entry is a table: `{ id: orders, shape: Order }`.
-- `to:` may be a bare node while a design is coarse. `armature check` warns until it names an interface.
+- `to:` may be a bare node while a design is coarse. `armature check` warns until it names an interface. Where security is decided, a bare link counts as any interface of that node: it makes entry points of them, and it must pass every `only:` they have.
 - Small outside systems and people can be declared inline in `system.yaml` under `externals:` and `actors:`.
 - A view holds at most 12 nodes. Past that, group nodes in a folder.
 
@@ -148,7 +148,8 @@ Security:
 - An **entry point** is an interface of a server-side node that an actor, an outside system or a `client: true` node links to. Each needs `auth:`. `auth: none` on one that reaches sensitive data is an error; with auth, it needs a requirement of `kind: security` covering it.
 - **Sensitive data** is a shape field tagged `@pii`, `@secret`, or a tag `data:` in `system.yaml` names. `data: { pii: { leaves: [mailer] } }` says which outside systems may receive it; sending it anywhere else is a `data-leak` error. `@secret` may leave nowhere unless listed.
 - `secrets:` lists the credentials a node reads from the environment. A credential the code reads and the model does not list is `undeclared-secret`; one on a client node is an error.
-- Never weaken these to make a check pass. Removing a guard asks the person, and `armature diff` shows it to the reviewer.
+- Never weaken these to make a check pass. Removing a guard asks the person, and `armature diff` shows it to the reviewer. That covers a new name on an `only:` list, another `auth:` scheme, a tag taken off a field, `protect: false` inside a protected node, and any edit that leaves a protected node's file unowned.
+- Write nodes, shapes, `system.yaml` and `tech.yaml` with the file tools. A shell command that writes one is refused, and one that deletes or moves one asks the person.
 
 ## Shapes
 
