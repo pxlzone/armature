@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { CodeIndex } from './code.js';
-import { modelDir } from './paths.js';
+import { MODEL_DIR } from './paths.js';
 import { readSummaries } from './context.js';
 
 const BATCH = 15;
@@ -41,7 +41,7 @@ export function summarize(root: string, idx: CodeIndex, plan: SummarizePlan, log
   const bin = claudeBin();
   if (!bin) throw new Error('The claude CLI was not found. Install Claude Code, or point ARMATURE_CLAUDE_BIN at it.');
   const store = readSummaries(root);
-  const file = path.join(root, modelDir(root), '.cache', 'summaries.json');
+  const file = path.join(root, MODEL_DIR, '.cache', 'summaries.json');
   let done = 0;
   for (let i = 0; i < plan.files.length; i += BATCH) {
     const batch = plan.files.slice(i, i + BATCH);

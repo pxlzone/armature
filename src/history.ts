@@ -2,7 +2,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { modelDir } from './paths.js';
+import { MODEL_DIR } from './paths.js';
 import { parseConventional } from './repo.js';
 
 export interface HistoryCommit {
@@ -40,7 +40,7 @@ function git(root: string, args: string[]): string | null {
 export function readHistory(root: string): History | null {
   const head = git(root, ['rev-parse', 'HEAD'])?.trim();
   if (!head) return null;
-  const cache = path.join(root, modelDir(root), '.cache', 'history.json');
+  const cache = path.join(root, MODEL_DIR, '.cache', 'history.json');
   try {
     const h = JSON.parse(fs.readFileSync(cache, 'utf8')) as History;
     if (h.head === head) return h;

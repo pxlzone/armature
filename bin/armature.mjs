@@ -29,7 +29,7 @@ if (process.argv[2] === 'hook') {
   const start = [flag > 0 ? process.argv[flag + 1] : undefined, cwd, process.env.CLAUDE_PROJECT_DIR, process.cwd()].find((x) => typeof x === 'string' && x);
   const hasModel = (start) => {
     for (let dir = path.resolve(start); ; dir = path.dirname(dir)) {
-      if (existsSync(path.join(dir, 'armature', 'system.yaml')) || existsSync(path.join(dir, 'arch', 'system.yaml'))) return true;
+      if (existsSync(path.join(dir, 'armature', 'system.yaml'))) return true;
       if (path.dirname(dir) === dir) return false;
     }
   };

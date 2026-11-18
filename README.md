@@ -145,7 +145,7 @@ With the plugin on (or after `armature install`), a Claude Code session in a rep
 - routes planning through the model (see "Planning gate" below), for file edits and for shell commands that create files;
 - puts every constraint on the nodes a task touches (boundaries, auth, allow-lists, data policy, secrets, rules) in front of the agent as "Must hold", and says the planning rules again for each new plan and after the conversation is compacted.
 
-All commands: `armature help`. A model in `arch/`, the folder's earlier name, is still read; `armature check` asks you to rename it to `armature/`.
+All commands: `armature help`.
 
 ## Test results and coverage
 

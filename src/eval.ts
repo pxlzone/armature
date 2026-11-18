@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import YAML from 'yaml';
 import { words, type CodeIndex } from './code.js';
-import { modelDir } from './paths.js';
+import { MODEL_DIR } from './paths.js';
 import { contextPack, FileSearch } from './context.js';
 import { readHistory, MAX_FILES_PER_COMMIT } from './history.js';
 import { parseConventional } from './repo.js';
@@ -158,10 +158,10 @@ function prepare(root: string, variant: AgentRun['variant'], cliBin: string): st
   execFileSync('git', ['checkout', '--quiet', head], { cwd: dir, stdio: 'ignore' });
   if (variant === 'armature') {
     // The model may be uncommitted; copy it over, then wire Claude Code in the copy only.
-    fs.cpSync(path.join(root, modelDir(root)), path.join(dir, modelDir(root)), { recursive: true, filter: (src) => !src.includes(`${path.sep}.cache`) });
+    fs.cpSync(path.join(root, MODEL_DIR), path.join(dir, MODEL_DIR), { recursive: true, filter: (src) => !src.includes(`${path.sep}.cache`) });
     execFileSync('node', [cliBin, 'install', '--root', dir], { stdio: 'ignore' });
   } else {
-    fs.rmSync(path.join(dir, modelDir(root)), { recursive: true, force: true });
+    fs.rmSync(path.join(dir, MODEL_DIR), { recursive: true, force: true });
   }
   return dir;
 }
@@ -244,7 +244,7 @@ export async function evalAgent(root: string, tasksFile: string, cliBin: string,
       }
     }
   }
-  const out = path.join(root, modelDir(root), '.cache', 'eval');
+  const out = path.join(root, MODEL_DIR, '.cache', 'eval');
   fs.mkdirSync(out, { recursive: true });
   fs.writeFileSync(path.join(out, `agent-${new Date().toISOString().replace(/[:.]/g, '-')}.json`), JSON.stringify(runs, null, 2));
   return runs;

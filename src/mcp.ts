@@ -11,7 +11,7 @@ import path from 'node:path';
 import { compile as compileNow, findRoot, type CompileOptions } from './compile.js';
 import { hotspotsText } from './context.js';
 import { diffModel, diffText } from './diff.js';
-import { modelDir } from './paths.js';
+import { MODEL_DIR } from './paths.js';
 import { git } from './repo.js';
 import { activity, docsText, formatProblems, impact, islands, orient, pathText, show, status, techText, todos, traceText, where } from './render.js';
 import type { Graph } from './types.js';
@@ -38,7 +38,7 @@ function fingerprint(root: string): string | null {
   // A file that already differs from the commit can change again without its status line changing.
   for (const line of status.split('\n').filter(Boolean)) stamp(path.join(root, (line.slice(3).split(' -> ').pop() as string).replace(/^"|"$/g, '')));
   // What git ignores and a compile still reads: the code index, test and coverage reports.
-  const cache = path.join(root, modelDir(root), '.cache');
+  const cache = path.join(root, MODEL_DIR, '.cache');
   for (const dir of [cache, path.join(cache, 'reports')]) {
     try {
       for (const f of fs.readdirSync(dir)) stamp(path.join(dir, f));

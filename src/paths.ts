@@ -6,18 +6,10 @@ import YAML from 'yaml';
 
 /** The folder that holds the model. */
 export const MODEL_DIR = 'armature';
-/** The name the folder had before. A repo that still uses it is read, with a notice to rename it. */
-export const LEGACY_DIR = 'arch';
 
-/** The model folder of a repo: armature/, or arch/ where the folder has not been renamed yet. */
-export function modelDir(root: string): string {
-  if (fs.existsSync(path.join(root, MODEL_DIR, 'system.yaml'))) return MODEL_DIR;
-  return fs.existsSync(path.join(root, LEGACY_DIR, 'system.yaml')) ? LEGACY_DIR : MODEL_DIR;
-}
-
-/** True when a repo has a model, under either name. */
+/** True when a repo has a model. */
 export function hasModel(dir: string): boolean {
-  return fs.existsSync(path.join(dir, MODEL_DIR, 'system.yaml')) || fs.existsSync(path.join(dir, LEGACY_DIR, 'system.yaml'));
+  return fs.existsSync(path.join(dir, MODEL_DIR, 'system.yaml'));
 }
 
 /** A `docs:` value from system.yaml as a clean folder relative to the repo, or null when it cannot be one. */
@@ -30,7 +22,7 @@ export function cleanDocsSetting(value: unknown): string | null {
 
 /** The folder that holds the documents: `docs:` in system.yaml, or the docs folder inside the model. */
 export function docsDir(root: string): string {
-  const dir = modelDir(root);
+  const dir = MODEL_DIR;
   let value: unknown;
   try {
     value = YAML.parse(fs.readFileSync(path.join(root, dir, 'system.yaml'), 'utf8'))?.docs;
@@ -58,7 +50,7 @@ export interface Approval {
 /** The approvals recorded for a repo, by change id. */
 export function readApprovals(root: string): Record<string, Approval> {
   try {
-    const data = JSON.parse(fs.readFileSync(path.join(root, modelDir(root), APPROVALS_FILE), 'utf8'));
+    const data = JSON.parse(fs.readFileSync(path.join(root, MODEL_DIR, APPROVALS_FILE), 'utf8'));
     return data && typeof data === 'object' ? data : {};
   } catch {
     return {};

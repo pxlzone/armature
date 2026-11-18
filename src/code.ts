@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { modelDir } from './paths.js';
+import { MODEL_DIR } from './paths.js';
 import { readRepo } from './repo.js';
 
 export interface CodeSymbol {
@@ -111,7 +111,7 @@ const SKIP = /(^|\/)(node_modules|dist|build|\.next|\.turbo|coverage|vendor|__py
 const MAX_BYTES = 400 * 1024;
 
 export function indexPath(root: string): string {
-  return path.join(root, modelDir(root), '.cache', 'code-index.json');
+  return path.join(root, MODEL_DIR, '.cache', 'code-index.json');
 }
 
 export function readCodeIndex(root: string): CodeIndex | null {
@@ -895,7 +895,7 @@ export async function buildCodeIndex(root: string): Promise<IndexResult> {
   const started = Date.now();
   const repo = readRepo(root);
   const all = new Set(repo.files);
-  const mdir = modelDir(root);
+  const mdir = MODEL_DIR;
   const wanted = repo.files.filter((f) => LANG_OF[path.extname(f)] && !SKIP.test(`/${f}`) && !f.endsWith('.d.ts') && !/\.min\.js$/.test(f) && !f.startsWith(`${mdir}/`));
   const prior = readCodeIndex(root);
   const old = prior?.extractor === EXTRACTOR ? prior : null;

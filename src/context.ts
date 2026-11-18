@@ -4,7 +4,7 @@ import { mustHold } from './security.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { importersOf, rankFiles, stem, words, type CodeFile, type CodeIndex } from './code.js';
-import { modelDir } from './paths.js';
+import { MODEL_DIR } from './paths.js';
 import { coChange, hotspots, readHistory, type History } from './history.js';
 import { ownerOf } from './render.js';
 import type { GNode, Graph } from './types.js';
@@ -22,7 +22,7 @@ export const TUNE = {
 
 export function readSummaries(root: string): Record<string, { hash: string; text: string }> {
   try {
-    return JSON.parse(fs.readFileSync(path.join(root, modelDir(root), '.cache', 'summaries.json'), 'utf8'));
+    return JSON.parse(fs.readFileSync(path.join(root, MODEL_DIR, '.cache', 'summaries.json'), 'utf8'));
   } catch {
     return {};
   }

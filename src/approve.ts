@@ -7,17 +7,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
 import { compile } from './compile.js';
-import { APPROVALS_FILE, modelDir, readApprovals, type Approval } from './paths.js';
+import { APPROVALS_FILE, MODEL_DIR, readApprovals, type Approval } from './paths.js';
 import { git } from './repo.js';
 
 function writeApprovals(root: string, all: Record<string, Approval>): void {
   const sorted = Object.fromEntries(Object.entries(all).sort(([a], [b]) => a.localeCompare(b)));
-  fs.writeFileSync(path.join(root, modelDir(root), APPROVALS_FILE), `${JSON.stringify(sorted, null, 2)}\n`);
+  fs.writeFileSync(path.join(root, MODEL_DIR, APPROVALS_FILE), `${JSON.stringify(sorted, null, 2)}\n`);
 }
 
 function changeFile(root: string, id: string): string | null {
   for (const ext of ['yaml', 'yml']) {
-    const p = path.join(root, modelDir(root), 'changes', `${id}.${ext}`);
+    const p = path.join(root, MODEL_DIR, 'changes', `${id}.${ext}`);
     if (fs.existsSync(p)) return p;
   }
   return null;
@@ -65,13 +65,13 @@ export function approveChange(root: string, id: string, by?: string): string {
   const sec = changeSecurity(g, id);
   if (sec.lines.length) out.push('  What it does to security:', ...sec.lines.map((l) => `  ${l}`));
   if (c.waits.length) out.push(`  It comes after ${c.waits.join(', ')}, which ${c.waits.length === 1 ? 'is' : 'are'} not done yet.`);
-  out.push(`Recorded in ${modelDir(root)}/${APPROVALS_FILE}. Commit it with the change.`);
+  out.push(`Recorded in ${MODEL_DIR}/${APPROVALS_FILE}. Commit it with the change.`);
   return out.join('\n');
 }
 
 const PENDING = 'pending-approval.json';
 const PENDING_FOR = 60 * 60 * 1000;
-const pendingFile = (root: string): string => path.join(root, modelDir(root), '.cache', PENDING);
+const pendingFile = (root: string): string => path.join(root, MODEL_DIR, '.cache', PENDING);
 
 /** A fingerprint of one tool call's input, so the edit the person was asked about can be told from any other. */
 export function callKey(input: unknown): string {
