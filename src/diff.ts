@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { compile } from './compile.js';
-import { LEGACY_DIR, MODEL_DIR, modelDir } from './paths.js';
+import { MODEL_DIR } from './paths.js';
 import { guardsOf, weakenedBetween } from './security.js';
 import type { Graph } from './types.js';
 
@@ -70,16 +70,11 @@ function isolate(from: string, name: string): string {
 function modelAt(root: string, ref: string): Graph | null {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'armature-diff-'));
   try {
-    for (const name of [modelDir(root), MODEL_DIR, LEGACY_DIR]) {
-      try {
-        const tar = execFileSync('git', ['archive', '--format=tar', ref, '--', name], { cwd: root, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 });
-        execFileSync('tar', ['-x', '-C', dir], { input: tar, stdio: ['pipe', 'ignore', 'ignore'] });
-        if (fs.existsSync(path.join(dir, name, 'system.yaml'))) return compile(dir);
-      } catch {
-        /* the ref has no such folder */
-      }
-    }
-    return null;
+    const tar = execFileSync('git', ['archive', '--format=tar', ref, '--', MODEL_DIR], { cwd: root, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 });
+    execFileSync('tar', ['-x', '-C', dir], { input: tar, stdio: ['pipe', 'ignore', 'ignore'] });
+    return fs.existsSync(path.join(dir, MODEL_DIR, 'system.yaml')) ? compile(dir) : null;
+  } catch {
+    return null; // the ref has no model folder
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -94,7 +89,7 @@ export function diffModel(root: string, ref: string): ModelDiff | string {
   }
   const then = modelAt(root, ref);
   // The working tree's model is compiled the same way, apart from the code, so only what the files declare is compared.
-  const here = isolate(path.join(root, modelDir(root)), modelDir(root));
+  const here = isolate(path.join(root, MODEL_DIR), MODEL_DIR);
   let now: Graph;
   try {
     now = compile(here);

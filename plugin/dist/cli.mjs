@@ -15376,10 +15376,6 @@ var WARNING_INFO = {
 		group: "wrong",
 		what: "Elements were added to or removed from a change after a person approved it. It needs approving again: \"armature approve <change>\"."
 	},
-	"legacy-folder": {
-		group: "incomplete",
-		what: "The model is still in arch/, the earlier name of the folder. Rename it to armature/."
-	},
 	"unused-linked": {
 		group: "wrong",
 		what: "A node is marked unused but still has links to other nodes."
@@ -19828,16 +19824,9 @@ function readPullRequests(root, cacheDir) {
 // src/paths.ts
 /** The folder that holds the model. */
 var MODEL_DIR = "armature";
-/** The name the folder had before. A repo that still uses it is read, with a notice to rename it. */
-var LEGACY_DIR = "arch";
-/** The model folder of a repo: armature/, or arch/ where the folder has not been renamed yet. */
-function modelDir(root) {
-	if (fs.existsSync(path.join(root, "armature", "system.yaml"))) return MODEL_DIR;
-	return fs.existsSync(path.join(root, "arch", "system.yaml")) ? LEGACY_DIR : MODEL_DIR;
-}
-/** True when a repo has a model, under either name. */
+/** True when a repo has a model. */
 function hasModel(dir) {
-	return fs.existsSync(path.join(dir, "armature", "system.yaml")) || fs.existsSync(path.join(dir, "arch", "system.yaml"));
+	return fs.existsSync(path.join(dir, MODEL_DIR, "system.yaml"));
 }
 /** A `docs:` value from system.yaml as a clean folder relative to the repo, or null when it cannot be one. */
 function cleanDocsSetting(value) {
@@ -19848,7 +19837,7 @@ function cleanDocsSetting(value) {
 }
 /** The folder that holds the documents: `docs:` in system.yaml, or the docs folder inside the model. */
 function docsDir(root) {
-	const dir = modelDir(root);
+	const dir = MODEL_DIR;
 	let value;
 	try {
 		value = import_dist$1.parse(fs.readFileSync(path.join(root, dir, "system.yaml"), "utf8"))?.docs;
@@ -19866,7 +19855,7 @@ var APPROVALS_FILE = "approvals.lock.json";
 /** The approvals recorded for a repo, by change id. */
 function readApprovals(root) {
 	try {
-		const data = JSON.parse(fs.readFileSync(path.join(root, modelDir(root), APPROVALS_FILE), "utf8"));
+		const data = JSON.parse(fs.readFileSync(path.join(root, MODEL_DIR, APPROVALS_FILE), "utf8"));
 		return data && typeof data === "object" ? data : {};
 	} catch {
 		return {};
@@ -19898,7 +19887,7 @@ var TS_EXT = [
 var SKIP$2 = /(^|\/)(node_modules|dist|build|\.next|\.turbo|coverage|vendor|__pycache__|\.venv)\//;
 var MAX_BYTES = 409600;
 function indexPath(root) {
-	return path.join(root, modelDir(root), ".cache", "code-index.json");
+	return path.join(root, MODEL_DIR, ".cache", "code-index.json");
 }
 function readCodeIndex(root) {
 	try {
@@ -20844,7 +20833,7 @@ async function buildCodeIndex(root) {
 	const started = Date.now();
 	const repo = readRepo(root);
 	const all = new Set(repo.files);
-	const mdir = modelDir(root);
+	const mdir = MODEL_DIR;
 	const wanted = repo.files.filter((f) => LANG_OF[path.extname(f)] && !SKIP$2.test(`/${f}`) && !f.endsWith(".d.ts") && !/\.min\.js$/.test(f) && !f.startsWith(`${mdir}/`));
 	const prior = readCodeIndex(root);
 	const old = prior?.extractor === 10 ? prior : null;
@@ -21261,7 +21250,7 @@ function git(root, args) {
 function readHistory(root) {
 	const head = git(root, ["rev-parse", "HEAD"])?.trim();
 	if (!head) return null;
-	const cache = path.join(root, modelDir(root), ".cache", "history.json");
+	const cache = path.join(root, MODEL_DIR, ".cache", "history.json");
 	try {
 		const h = JSON.parse(fs.readFileSync(cache, "utf8"));
 		if (h.head === head) return h;
@@ -22203,7 +22192,7 @@ function compile$1(root, opts = {}) {
 			group: warningGroup(code)
 		});
 	};
-	const mdir = modelDir(root);
+	const mdir = MODEL_DIR;
 	const archAbs = path.join(root, mdir);
 	const rel = (abs) => path.relative(root, abs).replace(/\\/g, "/");
 	const v = getValidators();
@@ -22243,7 +22232,6 @@ function compile$1(root, opts = {}) {
 	const docsHome = cleanDocsSetting(sys.docs) ?? `${mdir}/docs`;
 	if (sys.docs !== void 0 && !cleanDocsSetting(sys.docs)) err("schema", `docs: "${sys.docs}" is not a folder inside the repo.`, void 0, `${mdir}/system.yaml`);
 	else if (sys.docs !== void 0 && !fs.existsSync(path.join(root, docsHome))) warn("reference", `docs: "${docsHome}" in system.yaml names a folder that does not exist.`, void 0, `${mdir}/system.yaml`);
-	if (mdir === "arch") warn("legacy-folder", `The model is in ${LEGACY_DIR}/, the folder's earlier name. Rename it with "git mv ${LEGACY_DIR} ${MODEL_DIR}", then fix the paths that still start with ${LEGACY_DIR}/ (this check lists them).`, void 0, LEGACY_DIR);
 	const raws = [];
 	const walkNodes = (dirAbs, prefix, parent) => {
 		let entries;
@@ -23903,7 +23891,7 @@ function snapshotOf(root) {
 /** Records the current hash of each shape's source so later edits to the source flag it stale. */
 function confirmShapes(root, only) {
 	const graph = compile$1(root);
-	const lockPath = path.join(root, modelDir(root), LOCK_FILE);
+	const lockPath = path.join(root, MODEL_DIR, LOCK_FILE);
 	let lock = {};
 	try {
 		lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
@@ -24071,10 +24059,6 @@ function orientText(g, compact) {
 		out.push("");
 		out.push("## Open changes (implement only approved ones)");
 		for (const c of openChanges) out.push(`- ${changeLine(c)}`);
-	}
-	if (g.system.dir !== "armature") {
-		out.push("");
-		out.push(`Note: the model is in ${g.system.dir}/, the folder's earlier name. Where a skill or message says armature/, read ${g.system.dir}/. Do not rename the folder unless the person asks.`);
 	}
 	const bad = g.nodes.filter((n) => (n.status === "failing" || n.status === "stale") && n.children.length === 0);
 	const errors = g.problems.filter((p) => p.level === "error");
@@ -24816,11 +24800,11 @@ function watchSources(root, onChange, delayMs = 1500) {
 // src/approve.ts
 function writeApprovals(root, all) {
 	const sorted = Object.fromEntries(Object.entries(all).sort(([a], [b]) => a.localeCompare(b)));
-	fs.writeFileSync(path.join(root, modelDir(root), APPROVALS_FILE), `${JSON.stringify(sorted, null, 2)}\n`);
+	fs.writeFileSync(path.join(root, MODEL_DIR, APPROVALS_FILE), `${JSON.stringify(sorted, null, 2)}\n`);
 }
 function changeFile(root, id) {
 	for (const ext of ["yaml", "yml"]) {
-		const p = path.join(root, modelDir(root), "changes", `${id}.${ext}`);
+		const p = path.join(root, MODEL_DIR, "changes", `${id}.${ext}`);
 		if (fs.existsSync(p)) return p;
 	}
 	return null;
@@ -24874,12 +24858,12 @@ function approveChange(root, id, by) {
 	const sec = changeSecurity(g, id);
 	if (sec.lines.length) out.push("  What it does to security:", ...sec.lines.map((l) => `  ${l}`));
 	if (c.waits.length) out.push(`  It comes after ${c.waits.join(", ")}, which ${c.waits.length === 1 ? "is" : "are"} not done yet.`);
-	out.push(`Recorded in ${modelDir(root)}/${APPROVALS_FILE}. Commit it with the change.`);
+	out.push(`Recorded in ${MODEL_DIR}/${APPROVALS_FILE}. Commit it with the change.`);
 	return out.join("\n");
 }
 var PENDING = "pending-approval.json";
 var PENDING_FOR = 36e5;
-var pendingFile = (root) => path.join(root, modelDir(root), ".cache", PENDING);
+var pendingFile = (root) => path.join(root, MODEL_DIR, ".cache", PENDING);
 /** A fingerprint of one tool call's input, so the edit the person was asked about can be told from any other. */
 function callKey(input) {
 	const stable = (v) => Array.isArray(v) ? v.map(stable) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => [k, stable(x)])) : v;
@@ -24925,7 +24909,7 @@ var BASELINE_FILE = "baseline.json";
 var keyOf = (p) => `${p.code}|${p.ref ?? ""}|${p.file ?? ""}`;
 function readBaseline(root) {
 	try {
-		const data = JSON.parse(fs.readFileSync(path.join(root, modelDir(root), BASELINE_FILE), "utf8"));
+		const data = JSON.parse(fs.readFileSync(path.join(root, MODEL_DIR, BASELINE_FILE), "utf8"));
 		return data && typeof data.warnings === "object" ? data.warnings : null;
 	} catch {
 		return null;
@@ -24936,7 +24920,7 @@ function writeBaseline(root, problems) {
 	const warnings = {};
 	for (const p of problems) if (p.level === "warning") warnings[keyOf(p)] = (warnings[keyOf(p)] ?? 0) + 1;
 	const sorted = Object.fromEntries(Object.entries(warnings).sort(([a], [b]) => a.localeCompare(b)));
-	fs.writeFileSync(path.join(root, modelDir(root), BASELINE_FILE), `${JSON.stringify({
+	fs.writeFileSync(path.join(root, MODEL_DIR, BASELINE_FILE), `${JSON.stringify({
 		written: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10),
 		warnings: sorted
 	}, null, 2)}\n`);
@@ -25040,40 +25024,35 @@ function isolate(from, name) {
 function modelAt(root, ref) {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "armature-diff-"));
 	try {
-		for (const name of [
-			modelDir(root),
-			MODEL_DIR,
-			LEGACY_DIR
-		]) try {
-			const tar = execFileSync("git", [
-				"archive",
-				"--format=tar",
-				ref,
-				"--",
-				name
-			], {
-				cwd: root,
-				stdio: [
-					"ignore",
-					"pipe",
-					"ignore"
-				],
-				maxBuffer: 268435456
-			});
-			execFileSync("tar", [
-				"-x",
-				"-C",
-				dir
-			], {
-				input: tar,
-				stdio: [
-					"pipe",
-					"ignore",
-					"ignore"
-				]
-			});
-			if (fs.existsSync(path.join(dir, name, "system.yaml"))) return compile$1(dir);
-		} catch {}
+		const tar = execFileSync("git", [
+			"archive",
+			"--format=tar",
+			ref,
+			"--",
+			MODEL_DIR
+		], {
+			cwd: root,
+			stdio: [
+				"ignore",
+				"pipe",
+				"ignore"
+			],
+			maxBuffer: 268435456
+		});
+		execFileSync("tar", [
+			"-x",
+			"-C",
+			dir
+		], {
+			input: tar,
+			stdio: [
+				"pipe",
+				"ignore",
+				"ignore"
+			]
+		});
+		return fs.existsSync(path.join(dir, "armature", "system.yaml")) ? compile$1(dir) : null;
+	} catch {
 		return null;
 	} finally {
 		fs.rmSync(dir, {
@@ -25098,7 +25077,7 @@ function diffModel(root, ref) {
 		return `"${ref}" is not a commit, branch or tag in this repo.`;
 	}
 	const then = modelAt(root, ref);
-	const here = isolate(path.join(root, modelDir(root)), modelDir(root));
+	const here = isolate(path.join(root, MODEL_DIR), MODEL_DIR);
 	let now;
 	try {
 		now = compile$1(here);
@@ -25413,7 +25392,7 @@ function rename(root, from, to) {
 		to: target.to
 	};
 	const rw = new Rewriter(ix, ren);
-	const mdir = modelDir(root);
+	const mdir = MODEL_DIR;
 	const arch = path.join(root, mdir);
 	const rel = (abs) => path.relative(root, abs).replace(/\\/g, "/");
 	const node = r.type === "node" ? g.nodes.find((n) => n.id === ren.from) : null;
@@ -25624,7 +25603,7 @@ function serve(root, port, github) {
 	watchSources(root, () => buildCodeIndex(root).then((r) => {
 		if (r.parsed) notify();
 	}, () => void 0));
-	const archAbs = path.join(root, modelDir(root));
+	const archAbs = path.join(root, MODEL_DIR);
 	try {
 		fs.watch(archAbs, { recursive: true }, (_event, file) => {
 			if (file && String(file).replace(/\\/g, "/").startsWith(".cache")) {
@@ -25657,7 +25636,7 @@ var TUNE = {
 };
 function readSummaries(root) {
 	try {
-		return JSON.parse(fs.readFileSync(path.join(root, modelDir(root), ".cache", "summaries.json"), "utf8"));
+		return JSON.parse(fs.readFileSync(path.join(root, MODEL_DIR, ".cache", "summaries.json"), "utf8"));
 	} catch {
 		return {};
 	}
@@ -26194,7 +26173,7 @@ var list = (v) => (v === void 0 || v === null ? [] : Array.isArray(v) ? v : [v])
 * With an overlay, read as the model would stand after an edit that has not been made yet.
 */
 function readOwnership(root, overlay) {
-	const mdir = modelDir(root);
+	const mdir = MODEL_DIR;
 	const arch = path.join(root, mdir);
 	const sys = readYaml(path.join(arch, "system.yaml"), overlay);
 	const nodes = [];
@@ -26277,7 +26256,7 @@ function readOwnership(root, overlay) {
 }
 /** True unless the model's system.yaml says `gate: off`. */
 function gateOn(root) {
-	return readYaml(path.join(root, modelDir(root), "system.yaml")).gate !== "off";
+	return readYaml(path.join(root, MODEL_DIR, "system.yaml")).gate !== "off";
 }
 /** The file a write is aimed at, whichever tool asks. */
 function targetOf(input) {
@@ -26343,7 +26322,7 @@ function writeGate(root, input) {
 	const abs = path.resolve(root, target);
 	const rel = path.relative(root, abs).replace(/\\/g, "/");
 	if (!rel || rel.startsWith("..")) return null;
-	const mdir = modelDir(root);
+	const mdir = MODEL_DIR;
 	const before = fs.existsSync(abs) && fs.statSync(abs).isFile() ? fs.readFileSync(abs, "utf8") : "";
 	const after = resultOf(root, before, input);
 	const blind = after === null && !writtenText(input).trim();
@@ -26443,7 +26422,7 @@ function protectGate(root, rel, own = readOwnership(root)) {
 	if (!CODE_FILE.test(rel) || isTestPath(root, rel) || !own.on) return null;
 	const owner = own.nodes.find((n) => n.code(rel));
 	if (!owner?.protect) return null;
-	const mdir = modelDir(root);
+	const mdir = MODEL_DIR;
 	const tag = owner.tag;
 	const state = tag ? own.changes.get(tag.id) : void 0;
 	const plan = `Plan the edit as a change: ${mdir}/changes/<id>.yaml with "state: proposed", "modify: <id>" on "${owner.id}" (or on the node around it), and the plan in ${newPlanPath(docsDir(root), mdir)}. Then ask the person to approve it; do not approve it yourself.`;
@@ -26488,7 +26467,7 @@ function guardsOfFile(rel, text, up = {
 		} catch {
 			return out;
 		}
-		for (const m of JSON.stringify(data?.hooks ?? {}).matchAll(/(?:armature|brain)\.mjs\\?"? hook ([\w-]+)/g)) guards.add(`hook ${m[1]}`);
+		for (const m of JSON.stringify(data?.hooks ?? {}).matchAll(/armature\.mjs\\?"? hook ([\w-]+)/g)) guards.add(`hook ${m[1]}`);
 		for (const [k, on] of Object.entries(data?.enabledPlugins ?? {})) {
 			if (!/^armature@/.test(k)) continue;
 			if (on) guards.add(`plugin ${k}`);
@@ -26600,7 +26579,7 @@ function modelWeakened(root, rel, before, after) {
 * edit of it. Returns null when nothing guarded goes.
 */
 function removalGate(root, paths, doing, own) {
-	const mdir = modelDir(root);
+	const mdir = MODEL_DIR;
 	const model = path.join(root, mdir);
 	const under = (p, dir) => p === dir || p.startsWith(dir + path.sep);
 	const rels = (p) => path.relative(root, p).replace(/\\/g, "/") || ".";
@@ -26645,7 +26624,7 @@ function weakenAsk(rel, lost, lead = `This edit to ${rel} weakens`) {
 /** One line on what a change holds, for the question put to the person. Empty when it cannot be worked out. */
 function elementsNote(root, change) {
 	try {
-		const mdir = modelDir(root);
+		const mdir = MODEL_DIR;
 		const hits = [];
 		const scan = (dir) => {
 			for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -26777,7 +26756,7 @@ function shellRemovals(command, cwd) {
 */
 function bashGate(root, command, cwd = root) {
 	if (!command || !command.trim()) return null;
-	const mdir = modelDir(root);
+	const mdir = MODEL_DIR;
 	let question = null;
 	const ask = (reason) => {
 		question ??= {
@@ -26898,11 +26877,8 @@ var PLANNING_WORDS = /\b(plan|design|propose|proposal|architect|architecture for
 var PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 var BIN = path.join(PKG_ROOT, "bin", "armature.mjs");
 var RULE_PREFIX = "armature-";
-var LEGACY_RULE_PREFIX = "arch-";
-var GENERATED_RULE = /Generated by "(?:armature|brain) sync-rules"/;
-var OUR_HOOK = /(?:armature|brain)\.mjs"? hook /;
-var LEGACY_PLUGIN = "brain@agent-brain";
-var LEGACY_MARKET = "agent-brain";
+var GENERATED_RULE = /Generated by "armature sync-rules"/;
+var OUR_HOOK = /armature\.mjs"? hook /;
 function readStdin() {
 	const given = globalThis.__ARMATURE_STDIN__;
 	if (typeof given === "string") return Promise.resolve(given);
@@ -26947,7 +26923,7 @@ function syncRules(root, opts = {}) {
 		lines.push("");
 		lines.push(`# ${n.id}: ${n.role}`);
 		lines.push("");
-		lines.push(`These files belong to the node \`${n.id}\` (${n.kind}) in the architecture model under \`${modelDir(root)}/\`.`);
+		lines.push(`These files belong to the node \`${n.id}\` (${n.kind}) in the architecture model under \`${MODEL_DIR}/\`.`);
 		if (n.rules.length) {
 			lines.push("");
 			lines.push("## Rules");
@@ -26980,7 +26956,7 @@ function syncRules(root, opts = {}) {
 		lines.push("## When you change these files");
 		lines.push("");
 		lines.push(`- Run \`armature show ${n.id}\` for the full picture, or \`armature impact ${n.id}\` before changing an interface or a shape.`);
-		lines.push(`- If you add, remove or change an interface, a link to another node, or a data shape, update \`${n.source}\` (and \`${modelDir(root)}/shapes/\`) in the same change, then run \`armature check\`.`);
+		lines.push(`- If you add, remove or change an interface, a link to another node, or a data shape, update \`${n.source}\` (and \`${MODEL_DIR}/shapes/\`) in the same change, then run \`armature check\`.`);
 		wanted.set(`${RULE_PREFIX}${n.id.replace(/\./g, "--")}.md`, `${lines.join("\n")}\n`);
 	}
 	let written = 0;
@@ -26993,7 +26969,7 @@ function syncRules(root, opts = {}) {
 			written++;
 		}
 	}
-	for (const f of fs.existsSync(dir) ? fs.readdirSync(dir) : []) if ((f.startsWith(RULE_PREFIX) || f.startsWith(LEGACY_RULE_PREFIX)) && f.endsWith(".md") && !wanted.has(f)) {
+	for (const f of fs.existsSync(dir) ? fs.readdirSync(dir) : []) if (f.startsWith(RULE_PREFIX) && f.endsWith(".md") && !wanted.has(f)) {
 		const body = fs.readFileSync(path.join(dir, f), "utf8");
 		if (GENERATED_RULE.test(body)) {
 			stale.push(`.claude/rules/${f}`);
@@ -27010,7 +26986,7 @@ function syncRules(root, opts = {}) {
 /** True the first time `key` is seen under `name`; remembered in armature/.cache so a hook speaks once per session. */
 function once(root, name, key) {
 	if (!key) return true;
-	const cache = path.join(root, modelDir(root), ".cache");
+	const cache = path.join(root, MODEL_DIR, ".cache");
 	const marker = path.join(cache, name);
 	let seen = [];
 	try {
@@ -27024,7 +27000,7 @@ function once(root, name, key) {
 /** Forgets that a session was told something, so it is told again (after the context was compacted). */
 function forget(root, names, key) {
 	for (const name of names) {
-		const marker = path.join(root, modelDir(root), ".cache", name);
+		const marker = path.join(root, MODEL_DIR, ".cache", name);
 		try {
 			fs.writeFileSync(marker, fs.readFileSync(marker, "utf8").split("\n").filter((x) => x && x !== key).join("\n"));
 		} catch {}
@@ -27032,7 +27008,7 @@ function forget(root, names, key) {
 }
 /** The permission mode a session had at its last prompt, and records the one it has now. */
 function lastMode(root, sid, now) {
-	const marker = path.join(root, modelDir(root), ".cache", "session-modes.json");
+	const marker = path.join(root, MODEL_DIR, ".cache", "session-modes.json");
 	let modes = {};
 	try {
 		modes = JSON.parse(fs.readFileSync(marker, "utf8"));
@@ -27066,7 +27042,7 @@ async function hook(name, rootFlag) {
 					"plan-sessions",
 					"planning-sessions"
 				], String(input.session_id ?? ""));
-				if (gateOn(root)) out.push(`The conversation was compacted. ${planReminder(modelDir(root))}`);
+				if (gateOn(root)) out.push(`The conversation was compacted. ${planReminder(MODEL_DIR)}`);
 			}
 			process.stdout.write(`${out.join("\n\n")}\n`);
 			return;
@@ -27085,11 +27061,11 @@ async function hook(name, rootFlag) {
 			const was = lastMode(root, sid, mode);
 			if (gateOn(root)) {
 				if (mode === "plan") {
-					if (once(root, "plan-sessions", sid)) out.push(planModeNote(modelDir(root), newPlanPath(docsDir(root), modelDir(root))));
-					else if (was !== "plan") out.push(planReminder(modelDir(root)));
+					if (once(root, "plan-sessions", sid)) out.push(planModeNote(MODEL_DIR, newPlanPath(docsDir(root), MODEL_DIR)));
+					else if (was !== "plan") out.push(planReminder(MODEL_DIR));
 				} else if (PLANNING_WORDS.test(prompt)) {
-					if (once(root, "planning-sessions", sid)) out.push(planningNote(modelDir(root), newPlanPath(docsDir(root), modelDir(root))));
-					else out.push(planReminder(modelDir(root)));
+					if (once(root, "planning-sessions", sid)) out.push(planningNote(MODEL_DIR, newPlanPath(docsDir(root), MODEL_DIR)));
+					else out.push(planReminder(MODEL_DIR));
 				}
 			}
 			if (out.length) process.stdout.write(`${out.join("\n\n")}\n`);
@@ -27125,7 +27101,7 @@ async function hook(name, rootFlag) {
 			} catch {
 				plan = "";
 			}
-			const missing = planGate(plan, modelDir(root), newPlanPath(docsDir(root), modelDir(root)), root);
+			const missing = planGate(plan, MODEL_DIR, newPlanPath(docsDir(root), MODEL_DIR), root);
 			if (missing) decide("deny", missing);
 			return;
 		}
@@ -27133,8 +27109,8 @@ async function hook(name, rootFlag) {
 			const file = targetOf(input.tool_input) ?? "";
 			if (!file) return;
 			const rel = path.relative(root, path.resolve(root, file)).replace(/\\/g, "/");
-			if (rel.startsWith("..") || rel.startsWith(`${modelDir(root)}/.cache/`)) return;
-			const inArch = rel.startsWith(`${modelDir(root)}/`);
+			if (rel.startsWith("..") || rel.startsWith(`armature/.cache/`)) return;
+			const inArch = rel.startsWith(`${MODEL_DIR}/`);
 			const isDoc = isDocPath(rel);
 			if (!inArch && !isDoc) return;
 			if (inArch) settleApproval(root, callKey(input.tool_input));
@@ -27169,7 +27145,7 @@ async function hook(name, rootFlag) {
 			if (input.stop_hook_active) return;
 			const changed = changedFiles(root);
 			if (changed.length === 0) return;
-			if (changed.some((f) => f.startsWith(`${modelDir(root)}/`) && !f.startsWith(`${modelDir(root)}/.cache/`))) return;
+			if (changed.some((f) => f.startsWith(`armature/`) && !f.startsWith(`armature/.cache/`))) return;
 			const g = compile$1(root);
 			const touched = /* @__PURE__ */ new Map();
 			for (const f of changed) {
@@ -27179,7 +27155,7 @@ async function hook(name, rootFlag) {
 			}
 			if (touched.size === 0) return;
 			const key = createHash("sha256").update(`${input.session_id ?? ""}|${[...touched.keys()].sort().join(",")}`).digest("hex").slice(0, 16);
-			const cache = path.join(root, modelDir(root), ".cache");
+			const cache = path.join(root, MODEL_DIR, ".cache");
 			const marker = path.join(cache, "stop-reminder");
 			let seen = "";
 			try {
@@ -27192,7 +27168,7 @@ async function hook(name, rootFlag) {
 			const about = /* @__PURE__ */ new Set();
 			for (const id of touched.keys()) for (const d of g.nodes.find((n) => n.id === id)?.docs.filter((x) => x.how === "declared").slice(0, 2) ?? []) about.add(d.path);
 			const docLine = about.size ? `Documents about them: ${[...about].slice(0, 6).join(", ")}. If what they say is no longer true, update them in the same change.\n` : "";
-			process.stderr.write(`Code changed under these architecture nodes, and nothing under ${modelDir(root)}/ changed:\n${lines.join("\n")}\nCheck whether an interface, a link to another node, a data shape or a requirement changed. If so, update the model under ${modelDir(root)}/ and run "armature check". If the model still holds, say so in one line and finish.\n${docLine}`);
+			process.stderr.write(`Code changed under these architecture nodes, and nothing under ${MODEL_DIR}/ changed:\n${lines.join("\n")}\nCheck whether an interface, a link to another node, a data shape or a requirement changed. If so, update the model under ${MODEL_DIR}/ and run "armature check". If the model still holds, say so in one line and finish.\n${docLine}`);
 			process.exit(2);
 		}
 	} catch (e) {
@@ -27294,7 +27270,7 @@ function copyDir(from, to) {
 function install(root) {
 	const out = [];
 	const hooksChanged = mergeHooks(path.join(root, ".claude", "settings.local.json"));
-	out.push(`${hooksChanged ? "Added" : "Kept"} hooks in .claude/settings.local.json (session start, prompts, before writes and before a plan is presented, after edits to ${modelDir(root)}/ and to documents, on stop).`);
+	out.push(`${hooksChanged ? "Added" : "Kept"} hooks in .claude/settings.local.json (session start, prompts, before writes and before a plan is presented, after edits to ${MODEL_DIR}/ and to documents, on stop).`);
 	const mcpPath = path.join(root, ".mcp.json");
 	const mcpTracked = !!git$1(root, [
 		"ls-files",
@@ -27311,24 +27287,20 @@ function install(root) {
 			command: "node",
 			args: [BIN, "mcp"]
 		};
-		const old = mcp.mcpServers.brain;
-		const dropOld = !!old && (old.args ?? []).some((a) => /brain\.mjs$/.test(a));
-		if (dropOld) delete mcp.mcpServers.brain;
-		if (dropOld || JSON.stringify(mcp.mcpServers.armature) !== JSON.stringify(server)) {
+		if (JSON.stringify(mcp.mcpServers.armature) !== JSON.stringify(server)) {
 			mcp.mcpServers.armature = server;
 			fs.writeFileSync(mcpPath, `${JSON.stringify(mcp, null, 2)}\n`);
-			out.push(`Registered the "armature" MCP server in .mcp.json${dropOld ? ", replacing the earlier \"brain\" entry" : ""}.`);
+			out.push("Registered the \"armature\" MCP server in .mcp.json.");
 		} else out.push("Kept the \"armature\" MCP server in .mcp.json.");
 	}
 	const skills = copyDir(path.join(PKG_ROOT, "skills"), path.join(root, ".claude", "skills"));
 	out.push(`Skills: ${skills} file${skills === 1 ? "" : "s"} copied to .claude/skills/.`);
-	out.push(...legacyNotes(root));
 	const rules = syncRules(root);
 	out.push(`Rule files: ${rules.written} written, ${rules.removed} removed in .claude/rules/.`);
-	const ignore = path.join(root, modelDir(root), ".gitignore");
+	const ignore = path.join(root, MODEL_DIR, ".gitignore");
 	if (!fs.existsSync(ignore)) {
 		fs.writeFileSync(ignore, ".cache/\n");
-		out.push(`Created ${modelDir(root)}/.gitignore so derived files stay out of git.`);
+		out.push(`Created ${MODEL_DIR}/.gitignore so derived files stay out of git.`);
 	}
 	out.push(`Restart the Claude Code session in this repo so the hooks${mcpTracked ? "" : " and MCP server"} load.`);
 	return out;
@@ -27411,12 +27383,11 @@ function removeLocalWiring(root) {
 	}
 	const mcpPath = path.join(root, ".mcp.json");
 	const mcp = readJson(mcpPath);
-	const localServers = ["armature", "brain"].filter((key) => (mcp.mcpServers?.[key]?.args ?? []).some((a) => /(?:armature|brain)\.mjs$/.test(a) && path.isAbsolute(a)));
-	if (localServers.length) {
-		for (const key of localServers) delete mcp.mcpServers[key];
+	if ((mcp.mcpServers?.armature?.args ?? []).some((a) => /armature\.mjs$/.test(a) && path.isAbsolute(a))) {
+		delete mcp.mcpServers.armature;
 		if (Object.keys(mcp.mcpServers).length === 0 && Object.keys(mcp).length === 1) fs.unlinkSync(mcpPath);
 		else writeJson(mcpPath, mcp);
-		out.push(`Removed the machine-specific ${localServers.map((k) => `"${k}"`).join(" and ")} server from .mcp.json (the plugin provides it).`);
+		out.push("Removed the machine-specific \"armature\" server from .mcp.json (the plugin provides it).");
 	}
 	const src = path.join(PKG_ROOT, "skills");
 	for (const name of fs.existsSync(src) ? fs.readdirSync(src) : []) {
@@ -27432,16 +27403,6 @@ function removeLocalWiring(root) {
 	}
 	const skillsDir = path.join(root, ".claude", "skills");
 	if (fs.existsSync(skillsDir) && fs.readdirSync(skillsDir).length === 0) fs.rmdirSync(skillsDir);
-	out.push(...legacyNotes(root));
-	return out;
-}
-/** What is left from the tool's earlier name and cannot be removed safely: it is named, not deleted. */
-function legacyNotes(root) {
-	const out = [];
-	const skillsDir = path.join(root, ".claude", "skills");
-	const old = fs.existsSync(skillsDir) ? fs.readdirSync(skillsDir).filter((n) => /^arch-(language|design|document|docs|audit)$/.test(n)) : [];
-	if (old.length) out.push(`Old skills remain in .claude/skills/ (${old.join(", ")}). Delete them: the armature-* skills replace them.`);
-	if (modelDir(root) === "arch") out.push(`The model is still in ${LEGACY_DIR}/. Rename it: git mv ${LEGACY_DIR} armature`);
 	return out;
 }
 /** The GitHub Actions job: model check with annotations, rule files up to date, and the diagram as an artifact. */
@@ -27523,27 +27484,24 @@ function installTeam(root, opts = {}) {
 	settings.extraKnownMarketplaces[market] = { source };
 	settings.enabledPlugins ??= {};
 	settings.enabledPlugins[id] = true;
-	const hadLegacy = LEGACY_PLUGIN in settings.enabledPlugins || market !== LEGACY_MARKET && LEGACY_MARKET in settings.extraKnownMarketplaces;
-	delete settings.enabledPlugins[LEGACY_PLUGIN];
-	if (market !== LEGACY_MARKET) delete settings.extraKnownMarketplaces[LEGACY_MARKET];
 	if (JSON.stringify(settings) !== before) {
 		writeJson(settingsPath, settings);
-		out.push(`Enabled the plugin ${id} for everyone in .claude/settings.json${hadLegacy ? `, replacing ${LEGACY_PLUGIN}` : ""}.`);
+		out.push(`Enabled the plugin ${id} for everyone in .claude/settings.json.`);
 	} else out.push(`Kept the plugin ${id} in .claude/settings.json.`);
 	if (source.source === "directory") out.push(`Note: the marketplace is a folder on this machine (${source.path}). Teammates need --marketplace owner/repo or a git URL instead.`);
 	out.push(...removeLocalWiring(root));
 	const rules = syncRules(root);
 	out.push(`Rule files: ${rules.written} written, ${rules.removed} removed in .claude/rules/.`);
-	const ignore = path.join(root, modelDir(root), ".gitignore");
+	const ignore = path.join(root, MODEL_DIR, ".gitignore");
 	if (!fs.existsSync(ignore)) {
 		fs.writeFileSync(ignore, ".cache/\n");
-		out.push(`Created ${modelDir(root)}/.gitignore so derived files stay out of git.`);
+		out.push(`Created ${MODEL_DIR}/.gitignore so derived files stay out of git.`);
 	}
 	if (opts.ci !== false) {
 		const wf = ciWorkflow(source);
 		const wfPath = path.join(root, ".github", "workflows", "architecture.yml");
 		if (!wf) out.push("Skipped the CI workflow: CI cannot reach a marketplace in a local folder.");
-		else if (fs.existsSync(wfPath) && fs.readFileSync(wfPath, "utf8") !== wf && !/^# Generated by "(?:armature|brain) install --team"/.test(fs.readFileSync(wfPath, "utf8"))) out.push("Kept .github/workflows/architecture.yml: it was edited by hand.");
+		else if (fs.existsSync(wfPath) && fs.readFileSync(wfPath, "utf8") !== wf && !/^# Generated by "armature install --team"/.test(fs.readFileSync(wfPath, "utf8"))) out.push("Kept .github/workflows/architecture.yml: it was edited by hand.");
 		else if (!fs.existsSync(wfPath) || fs.readFileSync(wfPath, "utf8") !== wf) {
 			fs.mkdirSync(path.dirname(wfPath), { recursive: true });
 			fs.writeFileSync(wfPath, wf);
@@ -27551,7 +27509,7 @@ function installTeam(root, opts = {}) {
 		}
 	}
 	out.push("");
-	out.push(`Commit: ${modelDir(root)}/, .claude/settings.json, .claude/rules/armature-*.md${opts.ci !== false && source.source !== "directory" ? ", .github/workflows/architecture.yml" : ""}.`);
+	out.push(`Commit: ${MODEL_DIR}/, .claude/settings.json, .claude/rules/armature-*.md${opts.ci !== false && source.source !== "directory" ? ", .github/workflows/architecture.yml" : ""}.`);
 	out.push("Each teammate: open the repo in Claude Code, trust the folder, and run /plugin install " + id + " once if Claude Code has not installed it. Node 22+ is the only requirement.");
 	return out;
 }
@@ -27858,7 +27816,7 @@ function prepare(root, variant, cliBin) {
 		stdio: "ignore"
 	});
 	if (variant === "armature") {
-		fs.cpSync(path.join(root, modelDir(root)), path.join(dir, modelDir(root)), {
+		fs.cpSync(path.join(root, MODEL_DIR), path.join(dir, MODEL_DIR), {
 			recursive: true,
 			filter: (src) => !src.includes(`${path.sep}.cache`)
 		});
@@ -27868,7 +27826,7 @@ function prepare(root, variant, cliBin) {
 			"--root",
 			dir
 		], { stdio: "ignore" });
-	} else fs.rmSync(path.join(dir, modelDir(root)), {
+	} else fs.rmSync(path.join(dir, MODEL_DIR), {
 		recursive: true,
 		force: true
 	});
@@ -27985,7 +27943,7 @@ async function evalAgent(root, tasksFile, cliBin, log) {
 			});
 		}
 	}
-	const out = path.join(root, modelDir(root), ".cache", "eval");
+	const out = path.join(root, MODEL_DIR, ".cache", "eval");
 	fs.mkdirSync(out, { recursive: true });
 	fs.writeFileSync(path.join(out, `agent-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}.json`), JSON.stringify(runs, null, 2));
 	return runs;
@@ -28028,7 +27986,7 @@ function summarize(root, idx, plan, log) {
 	const bin = claudeBin();
 	if (!bin) throw new Error("The claude CLI was not found. Install Claude Code, or point ARMATURE_CLAUDE_BIN at it.");
 	const store = readSummaries(root);
-	const file = path.join(root, modelDir(root), ".cache", "summaries.json");
+	const file = path.join(root, MODEL_DIR, ".cache", "summaries.json");
 	let done = 0;
 	for (let i = 0; i < plan.files.length; i += BATCH) {
 		const batch = plan.files.slice(i, i + BATCH);
@@ -43346,7 +43304,7 @@ function fingerprint(root) {
 		}
 	};
 	for (const line of status.split("\n").filter(Boolean)) stamp(path.join(root, line.slice(3).split(" -> ").pop().replace(/^"|"$/g, "")));
-	const cache = path.join(root, modelDir(root), ".cache");
+	const cache = path.join(root, MODEL_DIR, ".cache");
 	for (const dir of [cache, path.join(cache, "reports")]) try {
 		for (const f of fs.readdirSync(dir)) stamp(path.join(dir, f));
 	} catch {}
@@ -43801,7 +43759,7 @@ async function main() {
 		case "shapes": {
 			await buildCodeIndex(root);
 			if (flags.sync) {
-				const changed = await syncShapeFiles(path.join(root, modelDir(root)), readCodeIndex(root), args);
+				const changed = await syncShapeFiles(path.join(root, MODEL_DIR), readCodeIndex(root), args);
 				console.log(changed.length ? `Rewrote the fields of ${changed.length} shape${changed.length === 1 ? "" : "s"} from code: ${changed.join(", ")}` : "Every shape with a readable source already matches the code.");
 				return;
 			}
@@ -43831,7 +43789,7 @@ async function main() {
 				return;
 			}
 			const n = summarize(root, idx, plan, (s) => console.log(s));
-			console.log(`Wrote ${n} summaries to ${modelDir(root)}/.cache/summaries.json.`);
+			console.log(`Wrote ${n} summaries to ${MODEL_DIR}/.cache/summaries.json.`);
 			return;
 		}
 		case "eval":
@@ -43891,7 +43849,7 @@ async function main() {
 			if (failOn && failOn !== "wrong" && failOn !== "warnings") return fail("--fail-on takes wrong or warnings.");
 			if (flags["update-baseline"]) {
 				const n = writeBaseline(root, g.problems);
-				console.log(`Wrote ${modelDir(root)}/baseline.json: ${n} warning${n === 1 ? " is" : "s are"} the baseline now. "armature check --new" shows only what comes after; commit the file.`);
+				console.log(`Wrote ${MODEL_DIR}/baseline.json: ${n} warning${n === 1 ? " is" : "s are"} the baseline now. "armature check --new" shows only what comes after; commit the file.`);
 				return;
 			}
 			let pool = g.problems;
@@ -43930,10 +43888,10 @@ async function main() {
 				github: flags.github === true,
 				activity: true
 			});
-			const dir = path.join(root, modelDir(root), ".cache");
+			const dir = path.join(root, MODEL_DIR, ".cache");
 			fs.mkdirSync(dir, { recursive: true });
 			fs.writeFileSync(path.join(dir, "graph.json"), JSON.stringify(g, null, 2));
-			console.log(`Wrote ${modelDir(root)}/.cache/graph.json (${g.nodes.length} nodes, ${g.edges.length} links).`);
+			console.log(`Wrote ${MODEL_DIR}/.cache/graph.json (${g.nodes.length} nodes, ${g.edges.length} links).`);
 			return;
 		}
 		case "view": {
@@ -43944,7 +43902,7 @@ async function main() {
 		}
 		case "export": {
 			await buildCodeIndex(root).catch(() => void 0);
-			const out = exportHtml(root, args[0] ?? path.join(root, modelDir(root), ".cache", "architecture.html"), flags.github === true);
+			const out = exportHtml(root, args[0] ?? path.join(root, "armature", ".cache", "architecture.html"), flags.github === true);
 			console.log(`Wrote ${out}`);
 			return;
 		}

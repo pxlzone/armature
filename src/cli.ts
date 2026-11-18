@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compile, confirmShapes, findRoot } from './compile.js';
-import { MODEL_DIR, modelDir } from './paths.js';
+import { MODEL_DIR } from './paths.js';
 import { ownerOf } from './render.js';
 import { watchSources } from './watch.js';
 import { activity, docsText, formatProblems, impact, islands, orient, pathText, show, status, techText, todos, traceText, where } from './render.js';
@@ -257,7 +257,7 @@ async function main(): Promise<void> {
     case 'shapes': {
       await buildCodeIndex(root);
       if (flags.sync) {
-        const changed = await syncShapeFiles(path.join(root, modelDir(root)), readCodeIndex(root)!, args);
+        const changed = await syncShapeFiles(path.join(root, MODEL_DIR), readCodeIndex(root)!, args);
         console.log(changed.length ? `Rewrote the fields of ${changed.length} shape${changed.length === 1 ? '' : 's'} from code: ${changed.join(', ')}` : 'Every shape with a readable source already matches the code.');
         return;
       }
@@ -284,7 +284,7 @@ async function main(): Promise<void> {
         return;
       }
       const n = summarize(root, idx, plan, (s) => console.log(s));
-      console.log(`Wrote ${n} summaries to ${modelDir(root)}/.cache/summaries.json.`);
+      console.log(`Wrote ${n} summaries to ${MODEL_DIR}/.cache/summaries.json.`);
       return;
     }
     case 'eval': {
@@ -341,7 +341,7 @@ async function main(): Promise<void> {
       if (failOn && failOn !== 'wrong' && failOn !== 'warnings') return fail('--fail-on takes wrong or warnings.');
       if (flags['update-baseline']) {
         const n = writeBaseline(root, g.problems);
-        console.log(`Wrote ${modelDir(root)}/baseline.json: ${n} warning${n === 1 ? ' is' : 's are'} the baseline now. "armature check --new" shows only what comes after; commit the file.`);
+        console.log(`Wrote ${MODEL_DIR}/baseline.json: ${n} warning${n === 1 ? ' is' : 's are'} the baseline now. "armature check --new" shows only what comes after; commit the file.`);
         return;
       }
       // With --new, warnings the baseline already holds are set aside: the question is whether the model got worse.
@@ -380,10 +380,10 @@ async function main(): Promise<void> {
     }
     case 'build': {
       const g = compile(root, { github: flags.github === true, activity: true });
-      const dir = path.join(root, modelDir(root), '.cache');
+      const dir = path.join(root, MODEL_DIR, '.cache');
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(path.join(dir, 'graph.json'), JSON.stringify(g, null, 2));
-      console.log(`Wrote ${modelDir(root)}/.cache/graph.json (${g.nodes.length} nodes, ${g.edges.length} links).`);
+      console.log(`Wrote ${MODEL_DIR}/.cache/graph.json (${g.nodes.length} nodes, ${g.edges.length} links).`);
       return;
     }
     case 'view': {
@@ -394,7 +394,7 @@ async function main(): Promise<void> {
     }
     case 'export': {
       await buildCodeIndex(root).catch(() => undefined);
-      const out = exportHtml(root, args[0] ?? path.join(root, modelDir(root), '.cache', 'architecture.html'), flags.github === true);
+      const out = exportHtml(root, args[0] ?? path.join(root, MODEL_DIR, '.cache', 'architecture.html'), flags.github === true);
       console.log(`Wrote ${out}`);
       return;
     }

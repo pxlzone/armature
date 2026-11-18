@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import YAML from 'yaml';
 import { matcher, readRepo } from './repo.js';
-import { APPROVALS_FILE, docsDir, MODEL_DIR, modelDir, newPlanPath, readApprovals } from './paths.js';
+import { APPROVALS_FILE, docsDir, MODEL_DIR, newPlanPath, readApprovals } from './paths.js';
 import { type Guards, noGuards, optOut, tagGuard, weakenedBetween } from './security.js';
 
 /**
@@ -130,7 +130,7 @@ const list = (v: unknown): string[] => (v === undefined || v === null ? [] : Arr
  * With an overlay, read as the model would stand after an edit that has not been made yet.
  */
 export function readOwnership(root: string, overlay?: Overlay): Ownership {
-  const mdir = modelDir(root);
+  const mdir = MODEL_DIR;
   const arch = path.join(root, mdir);
   const sys = readYaml(path.join(arch, 'system.yaml'), overlay);
   const nodes: OwnNode[] = [];
@@ -185,7 +185,7 @@ export function readOwnership(root: string, overlay?: Overlay): Ownership {
 
 /** True unless the model's system.yaml says `gate: off`. */
 export function gateOn(root: string): boolean {
-  return readYaml(path.join(root, modelDir(root), 'system.yaml')).gate !== 'off';
+  return readYaml(path.join(root, MODEL_DIR, 'system.yaml')).gate !== 'off';
 }
 
 /** The file a write is aimed at, whichever tool asks. */
@@ -253,7 +253,7 @@ export function writeGate(root: string, input: WriteInput): GateDecision | null 
   const rel = path.relative(root, abs).replace(/\\/g, '/');
   if (!rel || rel.startsWith('..')) return null;
 
-  const mdir = modelDir(root);
+  const mdir = MODEL_DIR;
   const before = fs.existsSync(abs) && fs.statSync(abs).isFile() ? fs.readFileSync(abs, 'utf8') : '';
   const after = resultOf(root, before, input);
   // A write the gate was given no text for (a tool whose input it does not know): it cannot say what the file will hold.
@@ -387,7 +387,7 @@ export function protectGate(root: string, rel: string, own: Ownership = readOwne
   // "ignore:" entry places a file nobody owns, and does not take one out of a protected node.
   const owner = own.nodes.find((n) => n.code(rel));
   if (!owner?.protect) return null;
-  const mdir = modelDir(root);
+  const mdir = MODEL_DIR;
   const tag = owner.tag;
   const state = tag ? own.changes.get(tag.id) : undefined;
   const plan =
@@ -438,7 +438,7 @@ function guardsOfFile(rel: string, text: string, up: Inherited = { protect: fals
     } catch {
       return out;
     }
-    for (const m of JSON.stringify(data?.hooks ?? {}).matchAll(/(?:armature|brain)\.mjs\\?"? hook ([\w-]+)/g)) guards.add(`hook ${m[1]}`);
+    for (const m of JSON.stringify(data?.hooks ?? {}).matchAll(/armature\.mjs\\?"? hook ([\w-]+)/g)) guards.add(`hook ${m[1]}`);
     for (const [k, on] of Object.entries<any>(data?.enabledPlugins ?? {})) {
       if (!/^armature@/.test(k)) continue;
       if (on) guards.add(`plugin ${k}`);
@@ -551,7 +551,7 @@ function modelWeakened(root: string, rel: string, before: string, after: string)
  * edit of it. Returns null when nothing guarded goes.
  */
 function removalGate(root: string, paths: string[], doing: string, own?: () => Ownership): GateDecision | null {
-  const mdir = modelDir(root);
+  const mdir = MODEL_DIR;
   const model = path.join(root, mdir);
   const under = (p: string, dir: string): boolean => p === dir || p.startsWith(dir + path.sep);
   const rels = (p: string): string => path.relative(root, p).replace(/\\/g, '/') || '.';
@@ -599,7 +599,7 @@ function weakenAsk(rel: string, lost: string[], lead = `This edit to ${rel} weak
 /** One line on what a change holds, for the question put to the person. Empty when it cannot be worked out. */
 function elementsNote(root: string, change: string): string {
   try {
-    const mdir = modelDir(root);
+    const mdir = MODEL_DIR;
     const hits: string[] = [];
     const scan = (dir: string): void => {
       for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -744,7 +744,7 @@ export function shellRemovals(command: string, cwd: string): { deleted: string[]
  */
 export function bashGate(root: string, command: string, cwd: string = root): GateDecision | null {
   if (!command || !command.trim()) return null;
-  const mdir = modelDir(root);
+  const mdir = MODEL_DIR;
   // A question for the person is kept until the whole command is read: something it does further on
   // may be refused outright, and an answer to the question must not carry that through.
   let question: GateDecision | null = null;

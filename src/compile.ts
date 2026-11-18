@@ -18,11 +18,11 @@ import { sameName, schemaFor } from './schemas.js';
 import { collectDocs, type DocResolver } from './docs.js';
 import { DEFAULT_COMPOSE, looseDockerCommands, readCompose } from './deploy.js';
 import { reach } from './reach.js';
-import { cleanDocsSetting, hasModel, LEGACY_DIR, MODEL_DIR, modelDir, readApprovals } from './paths.js';
+import { cleanDocsSetting, hasModel, MODEL_DIR, readApprovals } from './paths.js';
 import { findNode, nodeProblem, resolveRef, type RefIndex } from './refs.js';
 import { isSecretName, securityFindings, type SecurityView } from './security.js';
 
-export { APPROVALS_FILE, LEGACY_DIR, MODEL_DIR, modelDir, readApprovals } from './paths.js';
+export { APPROVALS_FILE, MODEL_DIR, readApprovals } from './paths.js';
 export const LOCK_FILE = 'shapes.lock.json';
 const SCHEMA_ID = 'https://armature.local/armature.schema.json';
 const BUILTIN_TYPES = new Set(['string', 'int', 'float', 'bool', 'uuid', 'timestamp', 'date', 'money', 'email', 'url', 'json', 'bytes']);
@@ -136,7 +136,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
   const warn = (code: string, message: string, ref?: string, file?: string): void => {
     problems.push({ level: 'warning', code, message, ref, file, group: warningGroup(code) });
   };
-  const mdir = modelDir(root);
+  const mdir = MODEL_DIR;
   const archAbs = path.join(root, mdir);
   const rel = (abs: string): string => path.relative(root, abs).replace(/\\/g, '/');
   const v = getValidators();
@@ -180,9 +180,6 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
   const docsHome = cleanDocsSetting(sys.docs) ?? `${mdir}/docs`;
   if (sys.docs !== undefined && !cleanDocsSetting(sys.docs)) err('schema', `docs: "${sys.docs}" is not a folder inside the repo.`, undefined, `${mdir}/system.yaml`);
   else if (sys.docs !== undefined && !fs.existsSync(path.join(root, docsHome))) warn('reference', `docs: "${docsHome}" in system.yaml names a folder that does not exist.`, undefined, `${mdir}/system.yaml`);
-  if (mdir === LEGACY_DIR) {
-    warn('legacy-folder', `The model is in ${LEGACY_DIR}/, the folder's earlier name. Rename it with "git mv ${LEGACY_DIR} ${MODEL_DIR}", then fix the paths that still start with ${LEGACY_DIR}/ (this check lists them).`, undefined, LEGACY_DIR);
-  }
 
   // ---- raw nodes ----------------------------------------------------------
   const raws: RawNode[] = [];
@@ -1640,7 +1637,7 @@ function snapshotOf(root: string): Snapshot {
 /** Records the current hash of each shape's source so later edits to the source flag it stale. */
 export function confirmShapes(root: string, only: string[]): { confirmed: string[]; missing: string[] } {
   const graph = compile(root);
-  const lockPath = path.join(root, modelDir(root), LOCK_FILE);
+  const lockPath = path.join(root, MODEL_DIR, LOCK_FILE);
   let lock: Record<string, { source: string; hash: string }> = {};
   try {
     lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));

@@ -140,10 +140,6 @@ function orientText(g: Graph, compact: boolean): string {
     out.push('## Open changes (implement only approved ones)');
     for (const c of openChanges) out.push(`- ${changeLine(c)}`);
   }
-  if (g.system.dir !== 'armature') {
-    out.push('');
-    out.push(`Note: the model is in ${g.system.dir}/, the folder's earlier name. Where a skill or message says armature/, read ${g.system.dir}/. Do not rename the folder unless the person asks.`);
-  }
   const bad = g.nodes.filter((n) => (n.status === 'failing' || n.status === 'stale') && n.children.length === 0);
   const errors = g.problems.filter((p) => p.level === 'error');
   const looseDead = g.nodes.filter((n) => n.dead.length && !n.unused);

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { compile } from './compile.js';
-import { modelDir } from './paths.js';
+import { MODEL_DIR } from './paths.js';
 import { readDoc } from './docs.js';
 import { buildCodeIndex } from './code.js';
 import { watchSources } from './watch.js';
@@ -88,7 +88,7 @@ export function serve(root: string, port: number, github: boolean): Promise<stri
   };
   // Keep the code index fresh while the viewer runs.
   watchSources(root, () => buildCodeIndex(root).then((r) => { if (r.parsed) notify(); }, () => undefined));
-  const archAbs = path.join(root, modelDir(root));
+  const archAbs = path.join(root, MODEL_DIR);
   try {
     fs.watch(archAbs, { recursive: true }, (_event, file) => {
       if (file && String(file).replace(/\\/g, '/').startsWith('.cache')) {

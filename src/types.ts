@@ -520,7 +520,6 @@ export const WARNING_INFO: Record<string, { group: WarningGroup; what: string }>
   'no-security-requirement': { group: 'incomplete', what: 'An entry point reaches sensitive data and no requirement of kind security covers it.' },
   'undeclared-secret': { group: 'incomplete', what: 'A node\'s code reads an environment variable that looks like a credential, and its "secrets:" does not list it.' },
   'scope-changed': { group: 'wrong', what: 'Elements were added to or removed from a change after a person approved it. It needs approving again: "armature approve <change>".' },
-  'legacy-folder': { group: 'incomplete', what: 'The model is still in arch/, the earlier name of the folder. Rename it to armature/.' },
   'unused-linked': { group: 'wrong', what: 'A node is marked unused but still has links to other nodes.' },
   'doc-reference': { group: 'wrong', what: 'A document names a node, interface, shape, requirement, flow or change that is not in the model. The part was renamed or removed, or the reference is mistyped.' },
   'doc-header': { group: 'wrong', what: 'A document in the documents folder (armature/docs/, or the folder docs: names in system.yaml) has no kind, or names a kind that is not known.' },

@@ -6,7 +6,7 @@ import path from 'node:path';
 import YAML, { isPair, isScalar, visit, type Scalar } from 'yaml';
 import { compile, LOCK_FILE } from './compile.js';
 import { REF, splitHeader } from './docs.js';
-import { APPROVALS_FILE, modelDir, readApprovals } from './paths.js';
+import { APPROVALS_FILE, MODEL_DIR, readApprovals } from './paths.js';
 import { findNode, refIndexOf, resolveRef, shortestNodeRef, type RefIndex } from './refs.js';
 import type { DocRefType, Graph } from './types.js';
 
@@ -260,7 +260,7 @@ export function rename(root: string, from: string, to: string): string {
   if (typeof target === 'string') return target;
   const ren: Rename = { type: r.type, from: r.id, to: target.to };
   const rw = new Rewriter(ix, ren);
-  const mdir = modelDir(root);
+  const mdir = MODEL_DIR;
   const arch = path.join(root, mdir);
   const rel = (abs: string): string => path.relative(root, abs).replace(/\\/g, '/');
 
