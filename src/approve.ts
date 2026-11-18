@@ -1,6 +1,7 @@
 // Approving a change: the one step that belongs to a person. It sets the change to approved and
 // records who approved which elements, so anything that joins the change later is visible
 // ("scope-changed") and is not built on the strength of the earlier approval.
+import { changeSecurity } from './security.js';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -61,6 +62,8 @@ export function approveChange(root: string, id: string, by?: string): string {
   const rec = readApprovals(root)[id];
   const out = [`Approved change ${id}: ${c.title}`, `  by ${rec?.by || 'unknown'} at ${rec?.at ?? ''}`, `  ${elements.length} element${elements.length === 1 ? '' : 's'}:`];
   for (const e of elements) out.push(`    ${e}`);
+  const sec = changeSecurity(g, id);
+  if (sec.lines.length) out.push('  What it does to security:', ...sec.lines.map((l) => `  ${l}`));
   if (c.waits.length) out.push(`  It comes after ${c.waits.join(', ')}, which ${c.waits.length === 1 ? 'is' : 'are'} not done yet.`);
   out.push(`Recorded in ${modelDir(root)}/${APPROVALS_FILE}. Commit it with the change.`);
   return out.join('\n');

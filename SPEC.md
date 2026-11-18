@@ -135,6 +135,8 @@ tests: [tests/billing.test.ts, tests/refunds.test.ts]
 never:                                     # nodes this one must not touch: no link to them, no import of their code
   - to: web
     why: Billing runs without the storefront.
+protect: true                              # editing its files needs an approved change that modifies it
+secrets: [STRIPE_SECRET_KEY]               # credentials it holds, by environment variable name
 
 accepts:                                   # interfaces: how data gets in
   - id: charge
@@ -144,6 +146,8 @@ accepts:                                   # interfaces: how data gets in
   - id: refund
     via: pgmq
     takes: RefundJob
+    auth: service                          # who may call it: none, user, service, admin, or a scheme
+    only: [api.server]                     # the nodes that may send to it; anyone else is an error
     change: refunds                        # planned
 
 calls:
@@ -169,6 +173,10 @@ requirements:
   - id: refund-once
     text: An order is refunded at most once, however many times the button is pressed.
     change: refunds
+  - id: own-refunds
+    kind: security                         # who may get or change what
+    text: A refund job for another customer's order is rejected.
+    covers: [billing#refund]
 
 todos:
   - Add retry with backoff to the fraud check.         # plain string: a task
@@ -189,6 +197,11 @@ Notes:
 - A link may carry an `id`. It is then `node~id` in flows, documents and commands. Two links to the same interface that carry different data need one each to be told apart.
 - `never:` is the one rule the tool checks itself. A link from the node (or anything inside it) to a listed node, an import of its code, or a table, queue or route of it used in the code is a `boundary` error. Children inherit it. Free-text `rules:` stay guidance.
 - Two nodes that are not parent and child must not claim the same files. Each file goes to the deepest node, then the first by id, and the other node gets an `overlap` warning.
+- **Security.** An *entry point* is an interface of a server-side node that an actor, an outside system or a client links to: anyone who can reach those can reach it. A link to the node alone, or to a node around it, says nothing about which interface it uses, so it makes an entry point of every interface there. Every entry point says who may call it with `auth:` (`no-auth` otherwise). `auth: none` on an entry point that reaches sensitive data is an `open-entry` error. What it reaches: a field with a sensitive tag in what it takes or gives, or anywhere within four links of its node. The links of the nodes inside a node are its links, because their code is its code; for the entry point's own node, a link declared on a node around it counts too. A link to a store that names no table reaches every table. An entry point with auth that reaches sensitive data needs a requirement of `kind: security` that covers it (`no-security-requirement`), and a change is not `done` while an entry point it adds or alters has none, or has one that fails. That holds an entry point to the `auth:` it states: one that states none yet has `no-auth` only, so work finished before `auth:` existed does not become an error. `auth:` is a declaration: the code index cannot see whether the code enforces it, so the passing security requirement is the proof.
+- `only:` on an interface lists the nodes that may call or send to it; on a table, the nodes that may write it. A link from any other node is a `not-allowed` error, so a plan that goes around the one door is refused before it is approved. A link to the node alone is held to every allow-list the node has: it has to name the interface it uses.
+- `client: true` marks code that runs on the user's device (a browser, mobile or desktop app). Children inherit it. A client is not an entry point itself, its calls make entry points of what it calls, and it holds no secret: a secret on it, or a credential its code reads, is a `client-secret` error. The configuration of its build tool (`vite.config.ts`, `next.config.js`, `webpack.config.js` and the like) runs on the build machine and is not shipped, so a credential read there is not counted.
+- `secrets:` lists the credentials a node holds. The code index reads environment variables (`process.env`, `import.meta.env`, `Deno.env`, `os.environ`, `os.getenv`); a name that looks like a credential and is not listed is `undeclared-secret`. A name counts by the usual words (`SECRET`, `TOKEN`, `PASSWORD`, `API_KEY`, `…_KEY`, `DATABASE_URL`, `…_DSN`), unless it is about a credential without being one (`TOKEN_LIMIT`, `ACCESS_TOKEN_TTL`, `API_KEY_HEADER`, `MAX_TOKENS`) or is a key that is a position in data (`SORT_KEY`, `CACHE_KEY`, `PUBLIC_KEY`). A listed secret whose prefix ships it to the browser (`NEXT_PUBLIC_`, `VITE_`, …) is a `client-secret` error.
+- `protect: true` (inherited) puts the node's existing files behind the gate as well: editing, deleting or moving one needs an approved change that adds or modifies the node (section 9.4). The node's claim on a file comes first: a technology's `files:` or an `ignore:` entry does not take a file out of a protected node.
 - A requirement belongs to the node whose tests prove it. `covers:` says what else it is about, so a flow, an interface, a link or a shape lists the requirements that cover it. An end-to-end requirement is one that covers a flow.
 
 ### 5.3 Shape
@@ -212,7 +225,17 @@ RefundJob:
 
 Types: `string`, `int`, `float`, `bool`, `uuid`, `timestamp`, `date`, `money`, `email`, `url`, `json`, `bytes`, any shape name.
 Modifiers: `T[]` list, `T?` optional, `enum(a|b)`, `map<K,V>`.
-Tags after the type mark sensitive data: `email: email @pii`.
+Tags after the type mark sensitive data: `email: email @pii`. A tag is followed through every shape that embeds it.
+
+`data:` in `system.yaml` says where tagged data may leave the system:
+
+```yaml
+data:
+  pii:    { leaves: [mailer, payments] }   # outside systems that may receive @pii fields
+  secret: { leaves: [] }                   # the default for @secret, even when not written
+```
+
+A link that carries a field with a policed tag to an outside system the tag's `leaves:` does not list is a `data-leak` error; so is an `@secret` field sent to a client. `pii` and `secret` are sensitive without a policy (they count for `open-entry`); only `secret` is policed by default. A change that adds or alters a shape answers for the tagged fields of that shape wherever they go: the entry points that reach them and the links that carry them out are listed as the change's, and their errors stop its approval.
 
 `source` is a pointer for people and agents, plus a hash the tool stores. When the source text changes, the shape is flagged stale and an agent re-reads it.
 
@@ -559,11 +582,12 @@ One diagram, switchable overlays.
 - A node touching what its `never:` rules out (`boundary`).
 - Changes that wait for each other in a circle (`cycle`).
 - An `accept:` entry for a warning that cannot be accepted (`accept`).
+- Security (section 5.2): an entry point open to anyone that reaches sensitive data (`open-entry`), tagged data leaving to a place its policy does not list (`data-leak`), a link from a node an interface's `only:` does not allow (`not-allowed`), a secret on a client or shipped to one (`client-secret`).
 
 **Warnings** never block by themselves. They fall in two groups, so the ones that matter are not buried under the ones that only ask for more detail:
 
 - **Wrong: the model disagrees with the code.** Fix these first; until then, trust the code over the model. `runtime-drift` (tables, queues, workflows or routes the code uses and the model does not declare), `not-in-code` (an interface the model declares and the node's code does not register), `undeclared-import`, `overlap` (two nodes claim the same files), `shape-fields`, `stale-shape`, `source-symbol`, `verb` (reading or writing something that is neither a store nor, for reads, a queue), `reference` and `type` (names that resolve to nothing), `no-test-match`, `dropped`, `built-unapproved` (code written for a change nobody approved), `scope-changed` (a change that grew or shrank after it was approved), `report` (an unreadable test or coverage report), `deploy-missing`, `unused-reachable`, `unused-linked`, `doc-reference` (a document names something that is not in the model), `doc-header` (a document in the documents folder with no kind, or an unknown one).
-- **Incomplete: the model leaves something out, or cannot be checked.** `no-shape`, `no-requirement`, `no-code`, `coarse-link` (a link to a node, not an interface), `unowned` (files that belong to no node), `dead-code`, `undeployed`, `unknown-tech`, `ignore-reason`, `unconfirmed`, `empty-change`, `unrecorded-approval`, `done-unchecked` (a finished change that nothing here can prove), `outdated-report` (a test report older than the code), `ambiguous-reference`, `ambiguous-step`, `loose-doc` (documents nothing ties to the model), `typed-status` (a plan that types its own status), `accept-reason`, `stale-accept`, `legacy-folder` (the model is still in `arch/`).
+- **Incomplete: the model leaves something out, or cannot be checked.** `no-shape`, `no-requirement`, `no-code`, `coarse-link` (a link to a node, not an interface), `unowned` (files that belong to no node), `dead-code`, `undeployed`, `unknown-tech`, `ignore-reason`, `unconfirmed`, `empty-change`, `unrecorded-approval`, `done-unchecked` (a finished change that nothing here can prove), `outdated-report` (a test report older than the code), `ambiguous-reference`, `ambiguous-step`, `no-auth` (an entry point that does not say who may call it), `no-security-requirement` (an entry point that reaches sensitive data with nothing proving who gets it), `undeclared-secret` (code reads a credential the model does not list), `loose-doc` (documents nothing ties to the model), `typed-status` (a plan that types its own status), `accept-reason`, `stale-accept`, `legacy-folder` (the model is still in `arch/`).
 
 `armature check` prints errors, then each group with its count, and ends with a split summary; `--only wrong` (or `incomplete`, `errors`) narrows the list. With `--annotate`, wrong warnings show on a pull request as warnings and incomplete ones as quieter notices. The session digest (`armature orient`) lists the wrong count under "Needs attention". The viewer's checks chip reads, for example, "53 wrong · 197 incomplete", and its panel groups findings by code with one line on what each code means. The meaning and group of every code live in one table, `WARNING_INFO` in `src/types.ts`.
 
@@ -597,10 +621,11 @@ The MCP server gives the read-only answers (not `approve`, `rename`, `confirm` o
 | `armature init` | Creates an empty `armature/` folder |
 | `armature show <ref> [--depth n]` | One node, interface, link, shape, requirement, flow or change in full. Depth is the agent's zoom. Says when the name has other meanings |
 | `armature where <file>` | The node that owns a file, with its rules, interfaces and requirements |
-| `armature impact <ref> [--depth n]` | Everything that depends on a node, interface, link or shape: links, flows, the requirements that cover it, the documents that name it, the shapes that embed a shape (and those that embed them), and for a node what lies up to n links further along the data (default 3) |
+| `armature impact <ref> [--depth n]` | Everything that depends on a node, interface, link or shape: links, flows, the requirements that cover it, the documents that name it, the shapes that embed a shape (and those that embed them), and for a node what lies up to n links further along the data (default 3). For a node, what must hold: its boundaries, auth and allow-lists, the data policy for its data, its secrets, security requirements and every rule |
 | `armature path <node> <node>` | How data gets from one node to another along the declared links, step by step |
 | `armature trace <Shape\|@tag>` | Where a shape, or every field carrying a tag such as `@pii`, is held, which links carry it, and which outside systems it leaves to |
-| `armature diff [git-ref] [--json]` | What the model declares now against a commit, branch or tag (default HEAD): nodes, interfaces, links, shapes and fields, flows, requirements and changes added, changed or removed. The review of a pull request's effect on the architecture |
+| `armature surface [change]` | The security surface: entry points with their auth, callers and the sensitive data behind them, tagged data leaving the system and whether its policy allows it, secrets declared and read in code, protected and client nodes. With a change, only what the change adds or alters, and its security errors |
+| `armature diff [git-ref] [--json]` | What the model declares now against a commit, branch or tag (default HEAD): nodes, interfaces, links, shapes and fields, flows, requirements and changes added, changed or removed. First, under "Guards removed", every boundary, auth, allow-list, requirement or data policy that is gone and every ignore, accept or allowed destination that is new. The review of a pull request's effect on the architecture |
 | `armature map [node or file] [--budget n]` | Ranked files with exported signatures for a node, one file's symbols, imports and importers, or the whole repo |
 | `armature symbol <name>` | Where a symbol is defined and who imports it |
 | `armature deps [node]` | Which nodes import which, against the declared links |
@@ -634,7 +659,8 @@ The MCP server gives the read-only answers (not `approve`, `rename`, `confirm` o
 ### 9.2 Wiring
 
 - **Session start hook:** refreshes the code index, then injects `armature orient`, which also names the code-graph commands and says how this repo plans and documents.
-- **Prompt hook:** adds `armature context` for the first prompt of each session. When the session is in plan mode, or the prompt asks for a plan or a design, it adds the planning steps once.
+- **Prompt hook:** adds `armature context` for the first prompt of each session; the pack ends with "Must hold", every constraint on the nodes the task touches. When the session is in plan mode, or the prompt asks for a plan or a design, it adds the planning steps the first time, and one line each later time plan mode is entered or a plan is asked for.
+- **After compaction:** the session start hook says the planning rules again, and the next prompt brings back the context pack and the planning steps, which the summary may have dropped.
 - **Before a write, before a shell command, and before a plan is presented:** the planning gate (section 9.4). "A write" is any tool that writes a file: Edit, Write, MultiEdit, NotebookEdit and the file tools of MCP servers.
 - **Generated rule files:** `armature sync-rules` writes one path-scoped rule file per node from its `code` globs and rules, so rules load when the agent touches matching files.
 - **After editing `armature/`:** a hook runs `armature check` and feeds errors back.
@@ -654,6 +680,8 @@ A local install (`armature install`, for working on the tool) writes hooks to `.
 | **Document an existing repo** | Scan, draft nodes and links coarsely, group to fit the budget, human reviews in the viewer, refine shapes |
 | **Design a system or feature** | Describe the goal, agent writes a change plus planned elements, human reviews the dashed diagram and approves, agent implements, statuses flip |
 | **Audit** | Walk stale shapes, unowned files and nodes changed since the last audit; repair the model and the documents that name what changed |
+| **Threat model** | Before a change is approved: walk each entry point, each movement of tagged data and each credential the change adds, ask who may do what and what happens when they are not who they say, and write the answers into the model as `auth:`, `only:`, `client:`, `secrets:`, the data policy and security requirements |
+| **Review** | Review a pull request from `armature diff` (guards removed first) and `armature surface`, against the change it belongs to and what was approved |
 | **Documents** | Write a document with its header and references; or walk the loose documents of a repo, delete what the model replaces, move rules and follow-ups into the model, and tie the rest to it |
 
 ### 9.4 The planning gate
@@ -669,15 +697,18 @@ Skills are advice: an agent follows them when it notices they apply. The gate is
 | The agent sets a change to `approved` | Approval is the person's | Claude Code asks the person to confirm the edit, however it is written (the whole line, or only the word). On a yes, the approval is recorded |
 | The agent sets a change to `done` that was never approved | Skipping approval is the person's call | Claude Code asks the person |
 | The agent sets `gate: off`, or edits `approvals.lock.json` | Both are the person's | Claude Code asks the person |
-| The agent runs a shell command | The same rules, for what the command plainly does | Refused when a redirect, `tee`, `touch`, `cp` or `mv` would create a source file the rules above refuse. Asked when it runs `armature approve`, writes to a change file or the approval record, or sets `gate: off` |
+| The agent sets a change to `approved` that has security errors | A change goes up for approval only when its own elements pass the security checks | Refused, with the errors. Otherwise the question put to the person lists what the change does to security: entry points it adds and their auth, sensitive data it sends out, secrets it holds |
+| The agent edits, moves or deletes an existing file of a node with `protect: true` | The node belongs to an approved change that adds or modifies it (or a node around it), and the approval lists it | Refused, with how to plan the change. Tests stay editable |
+| The agent edits the model or the Claude Code settings so that they guard less | Removing `protect`, `client`, a `never:`, an `auth:`, a whole `only:` list, a tag on a shape field, a requirement or a data policy. Changing an `auth:` to another scheme. Adding a name to an `only:` list, `protect: false` or `client: false` inside a node that is protected or a client, an `ignore:` or `accept:` entry, a `files:` glob of a technology that can hold source files, an allowed destination or `auth: none`. Any edit after which an existing file of a protected node is no longer protected (narrower `code:` globs, another node that takes the file). Taking out the armature hooks or plugin, or switching the plugin off in `.claude/settings.local.json` | Claude Code asks the person, listing what is lost. Taking a name off an `only:` list, or stating an `auth:` where there was none, is not asked about |
+| The agent runs a shell command | The same rules, for what the command plainly does | Refused when a redirect, `tee`, `touch`, `cp`, `mv`, or an in-place `sed`, `perl` or `yq` would create a source file the rules above refuse, or change a protected file; when `rm`, `rmdir`, `unlink`, `git rm`, `mv` or `git mv` would delete or move away a file of a protected node; and when it writes a node file, a shapes file, `system.yaml`, `tech.yaml` or the settings from the shell, new or existing, where the gate cannot see what is added or lost. Asked when it runs `armature approve`, writes to a change file or the approval record, deletes or moves away part of the model (a file or a whole folder) or the settings that hold the hooks, or sets `gate: off` from a command the gate cannot place. A refusal comes before a question: a command with a step that is refused is refused, whatever else in it would be asked about |
 
 Plan mode cannot write files, so there the plan text carries the proposal. After the person approves the plan, the agent writes the planned elements, the plan document and the change as `proposed`, runs `armature check`, and sets `state: approved` last: that edit is the one put to the person, and what the change holds then is what they approve. Outside plan mode the agent writes the change as `proposed` with its plan document, and the person reviews the dashed diagram.
 
-The gate looks only at new files: editing a file that exists is never refused. Documents, configuration and anything a technology or the ignore list places pass. So does a test: a file named as one (`x.test.ts`, `test_x.py`), or a file inside a test folder that is already there. "Source file" means code in any language the tool has heard of, and the files that define a system without being code: SQL, `.proto`, GraphQL and Prisma schemas, Terraform and shell scripts. The gate stays out of the way while no node has `code:` globs, and `gate: off` in `system.yaml` switches off everything except the questions put to the person.
+The gate looks only at new files, apart from protected nodes: editing a file that exists is refused only when its node says `protect: true`. Documents, configuration and anything a technology or the ignore list places pass. So does a test: a file named as one (`x.test.ts`, `test_x.py`), or a file inside a test folder that is already there. "Source file" means code in any language the tool has heard of, and the files that define a system without being code: SQL, `.proto`, GraphQL and Prisma schemas, Terraform and shell scripts. The gate stays out of the way while no node has `code:` globs, and `gate: off` in `system.yaml` switches off everything except the questions put to the person.
 
 **What the gate cannot see, the checker reports.** A hook reads a command; it does not run a shell, and a script that writes files gets past it. So does a tool it has never heard of. Three warnings catch what is left behind, whichever way it got there, and CI shows them: `built-unapproved` (code in a node whose change is still proposed), `scope-changed` (a change that is not what was approved) and `unrecorded-approval` (a change set to approved with no record of a person doing it). The gate is a strong default for an agent that means well, and these make going around it visible.
 
-Most work edits files that exist, and the gate does not touch that. There the check is what the code shows: an edit that adds a route, a table or a call the model does not declare is `runtime-drift` or `undeclared-import` on the next check, and the stop hook asks once per session whether the model still holds.
+Most work edits files that exist, and outside protected nodes the gate does not touch that. There the check is what the code shows: an edit that adds a route, a table or a call the model does not declare is `runtime-drift` or `undeclared-import` on the next check, and the stop hook asks once per session whether the model still holds.
 
 ## 10. Fit check
 
@@ -695,6 +726,9 @@ Before this version was written, the language was tried on two private codebases
 - A cross-project landscape view.
 - Type-level analysis: a method called on an object is not resolved, and an import of a type is not told apart from an import of code. That is why an import between two linked nodes counts as declared whatever the link is, and why `never:` is opt-in.
 - Detectors beyond the ones in section 6.3: other ORMs, queues and routers are "unchecked", not wrong.
+- Seeing whether the code enforces `auth:` or `only:`. They are declarations; a requirement of kind security, with a test, is what proves one. The environment detector reads TypeScript, JavaScript and Python only, and only reads by literal name. A value that a client's build configuration copies into the bundle is not seen.
+- Ranking one `auth:` scheme against another. Schemes are names, so the gate asks about any change of one and cannot say which way it goes.
+- Telling a client from a server by itself. `client: true` is written by hand; a browser app that is not marked makes nothing it calls an entry point.
 - Running tests. The tool reads reports and checks their age; it does not run a test command or know which one to run.
 - Before and after of a modified element. `modify:` says that a change alters something and the plan document says how; the model holds one state, not two.
 - Branching and error paths inside flows.
@@ -739,3 +773,10 @@ Say so if any is wrong.
 - Approvals are a file in the model folder (`approvals.lock.json`), like confirmed shapes, and are committed.
 - A warning is accepted in `system.yaml` with a reason, and the baseline is a separate file that `--new` compares against. Neither changes what `armature check` exits with unless `--fail-on` is given.
 - The gate treats SQL, schema files, Terraform and shell scripts as source.
+- An entry point is an interface that an actor, an outside system or a client links to. An interface nobody outside links to is internal, whatever its transport.
+- `only:` is the allow-list after all, on an interface rather than on a node: one interface's callers stay a short list, where everything a node may touch did not. The list is what guards; a name on it is what it lets through. So a new name is asked about and a name taken off is not.
+- `@secret` never leaves the system unless `data:` says where it may go; `@pii` is sensitive but policed only once `data:` names it, so an existing model gains no errors from tags it already has. For the same reason a finished change is held to its entry points only once they state an `auth:`.
+- A link to a node, not to an interface, is read as possibly any interface of it wherever security is decided: it makes entry points, and it must pass every `only:`. Being coarse is allowed; getting round a check by being coarse is not.
+- The model files that carry guards (nodes, shapes, `system.yaml`, `tech.yaml`) and the Claude Code settings are written with the file tools, never from the shell: an edit there is compared before and after, and a shell command shows the gate neither.
+- Code on the user's device is marked by hand with `client: true`; `app` nodes are not assumed to be clients, because many are servers.
+- Taking a guard out of the model asks the person rather than refusing, because removing one is sometimes the right change; `armature diff` lists it again for the reviewer.

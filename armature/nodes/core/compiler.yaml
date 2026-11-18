@@ -7,6 +7,7 @@ code:
   - src/types.ts
   - src/paths.ts
   - src/refs.ts
+  - src/security.ts
   - src/docs.ts
   - src/deploy.ts
   - src/repo.ts
@@ -16,6 +17,8 @@ tests:
   - test/checks.test.ts
   - test/docs.test.ts
   - test/sound.test.ts
+  - test/security.test.ts
+  - test/security-holes.test.ts
   - test/activity.test.ts
 
 accepts:
@@ -67,6 +70,10 @@ requirements:
     text: A name resolves the same way in commands, documents and the viewer, and a name with several meanings is reported.
     tests: test/sound.test.ts
     match: resolves a name one way everywhere
+  - id: entry-points-are-guarded
+    kind: security
+    text: An entry point open to anyone that reaches sensitive data, tagged data sent where its policy does not allow, and a secret on a client are errors.
+    tests: [test/security.test.ts, test/security-holes.test.ts]
   - id: documents-are-tied
     text: A document that names something missing from the model is reported.
     tests: test/docs.test.ts

@@ -11,7 +11,8 @@ import { buildCodeIndex, readCodeIndex } from './code.js';
 import { contextText } from './context.js';
 import { formatProblems, orient, ownerOf } from './render.js';
 import { isDocPath } from './docs.js';
-import { bashGate, gateOn, PLANNING_WORDS, planGate, planModeNote, planningNote, targetOf, writeGate } from './gate.js';
+import { bashGate, gateOn, PLANNING_WORDS, planGate, planModeNote, planningNote, planReminder, targetOf, writeGate } from './gate.js';
+import { changeSecurity } from './security.js';
 import { callKey, dropPendingApproval, notePendingApproval, settleApproval } from './approve.js';
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -150,6 +151,35 @@ function once(root: string, name: string, key: string): boolean {
   return true;
 }
 
+/** Forgets that a session was told something, so it is told again (after the context was compacted). */
+function forget(root: string, names: string[], key: string): void {
+  for (const name of names) {
+    const marker = path.join(root, modelDir(root), '.cache', name);
+    try {
+      fs.writeFileSync(marker, fs.readFileSync(marker, 'utf8').split('\n').filter((x) => x && x !== key).join('\n'));
+    } catch {
+      /* nothing remembered */
+    }
+  }
+}
+
+/** The permission mode a session had at its last prompt, and records the one it has now. */
+function lastMode(root: string, sid: string, now: string): string | undefined {
+  const marker = path.join(root, modelDir(root), '.cache', 'session-modes.json');
+  let modes: Record<string, string> = {};
+  try {
+    modes = JSON.parse(fs.readFileSync(marker, 'utf8'));
+  } catch {
+    /* first prompt */
+  }
+  const was = modes[sid];
+  modes[sid] = now;
+  const keep = Object.fromEntries(Object.entries(modes).slice(-50));
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, JSON.stringify(keep));
+  return was;
+}
+
 /** Answers a PreToolUse hook: "deny" sends the reason back to the agent, "ask" puts it in front of the person. */
 function decide(decision: 'deny' | 'ask', reason: string): void {
   process.stdout.write(`${JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: decision, permissionDecisionReason: reason } })}\n`);
@@ -163,7 +193,14 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
   try {
     if (name === 'session-start') {
       await buildCodeIndex(root).catch(() => undefined);
-      process.stdout.write(`${orient(compile(root))}\n`);
+      const out = [orient(compile(root))];
+      // Compaction drops what the session was told: tell it again, and let the next prompt bring the notes back.
+      if (input.source === 'compact' || input.source === 'clear') {
+        const sid = String(input.session_id ?? '');
+        forget(root, ['prompted-sessions', 'plan-sessions', 'planning-sessions'], sid);
+        if (gateOn(root)) out.push(`The conversation was compacted. ${planReminder(modelDir(root))}`);
+      }
+      process.stdout.write(`${out.join('\n\n')}\n`);
       return;
     }
     if (name === 'prompt') {
@@ -178,10 +215,17 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
         if (idx) out.push(contextText(compile(root), idx, root, prompt, { budget: 5000 }));
       }
       // Planning goes through the model: say so when plan mode starts, or when the prompt asks for a plan.
+      // The full note comes once per session; each later plan (plan mode entered again, or a prompt asking for one) gets one line.
+      const mode = String(input.permission_mode ?? 'default');
+      const was = lastMode(root, sid, mode);
       if (gateOn(root)) {
-        if (input.permission_mode === 'plan') {
+        if (mode === 'plan') {
           if (once(root, 'plan-sessions', sid)) out.push(planModeNote(modelDir(root), newPlanPath(docsDir(root), modelDir(root))));
-        } else if (PLANNING_WORDS.test(prompt) && once(root, 'planning-sessions', sid)) out.push(planningNote(modelDir(root), newPlanPath(docsDir(root), modelDir(root))));
+          else if (was !== 'plan') out.push(planReminder(modelDir(root)));
+        } else if (PLANNING_WORDS.test(prompt)) {
+          if (once(root, 'planning-sessions', sid)) out.push(planningNote(modelDir(root), newPlanPath(docsDir(root), modelDir(root))));
+          else out.push(planReminder(modelDir(root)));
+        }
       }
       if (out.length) process.stdout.write(`${out.join('\n\n')}\n`);
       return;
@@ -190,12 +234,21 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
       // Before a Write or Edit: new source files need a node, planned nodes need an approved change,
       // and approving a change asks the person.
       const verdict = writeGate(root, input.tool_input ?? {});
-      // If the person says yes, this edit goes through and the approval is recorded after it. One
-      // question is open at a time: any other write means the earlier one was answered, so a
+      // One question is open at a time: any other write means the earlier one was answered, so a
       // question the person declined cannot be settled by something that happens later.
-      if (verdict?.approves) notePendingApproval(root, verdict.approves, callKey(input.tool_input));
-      else dropPendingApproval(root);
+      dropPendingApproval(root);
       if (!verdict) return;
+      if (verdict.approves) {
+        // The person sees what the change does to security before saying yes, and is not asked while it has security errors.
+        const sec = changeSecurity(compile(root), verdict.approves);
+        if (sec.errors.length) {
+          decide('deny', `Change "${verdict.approves}" cannot be put up for approval while it has security errors. Fix them in the model first:\n${sec.errors.map((e) => `- ${e.code}: ${e.message}`).join('\n')}`);
+          return;
+        }
+        verdict.reason += `\n${sec.lines.length ? `What it does to security:\n${sec.lines.join('\n')}` : 'It adds no entry point, sends no sensitive data out of the system and holds no secret.'}`;
+        // If the person says yes, this edit goes through and the approval is recorded after it.
+        notePendingApproval(root, verdict.approves, callKey(input.tool_input));
+      }
       decide(verdict.decision, verdict.reason);
       return;
     }

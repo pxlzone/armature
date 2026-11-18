@@ -3,6 +3,7 @@ role: zoomable map with lenses
 tech: [react, elk, typescript]
 code: [viewer/src/**, viewer/index.html]
 tests: [test/view.test.ts]
+client: true
 
 accepts:
   - id: diagram

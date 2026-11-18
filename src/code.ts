@@ -63,8 +63,8 @@ export interface SqlOp {
 
 /** Things the code does at run time that imports cannot show. */
 export interface RuntimeHint {
-  /** entry: a file this one loads by path at run time (Temporal workflowsPath, import.meta.glob); main: a Python script. */
-  k: 'route' | 'http' | 'queue' | 'workflow' | 'table' | 'entry' | 'main';
+  /** entry: a file this one loads by path at run time (Temporal workflowsPath, import.meta.glob); main: a Python script; env: an environment variable read. */
+  k: 'route' | 'http' | 'queue' | 'workflow' | 'table' | 'entry' | 'main' | 'env';
   v: string;
   op?: string;
   l: number;
@@ -92,7 +92,7 @@ export interface CodeFile {
 }
 
 /** Bump when extraction changes, so unchanged files are parsed again with the new rules. */
-export const EXTRACTOR = 9;
+export const EXTRACTOR = 10;
 
 export interface CodeIndex {
   version: 3;
@@ -486,7 +486,22 @@ function tsHints(raw: string): RuntimeHint[] {
   const entries: RuntimeHint[] = [];
   for (const m of source.matchAll(/workflowsPath\s*:\s*[^\n}]*?["'`](\.{1,2}\/[^"'`\n]+)["'`]/g)) entries.push({ k: 'entry', v: m[1], l: lineAt(m.index ?? 0) });
   for (const m of source.matchAll(/import\.meta\.glob\(\s*(?:\[\s*)?["'`]([^"'`\n]+)["'`]/g)) entries.push({ k: 'entry', v: m[1], l: lineAt(m.index ?? 0) });
-  return [...entries, ...dedupeHints(out)].slice(0, 300);
+  return [...entries, ...dedupeHints(out).slice(0, 300), ...envHints(source, lineAt)];
+}
+
+/** Environment variables the code reads by name: process.env, import.meta.env, Deno.env, Bun.env, os.environ, os.getenv. */
+function envHints(source: string, lineAt: (i: number) => number): RuntimeHint[] {
+  const out: RuntimeHint[] = [];
+  const patterns = [
+    /\b(?:process|Bun)\.env\.([A-Z_][A-Z0-9_]*)\b/g,
+    /\b(?:process|Bun)\.env\[\s*["'`]([A-Z_][A-Z0-9_]*)["'`]\s*\]/g,
+    /\bimport\.meta\.env\.([A-Z_][A-Z0-9_]*)\b/g,
+    /\bDeno\.env\.get\(\s*["'`]([A-Z_][A-Z0-9_]*)["'`]/g,
+    /\bos\.environ\[\s*["']([A-Z_][A-Z0-9_]*)["']\s*\]/g,
+    /\bos\.(?:environ\.get|getenv)\(\s*["']([A-Z_][A-Z0-9_]*)["']/g,
+  ];
+  for (const re of patterns) for (const m of source.matchAll(re)) out.push({ k: 'env', v: m[1], l: lineAt(m.index ?? 0) });
+  return dedupeHints(out).slice(0, 60);
 }
 
 function dedupeHints(list: RuntimeHint[]): RuntimeHint[] {
@@ -701,7 +716,7 @@ function extractPy(root: any, source: string): Raw {
   for (const m of withoutComments(source).matchAll(/@\w+\.(get|post|put|patch|delete)\(\s*["'](\/[^"']*)["']/g)) hints.push({ k: 'route', v: m[2], op: m[1].toUpperCase(), l: lineAt(m.index ?? 0) });
   if (/^if\s+__name__\s*==\s*["']__main__["']/m.test(source)) hints.push({ k: 'main', v: '__main__', l: 1 });
   sqlHints(source, hints, lineAt);
-  return { symbols, imports, refs: [...seen.values()], schemas, hints: dedupeHints(hints).slice(0, 200) };
+  return { symbols, imports, refs: [...seen.values()], schemas, hints: [...dedupeHints(hints).slice(0, 200), ...envHints(withoutComments(source), lineAt)] };
 }
 
 function pyType(t: string): string {

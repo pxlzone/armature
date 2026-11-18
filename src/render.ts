@@ -1,4 +1,5 @@
 // Plain-text answers for agents and terminals. Everything here reads a compiled graph.
+import { mustHold } from './security.js';
 import picomatch from 'picomatch';
 import type { Change, DocInfo, DocRef, Edge, Flow, GNode, Graph, Interface, Problem, Requirement, Shape, Status, Todo } from './types.js';
 import { GROUP_TITLE, warningGroup } from './types.js';
@@ -40,7 +41,8 @@ function ifaceLine(i: Interface): string {
   const takes = i.takes.length ? ` takes ${i.takes.join(', ')}` : '';
   const gives = i.gives.length ? ` gives ${i.gives.join(', ')}` : '';
   const st = i.status !== 'built' ? ` [${i.status}]` : '';
-  return `${i.ref}${via}${route}${takes}${gives}${st}${marks(i)}`;
+  const sec = `${i.auth ? ` auth ${i.auth}` : ''}${i.only?.length ? ` only ${i.only.join(', ')}` : ''}`;
+  return `${i.ref}${via}${route}${takes}${gives}${sec}${st}${marks(i)}`;
 }
 
 function shapeBlock(s: Shape): string[] {
@@ -53,7 +55,7 @@ function shapeBlock(s: Shape): string[] {
 
 function reqLine(q: Requirement): string {
   const state = q.outdated ? 'unverified: the passing report is older than the code' : q.state;
-  return `[${state}] ${q.ref}: ${q.text}${q.change ? ` (change ${q.change})` : ''}${q.covers.length ? ` (covers ${q.covers.join(', ')})` : ''}`;
+  return `[${state}] ${q.ref}${q.kind ? ` (${q.kind})` : ''}: ${q.text}${q.change ? ` (change ${q.change})` : ''}${q.covers.length ? ` (covers ${q.covers.join(', ')})` : ''}`;
 }
 
 /** Requirements that say they cover an interface, a link, a shape or a flow. */
@@ -241,6 +243,8 @@ function nodeCard(g: Graph, n: GNode, depth: number): string[] {
   if (n.coverage !== null) out.push(`  coverage: ${n.coverage}%`);
   if (n.change) out.push(`  change: ${n.change}`);
   if (n.modify) out.push(`  being altered by change: ${n.modify}`);
+  const sec = [n.client ? 'client (runs on the user\'s device)' : '', n.protect ? 'protected (edits need an approved change)' : '', n.secrets.length ? `secrets: ${n.secrets.join(', ')}` : ''].filter(Boolean);
+  if (sec.length) out.push(`  security: ${sec.join('; ')}`);
   if (n.never.length) out.push(`  never touches: ${n.never.map((b) => `${b.node}${b.why ? ` (${b.why})` : ''}${b.from !== n.id ? ` (from ${b.from})` : ''}`).join('; ')}`);
   if (n.unused) out.push('  unused: dead code kept for reference; nothing reaches it and it takes part in no flow.');
   if (n.deployment.length) out.push(`  runs as: ${n.deployment.map((d) => `${d.service} [${d.env}]${d.image ? ` ${d.image}` : ''}`).join(', ')}`);
@@ -502,6 +506,7 @@ export function impact(g: Graph, ref: string, depth = 3): string {
     for (const e of users) out.push(`  link ${arrow(e)}`);
     const flows = g.flows.filter((f) => f.steps.some((s) => s.edge && users.some((e) => e.id === s.edge)));
     if (flows.length) out.push(`  flows: ${flows.map((f) => f.id).join(', ')}`);
+    if (i.auth || i.only?.length) out.push(`  Must hold: ${[i.auth ? `auth ${i.auth}` : '', i.only?.length ? `only ${i.only.join(', ')} may ${i.holds ? 'write' : 'use'} it` : ''].filter(Boolean).join('; ')}`);
     covered(i.ref);
     docsNaming(g, out, (x) => x.type === 'interface' && x.id === i.ref);
     if (out.length === 1) out.push('  nothing declared.');
@@ -565,6 +570,8 @@ export function impact(g: Graph, ref: string, depth = 3): string {
     out.push('  requirements that must keep holding:');
     for (const q of reqs) out.push(`    ${reqLine(q)}`);
   }
+  const hold = mustHold(g, g.nodes.filter((x) => inside(x.id)).map((x) => x.id));
+  if (hold.length) out.push('  Must hold (check, approval and the gate refuse work that breaks a boundary, an auth, an allow-list or the data policy):', ...hold.map((l) => `  ${l}`));
   docsNaming(g, out, (x) => !!x.node && inside(x.node));
   if (out.length === 1) out.push('  nothing declared.');
   return out.join('\n');

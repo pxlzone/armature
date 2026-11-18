@@ -76,6 +76,14 @@
         "modify": {
           "type": "string",
           "description": "The change that alters this interface. It exists today and stays built."
+        },
+        "auth": {
+          "type": "string",
+          "description": "Who may call it: none, user, service, admin, or the name of a scheme. Every entry point needs one."
+        },
+        "only": {
+          "$ref": "#/$defs/strings",
+          "description": "The nodes that may call or send to it. Anyone else linking to it is an error."
         }
       }
     },
@@ -108,6 +116,10 @@
             },
             "modify": {
               "type": "string"
+            },
+            "only": {
+              "$ref": "#/$defs/strings",
+              "description": "The nodes that may write to the table. Anyone else writing it is an error."
             }
           }
         }
@@ -251,6 +263,12 @@
         "covers": {
           "$ref": "#/$defs/strings",
           "description": "What else the requirement is about: node#interface, node~link, Shape or a flow."
+        },
+        "kind": {
+          "enum": [
+            "security"
+          ],
+          "description": "security: a statement about who may get or change what. Entry points that reach sensitive data need one."
         }
       }
     },
@@ -416,6 +434,40 @@
               }
             ]
           }
+        },
+        "client": {
+          "type": "boolean",
+          "description": "Code that runs on the user's device: a browser, mobile or desktop app. Holds no secret. Children inherit it."
+        },
+        "protect": {
+          "type": "boolean",
+          "description": "Editing its existing files needs an approved change that modifies it. Children inherit it."
+        },
+        "secrets": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "why": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            ]
+          },
+          "description": "Credentials the node holds, by environment variable name."
         }
       }
     },
@@ -563,6 +615,22 @@
                 "type": "string"
               }
             }
+          }
+        },
+        "data": {
+          "type": "object",
+          "description": "Where data with a tag may leave the system. Keys are tags (pii, secret, ...).",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "leaves": {
+                "$ref": "#/$defs/strings"
+              },
+              "why": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
           }
         }
       }

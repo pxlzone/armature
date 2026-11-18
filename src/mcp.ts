@@ -1,4 +1,5 @@
 // MCP server: the same read-only answers as the CLI, for agents.
+import { surfaceText } from './security.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -134,6 +135,14 @@ export async function runMcp(rootFlag?: string): Promise<void> {
       inputSchema: { what: z.string() },
     },
     async ({ what }) => run((root) => traceText(compile(root), what))(),
+  );
+  server.registerTool(
+    'surface',
+    {
+      description: 'The security surface: entry points (interfaces an actor, an outside system or a client reaches) with their auth and the sensitive data behind them, tagged data leaving the system, secrets and protected nodes. Give a change id to see only what that change adds. Use it while planning work that adds an entry point, sends data out or needs a credential.',
+      inputSchema: { change: z.string().optional() },
+    },
+    async ({ change }) => run((root) => surfaceText(compile(root), change))(),
   );
   server.registerTool(
     'diff',

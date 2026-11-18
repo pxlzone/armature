@@ -49,6 +49,425 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 }) : target, mod));
 var __toCommonJS = (mod) => __hasOwnProp.call(mod, "module.exports") ? mod["module.exports"] : __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var __require = /* #__PURE__ */ (() => createRequire(import.meta.url))();
+// src/security.ts
+/** Names that hold a credential, by the usual naming. "TOKENS" and "TOKENIZER" are counts and tools, not tokens. */
+var CREDENTIAL = /(SECRET|PASSWORD|PASSWD|PRIVATE[_-]?KEY|API[_-]?KEY|ACCESS[_-]?KEY|CREDENTIAL|TOKEN(?!S|IZ)|(^|_)KEY$)/i;
+/** A connection string carries the password of what it connects to. */
+var CONNECTION = /((^|_)DSN$|DATABASE_URL$|CONNECTION_STRING$)/i;
+/**
+* Names that are about a credential without being one (its lifetime, a limit, where it is sent),
+* and keys that are a position in data, not a credential (a sort key, a cache key, a public key).
+*/
+var NOT_A_CREDENTIAL = /(_(TTL|EXPIRY|EXPIRES|EXPIRES_IN|EXPIRATION|LIFETIME|MAX_AGE|LIMIT|COUNT|LENGTH|SIZE|URL|URI|ENDPOINT|HEADER|NAME|PREFIX|ALGORITHM|ALG|ROUNDS)$|(^|_)(SORT|PARTITION|PRIMARY|FOREIGN|CACHE|HASH|RANGE|INDEX|IDEMPOTENCY|PUBLIC|ROUTING|GROUP|OBJECT|MESSAGE|LOCK|SHARD|ORDER)[_-]?KEY$)/i;
+/** True for an environment variable name that holds a credential, by the usual naming. */
+var isSecretName = (name) => CONNECTION.test(name) || CREDENTIAL.test(name) && !NOT_A_CREDENTIAL.test(name);
+/** Prefixes that bundlers copy into code shipped to the browser or the device. */
+var PUBLIC_ENV = /^(NEXT_PUBLIC_|VITE_|PUBLIC_|REACT_APP_|EXPO_PUBLIC_|NUXT_PUBLIC_|GATSBY_|STORYBOOK_)/;
+/**
+* The configuration of a build tool, inside a client's folder: it runs when the app is built and is
+* not shipped with it, so a credential it reads (an upload token) stays on the build machine.
+*/
+var BUILD_CONFIG = /(^|\/)(vite|vitest|webpack|rollup|rspack|esbuild|tsup|next|nuxt|svelte|astro|remix|gatsby|vue|craco|metro|babel|postcss|tailwind|jest|playwright|cypress|karma|eslint|prettier|drizzle|codegen)\.config\.[cm]?[jt]sx?$|(^|\/)(gulpfile|gruntfile)\.[cm]?[jt]s$/i;
+/** Tags that mark sensitive data even when system.yaml has no `data:` policy for them. */
+var DEFAULT_SENSITIVE = ["pii", "secret"];
+var inside$1 = (id, anc) => id === anc || id.startsWith(`${anc}.`);
+/** Where data goes when it leaves: outside systems, and code on the user's device for secrets. */
+var OUTSIDE = /* @__PURE__ */ new Set(["external"]);
+/** Each tag and the policy for it. `secret` never leaves unless system.yaml lists where it may go. */
+function policyOf(v) {
+	return {
+		secret: { leaves: [] },
+		...v.system.data
+	};
+}
+function sensitiveTags(v) {
+	return /* @__PURE__ */ new Set([...DEFAULT_SENSITIVE, ...Object.keys(v.system.data)]);
+}
+function tagIndex(v) {
+	const own = /* @__PURE__ */ new Map();
+	const embeds = /* @__PURE__ */ new Map();
+	for (const s of v.shapes) {
+		own.set(s.id, s.fields.flatMap((f) => f.tags.filter((t) => t !== "planned").map((t) => [t, `${s.id}.${f.name}`])));
+		embeds.set(s.id, [...new Set(s.fields.flatMap((f) => [...f.type.matchAll(/[A-Z][A-Za-z0-9_]*/g)].map((m) => m[0])))]);
+	}
+	const memo = /* @__PURE__ */ new Map();
+	const ofShape = (id) => {
+		let out = memo.get(id);
+		if (out) return out;
+		out = /* @__PURE__ */ new Map();
+		const seen = /* @__PURE__ */ new Set();
+		const queue = [id];
+		for (let cur = queue.shift(); cur !== void 0; cur = queue.shift()) {
+			if (seen.has(cur) || !own.has(cur)) continue;
+			seen.add(cur);
+			for (const [t, field] of own.get(cur)) out.set(t, [...out.get(t) ?? [], field]);
+			queue.push(...embeds.get(cur));
+		}
+		memo.set(id, out);
+		return out;
+	};
+	return (shapes) => {
+		const out = /* @__PURE__ */ new Map();
+		for (const s of shapes) for (const [t, fields] of ofShape(s)) out.set(t, [.../* @__PURE__ */ new Set([...out.get(t) ?? [], ...fields])]);
+		return out;
+	};
+}
+function merge$1(into, from) {
+	for (const [t, f] of from) into.set(t, [.../* @__PURE__ */ new Set([...into.get(t) ?? [], ...f])]);
+}
+/** Only the sensitive tags of a tag map. */
+function sensitive(v, t) {
+	const keep = sensitiveTags(v);
+	return new Map([...t].filter(([k]) => keep.has(k)));
+}
+var tagList = (t) => [...t].map(([k, f]) => `@${k} (${f.slice(0, 3).join(", ")}${f.length > 3 ? ", …" : ""})`).join(", ");
+/** Code that runs on the user's device: a browser app, a mobile or desktop client. Children inherit it. */
+var isClient = (n) => !!n?.client;
+var isCaller = (n) => !!n && (n.kind === "actor" || n.kind === "external" || n.client);
+/**
+* Entry points: interfaces of server-side nodes that an actor, an outside system or a client links to.
+* Anyone who can reach those callers can reach the interface, so this is where `auth:` matters.
+*/
+function entryPoints(v) {
+	const nodes = new Map(v.nodes.map((n) => [n.id, n]));
+	const ifaces = new Map(v.nodes.flatMap((n) => n.interfaces).map((i) => [i.ref, i]));
+	const tags = tagIndex(v);
+	const reqs = v.nodes.flatMap((n) => n.requirements).filter((q) => q.kind === "security");
+	const out = [];
+	for (const n of v.nodes) {
+		if (isCaller(n) || n.kind === "store" || n.kind === "queue") continue;
+		let behind;
+		for (const i of n.interfaces) {
+			if (i.holds) continue;
+			const callers = [...new Set(v.edges.filter((e) => arrivesAt(e, i) && e.owner !== n.id && isCaller(nodes.get(e.owner))).map((e) => e.owner))];
+			if (!callers.length) continue;
+			const reaches = sensitive(v, tags([...i.takes, ...i.gives]));
+			merge$1(reaches, behind ??= sensitive(v, reachFrom(v, n.id, tags, nodes, ifaces)));
+			out.push({
+				iface: i,
+				node: n,
+				callers,
+				reaches,
+				requirements: reqs.filter((q) => q.covers.includes(i.ref) || q.node === n.id && q.covers.length === 0)
+			});
+		}
+	}
+	return out;
+}
+/** The node a link points at: for a read, the store it reads from. */
+var targetOf$1 = (e) => e.verb === "reads" ? e.from : e.to;
+/**
+* True when a link is aimed at an interface: it names it, or it names only the node that has it (or
+* a node around that one). A link to a node says nothing about which interface it uses, so it may be
+* any of them.
+*/
+var aimsAt = (e, i) => e.iface ? e.iface === i.ref : inside$1(i.node, targetOf$1(e));
+/** A call or a message that arrives at an interface. */
+var arrivesAt = (e, i) => (e.verb === "calls" || e.verb === "sends") && aimsAt(e, i);
+/**
+* The tags of the data a node can get at through its links, a few links deep. Stops at outside
+* systems and clients. A node's code includes the code of the nodes inside it, so their links are its
+* links. For the node the walk starts from, a link declared on a node around it counts as well: it
+* says some code in that group does this, and cannot say it is not this node.
+*/
+function reachFrom(v, start, tags, nodes, ifaces, depth = 4) {
+	const out = /* @__PURE__ */ new Map();
+	const seen = /* @__PURE__ */ new Set([start]);
+	let ring = [start];
+	for (let d = 0; d < depth && ring.length; d++) {
+		const next = [];
+		for (const id of ring) for (const e of v.edges) {
+			if (!inside$1(e.owner, id) && !(d === 0 && inside$1(id, e.owner))) continue;
+			merge$1(out, tags([...e.shapes, ...e.returns]));
+			const held = e.iface ? [ifaces.get(e.iface)] : v.nodes.filter((n) => inside$1(n.id, targetOf$1(e))).flatMap((n) => n.interfaces);
+			for (const h of held) if (h?.holds) merge$1(out, tags(h.takes));
+			const other = e.owner === e.from ? e.to : e.from;
+			const o = nodes.get(other);
+			if (!o || seen.has(other) || o.kind === "external" || o.kind === "actor" || isClient(o)) continue;
+			seen.add(other);
+			next.push(other);
+		}
+		ring = next;
+	}
+	return out;
+}
+/** Every link that carries policed data out of the system: to an outside system, or, for secrets, to a client. */
+function dataExits(v) {
+	const nodes = new Map(v.nodes.map((n) => [n.id, n]));
+	const policy = policyOf(v);
+	const tags = tagIndex(v);
+	const out = [];
+	const consider = (edge, to, shapes) => {
+		const n = nodes.get(to);
+		if (!n || !shapes.length) return;
+		const outside = OUTSIDE.has(n.kind);
+		const t = new Map([...tags(shapes)].filter(([k]) => policy[k] && (outside || k === "secret" && isClient(n))));
+		if (!t.size) return;
+		const denied = [...t.keys()].filter((k) => !policy[k].leaves.some((l) => inside$1(to, l)));
+		out.push({
+			edge,
+			to,
+			tags: t,
+			denied
+		});
+	};
+	for (const e of v.edges) {
+		consider(e, e.to, e.shapes);
+		consider(e, e.from, e.returns);
+	}
+	return out;
+}
+var tagsOfNode = (n) => n ? [n.change, n.modify].filter((x) => !!x) : [];
+var tagsOf = (x) => [x.change, x.modify].filter((c) => !!c);
+/** The security findings: errors and warnings the compiler adds to the problem list. */
+function securityFindings(v) {
+	const out = [];
+	const nodes = new Map(v.nodes.map((n) => [n.id, n]));
+	const ancestors = (id) => {
+		const list = [];
+		for (let p = nodes.get(id)?.parent; p; p = nodes.get(p)?.parent) list.push(nodes.get(p));
+		return list;
+	};
+	const changesOfNode = (id) => [...new Set([nodes.get(id), ...ancestors(id)].flatMap(tagsOfNode))];
+	const shapes = new Map(v.shapes.map((s) => [s.id, s]));
+	const changesOfFields = (t) => [...t.values()].flat().flatMap((field) => tagsOf(shapes.get(field.split(".")[0]) ?? {}));
+	const add = (level, code, message, ref, file, changes) => {
+		out.push({
+			level,
+			code,
+			message,
+			ref,
+			file,
+			changes: [...new Set(changes)],
+			...level === "warning" ? { group: "incomplete" } : {}
+		});
+	};
+	const entries = entryPoints(v);
+	for (const ep of entries) {
+		const { iface: i, node: n } = ep;
+		const ch = [
+			...tagsOf(i),
+			...changesOfNode(n.id),
+			...v.edges.filter((e) => arrivesAt(e, i) && ep.callers.includes(e.owner)).flatMap(tagsOf)
+		];
+		const from = ep.callers.join(", ");
+		if (!i.auth) add("warning", "no-auth", `"${i.ref}" is reached from ${from} and does not say who may call it. Add "auth:": none, user, service, admin, or the name of the scheme.`, i.ref, n.source, ch);
+		else if (i.auth === "none" && ep.reaches.size) add("error", "open-entry", `"${i.ref}" takes calls from ${from} with no authentication ("auth: none"), and it reaches sensitive data: ${tagList(ep.reaches)}. Require authentication, or keep the data out of its reach.`, i.ref, n.source, [...ch, ...changesOfFields(ep.reaches)]);
+		else if (i.auth !== "none" && ep.reaches.size && ep.requirements.length === 0) add("warning", "no-security-requirement", `"${i.ref}" is an entry point (from ${from}) that reaches ${tagList(ep.reaches)}, and no requirement of kind security covers it. Add one that says who may get which data, with a test: { id, kind: security, text, covers: [${i.ref}] }.`, i.ref, n.source, [...ch, ...changesOfFields(ep.reaches)]);
+	}
+	for (const x of dataExits(v)) {
+		if (!x.denied.length) continue;
+		const e = x.edge;
+		const fields = x.denied.map((t) => `@${t} (${x.tags.get(t).slice(0, 3).join(", ")})`).join(", ");
+		const owner = nodes.get(e.owner);
+		const denied = new Map(x.denied.map((t) => [t, x.tags.get(t)]));
+		add("error", "data-leak", `${e.owner} ${e.verb} ${e.iface ?? e.to}${e.from === x.to ? " (the answer)" : ""} carries ${fields} to "${x.to}", which "data:" in system.yaml does not list for ${x.denied.length === 1 ? "that tag" : "those tags"}. Keep the fields out of the link, or add "${x.to}" to the tag's "leaves:" if it may have them.`, e.ref ?? e.owner, owner?.source, [
+			...tagsOf(e),
+			...changesOfNode(e.owner),
+			...changesOfFields(denied)
+		]);
+	}
+	const coarse = /* @__PURE__ */ new Map();
+	for (const n of v.nodes) for (const i of n.interfaces) {
+		if (!i.only?.length) continue;
+		for (const e of v.edges) {
+			if (e.owner === n.id || !aimsAt(e, i)) continue;
+			if (!(i.holds ? e.verb === "writes" : e.verb === "calls" || e.verb === "sends") || i.only.some((o) => inside$1(e.owner, o))) continue;
+			if (!e.iface) coarse.set(e, [...coarse.get(e) ?? [], i]);
+			else add("error", "not-allowed", `${e.owner} ${e.verb} "${i.ref}", which only ${i.only.join(", ")} may ${i.holds ? "write" : "use"}. Go through one of them, or change "only:" if this one should be allowed.`, e.ref ?? e.owner, nodes.get(e.owner)?.source, [...tagsOf(e), ...changesOfNode(e.owner)]);
+		}
+	}
+	for (const [e, closed] of coarse) {
+		const list = closed.map((i) => `"${i.ref}" (only ${i.only.join(", ")})`).join(", ");
+		add("error", "not-allowed", `${e.owner} ${e.verb} "${targetOf$1(e)}" without naming an interface, and ${list} there ${closed.length === 1 ? "is" : "are"} not open to it. Name the interface the link uses, or go through one of the nodes that may.`, e.ref ?? e.owner, nodes.get(e.owner)?.source, [...tagsOf(e), ...changesOfNode(e.owner)]);
+	}
+	for (const n of v.nodes) {
+		const declared = new Set([n, ...ancestors(n.id)].flatMap((x) => x.secrets));
+		if (n.client) {
+			const own = n.secrets;
+			const read = [...new Set(n.env.filter((r) => isSecretName(r.name) && !PUBLIC_ENV.test(r.name) && !BUILD_CONFIG.test(r.file)).map((r) => r.name))];
+			if (own.length) add("error", "client-secret", `"${n.id}" runs on the user's device and holds secrets: ${own.join(", ")}. Anything shipped to a client can be read by its user. Move them to a server node.`, n.id, n.source, changesOfNode(n.id));
+			if (read.length) add("error", "client-secret", `"${n.id}" runs on the user's device and its code reads ${read.join(", ")} (${n.env.find((r) => r.name === read[0]).file}). Move the call that needs ${read.length === 1 ? "it" : "them"} to a server node.`, n.id, n.source, changesOfNode(n.id));
+			continue;
+		}
+		const exposed = n.secrets.filter((s) => PUBLIC_ENV.test(s));
+		if (exposed.length) add("error", "client-secret", `"${n.id}" holds ${exposed.join(", ")}, whose prefix makes the build copy ${exposed.length === 1 ? "it" : "them"} into code shipped to the browser. Rename ${exposed.length === 1 ? "it" : "them"} without the prefix.`, n.id, n.source, changesOfNode(n.id));
+		const undeclared = [...new Set(n.env.filter((r) => isSecretName(r.name) && !declared.has(r.name)).map((r) => r.name))];
+		if (undeclared.length) {
+			const where = n.env.find((r) => r.name === undeclared[0]);
+			add("warning", "undeclared-secret", `"${n.id}" reads ${undeclared.slice(0, 6).join(", ")}${undeclared.length > 6 ? ", …" : ""} from the environment (${where.file}:${where.line}), which ${undeclared.length === 1 ? "looks like a credential" : "look like credentials"} the model does not list. Add ${undeclared.length === 1 ? "it" : "them"} to the node's "secrets:".`, n.id, n.source, changesOfNode(n.id));
+		}
+	}
+	for (const c of v.changes) {
+		if (c.state !== "done") continue;
+		for (const ep of entries) {
+			if (!(tagsOf(ep.iface).includes(c.id) || c.nodes.includes(ep.node.id)) || !ep.reaches.size || !ep.iface.auth || ep.iface.auth === "none") continue;
+			const failing = ep.requirements.filter((q) => q.state === "failing");
+			if (!ep.requirements.length) add("error", "not-done", `Change "${c.id}" is marked done, but its entry point "${ep.iface.ref}" reaches ${tagList(ep.reaches)} and no requirement of kind security covers it.`, c.id, void 0, [c.id]);
+			else if (failing.length) add("error", "not-done", `Change "${c.id}" is marked done, but ${failing.length === 1 ? "a security requirement" : "security requirements"} of "${ep.iface.ref}" ${failing.length === 1 ? "fails" : "fail"}: ${failing.map((q) => q.ref).join(", ")}.`, c.id, void 0, [c.id]);
+		}
+	}
+	return out;
+}
+/** What a change does to the security of the system, for the person who approves it. */
+function changeSecurity(v, id) {
+	const c = v.changes.find((x) => x.id === id);
+	const lines = [];
+	if (!c) return {
+		lines,
+		errors: []
+	};
+	const inChange = (x) => x.change === id || x.modify === id;
+	const nodeIn = (nid) => c.nodes.includes(nid) || v.nodes.some((n) => inChange(n) && inside$1(nid, n.id));
+	const shapeIn = (t) => [...t.values()].flat().some((field) => c.shapes.includes(field.split(".")[0]));
+	const entries = entryPoints(v).filter((ep) => inChange(ep.iface) || nodeIn(ep.node.id) || shapeIn(ep.reaches) || v.edges.some((e) => arrivesAt(e, ep.iface) && inChange(e) && ep.callers.includes(e.owner)));
+	if (entries.length) {
+		lines.push("Entry points it adds or alters, or whose data it changes:");
+		for (const ep of entries) lines.push(`  ${ep.iface.ref} (auth: ${ep.iface.auth ?? "not stated"}${ep.iface.only?.length ? `; only ${ep.iface.only.join(", ")}` : ""}) from ${ep.callers.join(", ")}${ep.reaches.size ? `; reaches ${tagList(ep.reaches)}` : ""}${ep.requirements.length ? `; proven by ${ep.requirements.map((q) => q.ref).join(", ")}` : ""}`);
+	}
+	const exits = dataExits(v).filter((x) => inChange(x.edge) || nodeIn(x.edge.owner) || shapeIn(x.tags));
+	if (exits.length) {
+		lines.push("Sensitive data it sends out of the system:");
+		for (const x of exits) lines.push(`  ${tagList(x.tags)} -> ${x.to}${x.denied.length ? ` (NOT allowed for @${x.denied.join(", @")})` : " (allowed by data: in system.yaml)"}`);
+	}
+	const holders = v.nodes.filter((n) => nodeIn(n.id) && n.secrets.length);
+	if (holders.length) lines.push("Secrets it holds:", ...holders.map((n) => `  ${n.id}: ${n.secrets.join(", ")}`));
+	return {
+		lines,
+		errors: securityFindings(v).filter((f) => f.level === "error" && f.code !== "not-done" && f.changes.includes(id))
+	};
+}
+/** The constraints on a set of nodes, for whoever plans work on them: boundaries, who may call, data policy, secrets, security requirements, rules. */
+function mustHold(v, ids) {
+	const nodes = new Map(v.nodes.map((n) => [n.id, n]));
+	const tags = tagIndex(v);
+	const policy = policyOf(v);
+	const out = [];
+	const seenRules = /* @__PURE__ */ new Set();
+	const policed = /* @__PURE__ */ new Set();
+	for (const id of [...new Set(ids)]) {
+		const n = nodes.get(id);
+		if (!n) continue;
+		const lines = [];
+		if (n.protect) lines.push("protected: editing its files needs an approved change that modifies it");
+		for (const b of n.never) lines.push(`never touches ${b.node}${b.why ? ` (${b.why})` : ""}`);
+		for (const i of n.interfaces) {
+			const bits = [i.auth ? `auth ${i.auth}` : "", i.only?.length ? `only ${i.only.join(", ")} may ${i.holds ? "write" : "use"} it` : ""].filter(Boolean);
+			if (bits.length) lines.push(`${i.ref}: ${bits.join("; ")}`);
+			for (const t of tags([...i.takes, ...i.gives]).keys()) if (policy[t]) policed.add(t);
+		}
+		if (n.secrets.length) lines.push(`holds secrets ${n.secrets.join(", ")}: never log them, return them or send them to a client`);
+		if (n.client) lines.push("runs on the user's device: holds no secret, and its users can read and change anything it does");
+		for (const q of n.requirements) if (q.kind === "security") lines.push(`must hold (security): ${q.text}`);
+		for (const r of n.rules) {
+			const key = `${r.from}|${r.text}`;
+			if (seenRules.has(key)) continue;
+			seenRules.add(key);
+			lines.push(`rule${r.from !== n.id ? ` (from ${r.from})` : ""}: ${r.text}`);
+		}
+		if (lines.length) out.push(`- ${n.id}`, ...lines.map((l) => `  ${l}`));
+	}
+	for (const t of policed) out.push(`- @${t} data may leave the system only to: ${policy[t].leaves.join(", ") || "nowhere"}`);
+	return out;
+}
+/** Entry points, data leaving, secrets and protected nodes, for the whole system or one change. */
+function surfaceText(v, change) {
+	const out = [];
+	if (change) {
+		const c = v.changes.find((x) => x.id === change);
+		if (!c) return `No change "${change}".`;
+		const { lines, errors } = changeSecurity(v, change);
+		out.push(`Security surface of change ${change} (${c.state}):`);
+		out.push(...lines.length ? lines : ["  It adds no entry point, sends no sensitive data out of the system and holds no secret."]);
+		if (errors.length) out.push("Errors:", ...errors.map((e) => `  ${e.code}: ${e.message}`));
+		return out.join("\n");
+	}
+	const entries = entryPoints(v);
+	out.push(`Entry points (${entries.length}): interfaces an actor, an outside system or a client reaches`);
+	for (const ep of entries) {
+		out.push(`  ${ep.iface.ref}${ep.iface.via ? ` via ${ep.iface.via}` : ""}${ep.iface.route ? ` ${ep.iface.route}` : ""}: auth ${ep.iface.auth ?? "NOT STATED"}${ep.iface.only?.length ? `; only ${ep.iface.only.join(", ")}` : ""}`);
+		out.push(`    from ${ep.callers.join(", ")}${ep.reaches.size ? `; reaches ${tagList(ep.reaches)}` : "; reaches no tagged data"}`);
+		if (ep.reaches.size) out.push(`    ${ep.requirements.length ? `proven by ${ep.requirements.map((q) => `${q.ref} [${q.state}]`).join(", ")}` : "no security requirement covers it"}`);
+	}
+	const exits = dataExits(v);
+	out.push("", `Sensitive data leaving the system (${exits.length} link${exits.length === 1 ? "" : "s"})`);
+	for (const x of exits) out.push(`  ${x.edge.owner} ${x.edge.verb} ${x.edge.iface ?? x.edge.to}: ${tagList(x.tags)} -> ${x.to}${x.denied.length ? `  NOT ALLOWED (@${x.denied.join(", @")})` : ""}`);
+	const policy = policyOf(v);
+	out.push("", "Data policy (data: in system.yaml)", ...Object.entries(policy).map(([t, p]) => `  @${t} may leave to: ${p.leaves.join(", ") || "nowhere"}`));
+	const holders = v.nodes.filter((n) => n.secrets.length || n.env.some((r) => isSecretName(r.name)));
+	out.push("", "Secrets");
+	if (!holders.length) out.push("  none declared or seen in the code");
+	for (const n of holders) {
+		const seen = [...new Set(n.env.filter((r) => isSecretName(r.name)).map((r) => r.name))];
+		out.push(`  ${n.id}${n.client ? " (client)" : ""}: ${n.secrets.join(", ") || "none declared"}${seen.length ? `; read in code: ${seen.join(", ")}` : ""}`);
+	}
+	const prot = v.nodes.filter((n) => n.protect && !(n.parent && v.nodes.find((p) => p.id === n.parent)?.protect));
+	out.push("", `Protected nodes: ${prot.map((n) => n.id).join(", ") || "none"}`);
+	const clients = v.nodes.filter((n) => n.client && !(n.parent && v.nodes.find((p) => p.id === n.parent)?.client));
+	out.push(`Client nodes: ${clients.map((n) => n.id).join(", ") || "none (mark code that runs on the user's device with \"client: true\")"}`);
+	return out.join("\n");
+}
+var noGuards = () => ({
+	guards: /* @__PURE__ */ new Set(),
+	allowances: /* @__PURE__ */ new Set(),
+	auth: /* @__PURE__ */ new Map(),
+	only: /* @__PURE__ */ new Map()
+});
+/** The line for a tag on a field. Dropping the tag takes the field out of the data policy and out of what an entry point is seen to reach. */
+var tagGuard = (tag, shape, field) => `@${tag} on ${shape}.${field}`;
+/** The line for a node that says `protect: false` or `client: false` inside a node that is protected or a client. */
+var optOut = (what, id) => `${what}: false on ${id}, inside a ${what === "protect" ? "protected" : "client"} node`;
+/** What `is` guards less than `was` did: guards that are gone, and what is let through that was not. */
+function weakenedBetween(was, is) {
+	const out = [];
+	for (const x of was.guards) if (!is.guards.has(x)) out.push(`no longer: ${x}`);
+	for (const [ref, scheme] of was.auth) {
+		const now = is.auth.get(ref);
+		if (scheme === "none" || now === scheme) continue;
+		out.push(now === void 0 ? `no longer: auth ${ref} (was ${scheme})` : `auth ${ref}: was ${scheme}, now ${now}`);
+	}
+	for (const [ref, names] of was.only) {
+		const now = is.only.get(ref);
+		if (!now?.length) out.push(`no longer: only ${ref}: ${names.join(", ")}`);
+		else for (const o of now) if (!names.some((w) => inside$1(o, w))) out.push(`now allowed: ${o} may use ${ref}`);
+	}
+	for (const x of is.allowances) if (!was.allowances.has(x)) out.push(`now allowed: ${x}`);
+	for (const [ref, now] of is.auth) if (now === "none" && !was.auth.has(ref)) out.push(`now allowed: auth none ${ref}`);
+	return out;
+}
+/** What the whole model guards, and what it lets through. */
+function guardsOf(g) {
+	const out = noGuards();
+	const { guards, allowances } = out;
+	const byId = new Map(g.nodes.map((n) => [n.id, n]));
+	for (const n of g.nodes) {
+		const parent = n.parent ? byId.get(n.parent) : void 0;
+		if (n.protect && !parent?.protect) guards.add(`protect ${n.id}`);
+		if (n.client && !parent?.client) guards.add(`client ${n.id}`);
+		if (parent?.protect && !n.protect) allowances.add(optOut("protect", n.id));
+		if (parent?.client && !n.client) allowances.add(optOut("client", n.id));
+		for (const b of n.never) if (b.from === n.id) guards.add(`never ${n.id} -> ${b.node}`);
+		for (const i of n.interfaces) {
+			if (i.auth) out.auth.set(i.ref, i.auth);
+			if (i.only?.length) out.only.set(i.ref, i.only);
+		}
+		for (const q of n.requirements) guards.add(`requirement ${q.ref}${q.kind === "security" ? " (security)" : ""}`);
+	}
+	for (const s of g.shapes) for (const f of s.fields) for (const t of f.tags) if (t !== "planned") guards.add(tagGuard(t, s.id, f.name));
+	for (const [t, p] of Object.entries(g.system.data)) {
+		guards.add(`data policy @${t}`);
+		for (const l of p.leaves) allowances.add(`@${t} may leave to ${l}`);
+	}
+	for (const x of g.system.ignore ?? []) allowances.add(`ignore ${x.path}`);
+	for (const a of g.system.accepts ?? []) allowances.add(`accept ${[
+		a.code,
+		a.ref,
+		a.file,
+		a.match ? `"${a.match}"` : ""
+	].filter(Boolean).join(" ")}`);
+	if (g.system.gate === false) allowances.add("gate: off");
+	return out;
+}
 // node_modules/ajv/dist/compile/codegen/code.js
 var require_code$1 = /* @__PURE__ */ __commonJSMin(((exports) => {
 	Object.defineProperty(exports, "__esModule", { value: true });
@@ -14941,6 +15360,18 @@ var WARNING_INFO = {
 		group: "wrong",
 		what: "A node has code, but the change that adds it is still proposed: the code was written before a person approved the change."
 	},
+	"no-auth": {
+		group: "incomplete",
+		what: "An entry point (an interface an actor, an outside system or a client links to) does not say who may call it. Add \"auth:\"."
+	},
+	"no-security-requirement": {
+		group: "incomplete",
+		what: "An entry point reaches sensitive data and no requirement of kind security covers it."
+	},
+	"undeclared-secret": {
+		group: "incomplete",
+		what: "A node's code reads an environment variable that looks like a credential, and its \"secrets:\" does not list it."
+	},
 	"scope-changed": {
 		group: "wrong",
 		what: "Elements were added to or removed from a change after a person approved it. It needs approving again: \"armature approve <change>\"."
@@ -19928,7 +20359,28 @@ function tsHints(raw) {
 		v: m[1],
 		l: lineAt(m.index ?? 0)
 	});
-	return [...entries, ...dedupeHints(out)].slice(0, 300);
+	return [
+		...entries,
+		...dedupeHints(out).slice(0, 300),
+		...envHints(source, lineAt)
+	];
+}
+/** Environment variables the code reads by name: process.env, import.meta.env, Deno.env, Bun.env, os.environ, os.getenv. */
+function envHints(source, lineAt) {
+	const out = [];
+	for (const re of [
+		/\b(?:process|Bun)\.env\.([A-Z_][A-Z0-9_]*)\b/g,
+		/\b(?:process|Bun)\.env\[\s*["'`]([A-Z_][A-Z0-9_]*)["'`]\s*\]/g,
+		/\bimport\.meta\.env\.([A-Z_][A-Z0-9_]*)\b/g,
+		/\bDeno\.env\.get\(\s*["'`]([A-Z_][A-Z0-9_]*)["'`]/g,
+		/\bos\.environ\[\s*["']([A-Z_][A-Z0-9_]*)["']\s*\]/g,
+		/\bos\.(?:environ\.get|getenv)\(\s*["']([A-Z_][A-Z0-9_]*)["']/g
+	]) for (const m of source.matchAll(re)) out.push({
+		k: "env",
+		v: m[1],
+		l: lineAt(m.index ?? 0)
+	});
+	return dedupeHints(out).slice(0, 60);
 }
 function dedupeHints(list) {
 	const seen = /* @__PURE__ */ new Set();
@@ -20206,7 +20658,7 @@ function extractPy(root, source) {
 		imports,
 		refs: [...seen.values()],
 		schemas,
-		hints: dedupeHints(hints).slice(0, 200)
+		hints: [...dedupeHints(hints).slice(0, 200), ...envHints(withoutComments(source), lineAt)]
 	};
 }
 function pyType(t) {
@@ -20395,7 +20847,7 @@ async function buildCodeIndex(root) {
 	const mdir = modelDir(root);
 	const wanted = repo.files.filter((f) => LANG_OF[path.extname(f)] && !SKIP$2.test(`/${f}`) && !f.endsWith(".d.ts") && !/\.min\.js$/.test(f) && !f.startsWith(`${mdir}/`));
 	const prior = readCodeIndex(root);
-	const old = prior?.extractor === 9 ? prior : null;
+	const old = prior?.extractor === 10 ? prior : null;
 	const files = {};
 	const resolve = makeResolver(root, all);
 	let parsed = 0;
@@ -20482,7 +20934,7 @@ async function buildCodeIndex(root) {
 	}
 	const index = {
 		version: 3,
-		extractor: 9,
+		extractor: 10,
 		builtAt: (/* @__PURE__ */ new Date()).toISOString(),
 		files
 	};
@@ -21914,6 +22366,10 @@ function compile$1(root, opts = {}) {
 			modify: d.modify,
 			retire: d.retire,
 			never: [],
+			client: d.client === true,
+			protect: d.protect === true,
+			secrets: toArr(d.secrets).map((x) => typeof x === "string" ? x : String(x?.name ?? "")).filter(Boolean),
+			env: [],
 			status: "built",
 			statusWhy: "",
 			coverage: null,
@@ -22125,6 +22581,17 @@ function compile$1(root, opts = {}) {
 		return out;
 	};
 	const ifaces = /* @__PURE__ */ new Map();
+	const onlyOf = (v, ref) => {
+		const names = toArr(v).map(String);
+		if (!names.length) return {};
+		const only = [];
+		for (const x of names) {
+			const id = resolveNode(x);
+			if (id) only.push(id);
+			else err("reference", `${ref} only "${x}": ${nodeProblem(ids, x)}`, ref);
+		}
+		return { only };
+	};
 	const reqs = /* @__PURE__ */ new Map();
 	for (const n of nodes.values()) {
 		const d = rawById.get(n.id).data;
@@ -22158,7 +22625,9 @@ function compile$1(root, opts = {}) {
 				modify: a.modify,
 				retire: a.retire,
 				status: "built",
-				evidence: "unchecked"
+				evidence: "unchecked",
+				...a.auth !== void 0 ? { auth: String(a.auth) } : {},
+				...onlyOf(a.only, ref)
 			});
 		}
 		for (const h of toArr(d.holds)) {
@@ -22177,7 +22646,8 @@ function compile$1(root, opts = {}) {
 				modify: o.modify,
 				retire: o.retire,
 				status: "built",
-				evidence: "unchecked"
+				evidence: "unchecked",
+				...onlyOf(o.only, ref)
 			});
 		}
 		for (const r of toArr(d.requirements)) {
@@ -22191,6 +22661,7 @@ function compile$1(root, opts = {}) {
 				ref,
 				node: n.id,
 				text: r.text ?? "",
+				...r.kind === "security" ? { kind: "security" } : {},
 				change: r.change,
 				modify: r.modify,
 				tests: toArr(r.tests),
@@ -22232,6 +22703,19 @@ function compile$1(root, opts = {}) {
 		}
 		if (own.length) ownNever.set(n.id, own);
 		n.never = [...n.parent ? nodes.get(n.parent).never : [], ...own];
+		const parent = n.parent ? nodes.get(n.parent) : void 0;
+		if (parent?.client && rawById.get(n.id).data.client !== false) n.client = true;
+		if (parent?.protect && rawById.get(n.id).data.protect !== false) n.protect = true;
+	}
+	const dataPolicy = {};
+	if (sys.data && typeof sys.data === "object") for (const [tag, rule] of Object.entries(sys.data)) {
+		const leaves = [];
+		for (const x of toArr(rule?.leaves).map(String)) {
+			const id = resolveNode(x);
+			if (id) leaves.push(id);
+			else err("reference", `data: @${tag} may leave to "${x}": ${nodeProblem(ids, x)}`, void 0, `${mdir}/system.yaml`);
+		}
+		dataPolicy[tag.replace(/^@/, "")] = { leaves };
 	}
 	const edges = [];
 	const edgeIds = /* @__PURE__ */ new Set();
@@ -22820,6 +23304,21 @@ function compile$1(root, opts = {}) {
 			if (!id) continue;
 			for (const n of [id, ...ancestors(id)]) byNode.set(n, [...byNode.get(n) ?? [], f.path]);
 		}
+		for (const f of Object.values(cidx.files)) {
+			if (f.test) continue;
+			const id = owner.get(f.path);
+			if (!id) continue;
+			const n = nodes.get(id);
+			const declared = new Set([id, ...ancestors(id)].flatMap((x) => nodes.get(x)?.secrets ?? []));
+			for (const h of f.hints ?? []) {
+				if (h.k !== "env" || n.env.length >= 60) continue;
+				if (isSecretName(h.v) || declared.has(h.v)) n.env.push({
+					name: h.v,
+					file: f.path,
+					line: h.l
+				});
+			}
+		}
 		for (const [id, paths] of byNode) {
 			const list = paths.map((pth) => cidx.files[pth]);
 			const pkgs = /* @__PURE__ */ new Map();
@@ -23293,6 +23792,15 @@ function compile$1(root, opts = {}) {
 			"platform"
 		].includes(n.kind)) warn("no-requirement", `"${n.id}" has code and no requirement.`, n.id, n.source);
 	}
+	const securityView = {
+		nodes: [...nodes.values()],
+		edges,
+		shapes: [...shapes.values()],
+		changes: [...changes.values()],
+		system: { data: dataPolicy }
+	};
+	for (const f of securityFindings(securityView)) if (f.level === "error") err(f.code, f.message, f.ref, f.file);
+	else warn(f.code, f.message, f.ref, f.file);
 	let accepted = 0;
 	const accepts = toArr(sys.accept).filter((a) => a && typeof a === "object" && typeof a.code === "string");
 	if (accepts.length) {
@@ -23339,7 +23847,17 @@ function compile$1(root, opts = {}) {
 				junit: junitFiles.length,
 				lcov: lcovFiles.length,
 				...newestReport ? { at: new Date(newestReport).toISOString() } : {}
-			}
+			},
+			data: dataPolicy,
+			ignore: ignoreEntries.map((x) => x.why ? x : { path: x.path }),
+			accepts: accepts.map((a) => ({
+				code: a.code,
+				...a.ref ? { ref: String(a.ref) } : {},
+				...a.file ? { file: String(a.file) } : {},
+				...a.match ? { match: String(a.match) } : {},
+				...a.why ? { why: String(a.why) } : {}
+			})),
+			gate: sys.gate !== "off"
 		},
 		nodes: order,
 		edges,
@@ -23455,7 +23973,8 @@ function ifaceLine(i) {
 	const takes = i.takes.length ? ` takes ${i.takes.join(", ")}` : "";
 	const gives = i.gives.length ? ` gives ${i.gives.join(", ")}` : "";
 	const st = i.status !== "built" ? ` [${i.status}]` : "";
-	return `${i.ref}${via}${route}${takes}${gives}${st}${marks(i)}`;
+	const sec = `${i.auth ? ` auth ${i.auth}` : ""}${i.only?.length ? ` only ${i.only.join(", ")}` : ""}`;
+	return `${i.ref}${via}${route}${takes}${gives}${sec}${st}${marks(i)}`;
 }
 function shapeBlock(s) {
 	const flags = [s.stale ? "STALE" : "", s.source ? s.bound ? "bound" : "unconfirmed" : "draft"].filter(Boolean).join(", ");
@@ -23465,7 +23984,7 @@ function shapeBlock(s) {
 	return lines;
 }
 function reqLine(q) {
-	return `[${q.outdated ? "unverified: the passing report is older than the code" : q.state}] ${q.ref}: ${q.text}${q.change ? ` (change ${q.change})` : ""}${q.covers.length ? ` (covers ${q.covers.join(", ")})` : ""}`;
+	return `[${q.outdated ? "unverified: the passing report is older than the code" : q.state}] ${q.ref}${q.kind ? ` (${q.kind})` : ""}: ${q.text}${q.change ? ` (change ${q.change})` : ""}${q.covers.length ? ` (covers ${q.covers.join(", ")})` : ""}`;
 }
 /** Requirements that say they cover an interface, a link, a shape or a flow. */
 function covering(g, id) {
@@ -23652,6 +24171,12 @@ function nodeCard(g, n, depth) {
 	if (n.coverage !== null) out.push(`  coverage: ${n.coverage}%`);
 	if (n.change) out.push(`  change: ${n.change}`);
 	if (n.modify) out.push(`  being altered by change: ${n.modify}`);
+	const sec = [
+		n.client ? "client (runs on the user's device)" : "",
+		n.protect ? "protected (edits need an approved change)" : "",
+		n.secrets.length ? `secrets: ${n.secrets.join(", ")}` : ""
+	].filter(Boolean);
+	if (sec.length) out.push(`  security: ${sec.join("; ")}`);
 	if (n.never.length) out.push(`  never touches: ${n.never.map((b) => `${b.node}${b.why ? ` (${b.why})` : ""}${b.from !== n.id ? ` (from ${b.from})` : ""}`).join("; ")}`);
 	if (n.unused) out.push("  unused: dead code kept for reference; nothing reaches it and it takes part in no flow.");
 	if (n.deployment.length) out.push(`  runs as: ${n.deployment.map((d) => `${d.service} [${d.env}]${d.image ? ` ${d.image}` : ""}`).join(", ")}`);
@@ -23907,6 +24432,7 @@ function impact(g, ref, depth = 3) {
 		for (const e of users) out.push(`  link ${arrow(e)}`);
 		const flows = g.flows.filter((f) => f.steps.some((s) => s.edge && users.some((e) => e.id === s.edge)));
 		if (flows.length) out.push(`  flows: ${flows.map((f) => f.id).join(", ")}`);
+		if (i.auth || i.only?.length) out.push(`  Must hold: ${[i.auth ? `auth ${i.auth}` : "", i.only?.length ? `only ${i.only.join(", ")} may ${i.holds ? "write" : "use"} it` : ""].filter(Boolean).join("; ")}`);
 		covered(i.ref);
 		docsNaming(g, out, (x) => x.type === "interface" && x.id === i.ref);
 		if (out.length === 1) out.push("  nothing declared.");
@@ -23968,6 +24494,8 @@ function impact(g, ref, depth = 3) {
 		out.push("  requirements that must keep holding:");
 		for (const q of reqs) out.push(`    ${reqLine(q)}`);
 	}
+	const hold = mustHold(g, g.nodes.filter((x) => inside(x.id)).map((x) => x.id));
+	if (hold.length) out.push("  Must hold (check, approval and the gate refuse work that breaks a boundary, an auth, an allow-list or the data policy):", ...hold.map((l) => `  ${l}`));
 	docsNaming(g, out, (x) => !!x.node && inside(x.node));
 	if (out.length === 1) out.push("  nothing declared.");
 	return out.join("\n");
@@ -24343,6 +24871,8 @@ function approveChange(root, id, by) {
 		`  ${elements.length} element${elements.length === 1 ? "" : "s"}:`
 	];
 	for (const e of elements) out.push(`    ${e}`);
+	const sec = changeSecurity(g, id);
+	if (sec.lines.length) out.push("  What it does to security:", ...sec.lines.map((l) => `  ${l}`));
 	if (c.waits.length) out.push(`  It comes after ${c.waits.join(", ")}, which ${c.waits.length === 1 ? "is" : "are"} not done yet.`);
 	out.push(`Recorded in ${modelDir(root)}/${APPROVALS_FILE}. Commit it with the change.`);
 	return out.join("\n");
@@ -24445,6 +24975,9 @@ function declared(g) {
 			deploy: join(n.deploy),
 			rules: n.rules.filter((r) => r.from === n.id).map((r) => r.text).join(" | "),
 			never: join(n.never.filter((b) => b.from === n.id).map((b) => b.node)),
+			client: n.client && !(n.parent && g.nodes.find((p) => p.id === n.parent)?.client) ? "yes" : "",
+			protect: n.protect && !(n.parent && g.nodes.find((p) => p.id === n.parent)?.protect) ? "yes" : "",
+			secrets: join(n.secrets),
 			...tags(n)
 		}));
 		for (const i of n.interfaces) out.set(`interface ${i.ref}`, drop({
@@ -24453,10 +24986,13 @@ function declared(g) {
 			queue: i.queue ?? "",
 			[i.holds ? "shape" : "takes"]: join(i.takes),
 			gives: join(i.gives),
+			auth: i.auth ?? "",
+			only: join(i.only ?? []),
 			...tags(i)
 		}));
 		for (const q of n.requirements) out.set(`requirement ${q.ref}`, drop({
 			text: q.text,
+			kind: q.kind ?? "",
 			tests: join(q.tests),
 			match: join(q.match),
 			covers: join(q.covers),
@@ -24578,8 +25114,10 @@ function diffModel(root, ref) {
 		ref,
 		added: [],
 		removed: [],
-		changed: []
+		changed: [],
+		weakened: []
 	};
+	if (then) diff.weakened.push(...weakenedBetween(guardsOf(then), guardsOf(now)));
 	for (const [what, facts] of b) {
 		const old = a.get(what);
 		if (!old) diff.added.push({
@@ -24618,8 +25156,9 @@ function summary(what, f) {
 }
 function diffText(d) {
 	if (typeof d === "string") return d;
-	if (!d.added.length && !d.removed.length && !d.changed.length) return `The model declares the same things as at ${d.ref}.`;
+	if (!d.added.length && !d.removed.length && !d.changed.length && !d.weakened.length) return `The model declares the same things as at ${d.ref}.`;
 	const out = [`Model changes since ${d.ref}: ${d.added.length} added, ${d.changed.length} changed, ${d.removed.length} removed.`];
+	if (d.weakened.length) out.push(`Guards removed (${d.weakened.length}): review these before merging.`, ...d.weakened.map((w) => `! ${w}`), "");
 	for (const a of byKind(d.added, (x) => x.what)) out.push(`+ ${summary(a.what, a.facts)}${a.facts.change ? `  (change ${a.facts.change})` : ""}`);
 	for (const c of byKind(d.changed, (x) => x.what)) {
 		out.push(`~ ${c.what}`);
@@ -25529,6 +26068,15 @@ function contextPack(g, idx, root, task, opt = {}) {
 			lines.push(...block);
 		}
 		if (lines.length > 2) push(...lines);
+		const hold = mustHold(g, shown.map((n) => n.id));
+		if (hold.length) {
+			const head = [
+				"",
+				"## Must hold",
+				"Boundaries, who may call, where data may go, secrets and rules for these nodes. Check, approval and the gate refuse work that breaks the first four."
+			];
+			if (!push(...head, ...hold.slice(0, 40))) push(...head, ...hold.slice(0, 12), "  … \"armature impact <node>\" lists the rest.");
+		}
 	}
 	const shapeIds = /* @__PURE__ */ new Set();
 	for (const n of shown) for (const i of n.interfaces) for (const s of [...i.takes, ...i.gives]) shapeIds.add(s);
@@ -25594,78 +26142,125 @@ var BUILTIN = [
 	"**/generated/**",
 	"**/*.gen.*"
 ];
-function readYaml(file) {
+/**
+* The model files that carry guards, as paths inside the model folder: nodes (protect, client, never,
+* auth, only, requirements, and the globs that say which files a node owns), shapes (the tags the data
+* policy reads), system.yaml (the data policy, ignore, accept, the gate) and tech.yaml (the files a
+* technology places outside the gate).
+*/
+var GUARD_FILE = /^(?:nodes\/.+|shapes\/.+|system|tech)\.ya?ml$/;
+/** The Claude Code settings of the repo: where the hooks and the plugin are switched on. */
+var SETTINGS_FILE = /^\.claude\/settings(\.local)?\.json$/;
+function parseYaml(text) {
 	try {
-		const data = import_dist$1.parse(fs.readFileSync(file, "utf8"));
+		const data = import_dist$1.parse(text);
 		return data && typeof data === "object" ? data : {};
 	} catch {
 		return {};
 	}
 }
+function readYaml(file, overlay) {
+	const over = overlay?.get(file);
+	if (over === null) return {};
+	if (over !== void 0) return parseYaml(over);
+	try {
+		return parseYaml(fs.readFileSync(file, "utf8"));
+	} catch {
+		return {};
+	}
+}
+/** What a folder holds, with the overlay's files put in and the ones it removes taken out. */
+function listDir(dir, overlay) {
+	const out = /* @__PURE__ */ new Map();
+	try {
+		for (const e of fs.readdirSync(dir, { withFileTypes: true })) if (e.isFile() || e.isDirectory()) out.set(e.name, e.isFile());
+	} catch {}
+	for (const [p, text] of overlay ?? []) {
+		if (!p.startsWith(dir + path.sep)) continue;
+		const [first, ...rest] = p.slice(dir.length + 1).split(path.sep);
+		if (rest.length) {
+			if (text !== null && !out.has(first)) out.set(first, false);
+		} else if (text === null) out.delete(first);
+		else out.set(first, true);
+	}
+	return [...out].map(([name, file]) => ({
+		name,
+		file
+	}));
+}
 var list = (v) => (v === void 0 || v === null ? [] : Array.isArray(v) ? v : [v]).filter((x) => typeof x === "string");
-/** Who owns which paths, and which changes are approved. Read straight from the YAML. */
-function readOwnership(root) {
+/**
+* Who owns which paths, and which changes are approved. Read straight from the YAML.
+* With an overlay, read as the model would stand after an edit that has not been made yet.
+*/
+function readOwnership(root, overlay) {
 	const mdir = modelDir(root);
 	const arch = path.join(root, mdir);
-	const sys = readYaml(path.join(arch, "system.yaml"));
+	const sys = readYaml(path.join(arch, "system.yaml"), overlay);
 	const nodes = [];
-	const add = (id, data, inherited) => {
+	const add = (id, data, up) => {
 		const tag = typeof data.change === "string" ? {
 			id: data.change,
 			how: "add"
 		} : typeof data.modify === "string" ? {
 			id: data.modify,
 			how: "modify"
-		} : inherited;
+		} : up.tag;
+		const protect = data.protect === true || up.protect && data.protect !== false;
+		const client = data.client === true || up.client && data.client !== false;
 		nodes.push({
 			id,
 			code: matcher(list(data.code)),
 			tests: matcher(list(data.tests)),
 			change: tag?.id,
-			tag
+			tag,
+			protect,
+			client
 		});
-		return tag;
+		return {
+			tag,
+			protect,
+			client
+		};
 	};
 	let anyCode = false;
 	const walk = (dir, prefix, inherited) => {
-		let entries;
-		try {
-			entries = fs.readdirSync(dir, { withFileTypes: true });
-		} catch {
-			return;
-		}
+		const entries = listDir(dir, overlay);
 		const own = /* @__PURE__ */ new Map();
 		for (const e of entries) {
-			if (!e.isFile() || !/\.ya?ml$/.test(e.name) || e.name.startsWith("_")) continue;
+			if (!e.file || !/\.ya?ml$/.test(e.name) || e.name.startsWith("_")) continue;
 			const base = e.name.replace(/\.ya?ml$/, "");
-			const data = readYaml(path.join(dir, e.name));
+			const data = readYaml(path.join(dir, e.name), overlay);
 			if (list(data.code).length) anyCode = true;
 			own.set(base, add(prefix ? `${prefix}.${base}` : base, data, inherited));
 		}
 		for (const e of entries) {
-			if (!e.isDirectory()) continue;
+			if (e.file) continue;
 			const id = prefix ? `${prefix}.${e.name}` : e.name;
 			const sub = path.join(dir, e.name);
-			const groupFile = ["_group.yaml", "_group.yml"].map((n) => path.join(sub, n)).find((p) => fs.existsSync(p));
-			let tag = own.has(e.name) ? own.get(e.name) : inherited;
+			const inSub = listDir(sub, overlay);
+			const groupFile = ["_group.yaml", "_group.yml"].find((n) => inSub.some((x) => x.file && x.name === n));
+			let up = own.get(e.name) ?? inherited;
 			if (groupFile) {
-				const data = readYaml(groupFile);
+				const data = readYaml(path.join(sub, groupFile), overlay);
 				if (list(data.code).length) anyCode = true;
-				tag = add(id, data, inherited);
+				up = add(id, data, inherited);
 			}
-			walk(sub, id, tag);
+			walk(sub, id, up);
 		}
 	};
-	walk(path.join(arch, "nodes"), "", void 0);
+	walk(path.join(arch, "nodes"), "", {
+		tag: void 0,
+		protect: false,
+		client: false
+	});
 	nodes.sort((a, b) => b.id.split(".").length - a.id.split(".").length || a.id.localeCompare(b.id));
 	const changes = /* @__PURE__ */ new Map();
-	try {
-		for (const f of fs.readdirSync(path.join(arch, "changes"))) {
-			if (!/\.ya?ml$/.test(f)) continue;
-			changes.set(f.replace(/\.ya?ml$/, ""), String(readYaml(path.join(arch, "changes", f)).state ?? "proposed"));
-		}
-	} catch {}
-	const tech = readYaml(path.join(arch, "tech.yaml"));
+	for (const f of listDir(path.join(arch, "changes"), overlay)) {
+		if (!f.file || !/\.ya?ml$/.test(f.name)) continue;
+		changes.set(f.name.replace(/\.ya?ml$/, ""), String(readYaml(path.join(arch, "changes", f.name), overlay).state ?? "proposed"));
+	}
+	const tech = readYaml(path.join(arch, "tech.yaml"), overlay);
 	const techFiles = (Array.isArray(tech.tech) ? tech.tech : []).flatMap((t) => list(t?.files));
 	const ignored = (Array.isArray(sys.ignore) ? sys.ignore : []).map((x) => typeof x === "string" ? x : String(x?.path ?? "")).filter(Boolean);
 	return {
@@ -25757,6 +26352,10 @@ function writeGate(root, input) {
 		decision: "ask",
 		reason: `This moves ${from}, the record of which elements of a change a person approved. Without it, nothing holds a change to what was approved. Allow it only if you mean to remove that record.`
 	};
+	if (from && !from.startsWith("..") && fs.existsSync(path.resolve(root, from))) {
+		const gone = removalGate(root, [path.resolve(root, from)], "This moves");
+		if (gone) return gone;
+	}
 	const change = rel.startsWith(`${mdir}/changes/`) ? rel.slice(mdir.length + 9).match(/^([^/]+)\.ya?ml$/)?.[1] : void 0;
 	if (change) {
 		const was = before ? yamlValue(before, "state") || "proposed" : "";
@@ -25793,9 +26392,12 @@ function writeGate(root, input) {
 			decision: "ask",
 			reason: "This sets \"gate: off\" in system.yaml, which switches the planning gate off for everyone who works in this repo: new source files would no longer need a node or an approved change. Allow it only if that is what you want."
 		};
-		return null;
+		return after !== null ? weakenAsk(rel, modelWeakened(root, rel, before, after)) : null;
 	}
-	if (rel.startsWith(`${mdir}/`) || fs.existsSync(abs)) return null;
+	if (after !== null && rel.startsWith(`${mdir}/`) && GUARD_FILE.test(rel.slice(mdir.length + 1))) return weakenAsk(rel, modelWeakened(root, rel, before, after));
+	if (after !== null && SETTINGS_FILE.test(rel)) return weakenAsk(rel, weakened(rel, before, after));
+	if (rel.startsWith(`${mdir}/`)) return null;
+	if (fs.existsSync(abs)) return protectGate(root, rel);
 	if (!CODE_FILE.test(rel) || isTestPath(root, rel)) return null;
 	const own = readOwnership(root);
 	if (!own.on || own.placed(rel)) return null;
@@ -25833,6 +26435,213 @@ function writeGate(root, input) {
 	};
 	return null;
 }
+/**
+* An edit to an existing file of a protected node: allowed only under an approved change that adds
+* or alters the node (or one around it), as one of the elements the person approved.
+*/
+function protectGate(root, rel, own = readOwnership(root)) {
+	if (!CODE_FILE.test(rel) || isTestPath(root, rel) || !own.on) return null;
+	const owner = own.nodes.find((n) => n.code(rel));
+	if (!owner?.protect) return null;
+	const mdir = modelDir(root);
+	const tag = owner.tag;
+	const state = tag ? own.changes.get(tag.id) : void 0;
+	const plan = `Plan the edit as a change: ${mdir}/changes/<id>.yaml with "state: proposed", "modify: <id>" on "${owner.id}" (or on the node around it), and the plan in ${newPlanPath(docsDir(root), mdir)}. Then ask the person to approve it; do not approve it yourself.`;
+	if (!tag || state === void 0 || state === "done") return {
+		decision: "deny",
+		reason: `"${rel}" belongs to "${owner.id}", which is protected (protect: true): its files change only under an approved change that alters it, and none is open. ${plan}`
+	};
+	if (state !== "approved") return {
+		decision: "deny",
+		reason: `"${rel}" belongs to "${owner.id}", which is protected (protect: true). The change behind it, "${tag.id}", is ${state}: its files change only once a person approves it.${state === "proposed" ? " Ask the person to review and approve it." : ""}`
+	};
+	const rec = readApprovals(root)[tag.id];
+	const ids = owner.id.split(".").map((_, i, all) => all.slice(0, i + 1).join("."));
+	const listed = (e) => ids.some((id) => new RegExp(`^(?:add|modify) node ${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?: |$)`).test(e));
+	if (!rec || !(rec.elements ?? []).some(listed)) return {
+		decision: "deny",
+		reason: `"${rel}" belongs to "${owner.id}", which is protected (protect: true). Change "${tag.id}" is approved, but ${rec ? `the approval ${rec.by || "the person"} gave does not list the node` : "nothing records who approved it"}. Ask the person to approve it again ("armature approve ${tag.id}"); do not run that yourself.`
+	};
+	return null;
+}
+/** The node a file under nodes/ declares: nodes/a/b.yaml is a.b, nodes/a/_group.yaml is a. */
+function nodeIdOf(rel) {
+	return rel.replace(/^.*?\bnodes\//, "").replace(/\.ya?ml$/, "").replace(/\/_group$/, "").split("/").join(".");
+}
+/** True when a "files:" glob of a technology could place a source file: one that ends in a plain extension matches only files of that kind. */
+function mayHoldCode(glob) {
+	const ext = /\.[A-Za-z0-9]+$/.exec(glob.split("/").pop() ?? "");
+	return !ext || CODE_FILE.test(`x${ext[0]}`);
+}
+/** What one model or settings file guards, and what it lets through. */
+function guardsOfFile(rel, text, up = {
+	protect: false,
+	client: false
+}) {
+	const out = noGuards();
+	const { guards, allowances } = out;
+	if (!text.trim()) return out;
+	if (/\.json$/.test(rel)) {
+		let data = {};
+		try {
+			data = JSON.parse(text);
+		} catch {
+			return out;
+		}
+		for (const m of JSON.stringify(data?.hooks ?? {}).matchAll(/(?:armature|brain)\.mjs\\?"? hook ([\w-]+)/g)) guards.add(`hook ${m[1]}`);
+		for (const [k, on] of Object.entries(data?.enabledPlugins ?? {})) {
+			if (!/^armature@/.test(k)) continue;
+			if (on) guards.add(`plugin ${k}`);
+			else allowances.add(`plugin ${k} switched off`);
+		}
+		if (data?.disableAllHooks === true) allowances.add("disableAllHooks");
+		return out;
+	}
+	let data;
+	try {
+		data = import_dist$1.parse(text);
+	} catch {
+		return out;
+	}
+	if (!data || typeof data !== "object") return out;
+	const ofNode = (id, d, around) => {
+		if (!d || typeof d !== "object") return;
+		if (d.protect === true) guards.add(`protect ${id}`);
+		if (d.client === true) guards.add(`client ${id}`);
+		if (d.protect === false && around.protect) allowances.add(optOut("protect", id));
+		if (d.client === false && around.client) allowances.add(optOut("client", id));
+		for (const b of Array.isArray(d.never) ? d.never : []) {
+			const to = typeof b === "string" ? b : b?.to;
+			if (to) guards.add(`never ${id} -> ${to}`);
+		}
+		for (const i of [...Array.isArray(d.accepts) ? d.accepts : [], ...Array.isArray(d.holds) ? d.holds : []]) {
+			if (!i || typeof i !== "object" || !i.id) continue;
+			const ref = `${id}#${i.id}`;
+			if (i.auth !== void 0 && i.auth !== null) out.auth.set(ref, String(i.auth));
+			if (list(i.only).length) out.only.set(ref, list(i.only));
+		}
+		for (const q of Array.isArray(d.requirements) ? d.requirements : []) if (q?.id) guards.add(`requirement ${id}:${q.id}${q.kind === "security" ? " (security)" : ""}`);
+	};
+	if (/(^|\/)system\.ya?ml$/.test(rel)) {
+		for (const x of [...Array.isArray(data.actors) ? data.actors : [], ...Array.isArray(data.externals) ? data.externals : []]) if (x?.id) ofNode(String(x.id), x, {
+			protect: false,
+			client: false
+		});
+		for (const [t, p] of Object.entries(data.data && typeof data.data === "object" ? data.data : {})) {
+			guards.add(`data policy @${t}`);
+			for (const l of list(p?.leaves)) allowances.add(`@${t} may leave to ${l}`);
+		}
+		for (const x of Array.isArray(data.ignore) ? data.ignore : []) {
+			const p = typeof x === "string" ? x : x?.path;
+			if (p) allowances.add(`ignore ${p}`);
+		}
+		for (const a of Array.isArray(data.accept) ? data.accept : []) if (a?.code) allowances.add(`accept ${[
+			a.code,
+			a.ref,
+			a.file,
+			a.match ? `"${a.match}"` : ""
+		].filter(Boolean).join(" ")}`);
+		return out;
+	}
+	if (/(^|\/)tech\.ya?ml$/.test(rel)) {
+		for (const t of Array.isArray(data.tech) ? data.tech : []) for (const g of list(t?.files)) if (mayHoldCode(g)) allowances.add(`files of ${t?.id ?? "a technology"}: ${g}`);
+		return out;
+	}
+	if (/(^|\/)shapes\//.test(rel)) {
+		for (const [id, sh] of Object.entries(data)) for (const [name, spec] of Object.entries(sh?.fields && typeof sh.fields === "object" ? sh.fields : {})) for (const w of String(spec).trim().split(/\s+/).slice(1)) if (w.startsWith("@") && w !== "@planned") guards.add(tagGuard(w.slice(1), id, name));
+		return out;
+	}
+	ofNode(nodeIdOf(rel), data, up);
+	return out;
+}
+/** What an edit to a model or settings file takes away: guards it removes and allowances it adds. */
+function weakened(rel, before, after, up) {
+	return weakenedBetween(guardsOfFile(rel, before, up), guardsOfFile(rel, after, up));
+}
+/** What the node around a node file passes down to it: nodes/a/b.yaml sits inside a, when a is a node. */
+function inheritedBy(own, rel) {
+	const ids = nodeIdOf(rel).split(".");
+	for (let k = ids.length - 1; k > 0; k--) {
+		const around = own.nodes.find((n) => n.id === ids.slice(0, k).join("."));
+		if (around) return {
+			protect: around.protect,
+			client: around.client
+		};
+	}
+	return {
+		protect: false,
+		client: false
+	};
+}
+/**
+* What an edit to a model file takes away, read two ways: the guards the file itself declares, and
+* the existing source files that a protected node owns now and would not own afterwards. The second
+* catches what no single line shows: narrower "code:" globs, or another node whose globs take the files.
+*/
+function modelWeakened(root, rel, before, after) {
+	if (!/(^|\/)nodes\//.test(rel)) return weakened(rel, before, after);
+	const now = readOwnership(root);
+	const lost = weakened(rel, before, after, inheritedBy(now, rel));
+	const claim = (text) => {
+		const d = parseYaml(text);
+		return JSON.stringify([list(d.code), d.protect ?? null]);
+	};
+	const guarded = now.nodes.filter((n) => n.protect);
+	if (!now.on || !guarded.length || claim(before) === claim(after)) return lost;
+	const then = readOwnership(root, /* @__PURE__ */ new Map([[path.resolve(root, rel), after]]));
+	const held = (own, f) => own.on && !!own.nodes.find((n) => n.code(f))?.protect;
+	const out = readRepo(root).files.filter((f) => CODE_FILE.test(f) && guarded.some((n) => n.code(f)) && held(now, f) && !held(then, f) && !isTestPath(root, f));
+	if (out.length) lost.push(`no longer protected: ${out.slice(0, 3).join(", ")}${out.length > 3 ? `, and ${out.length - 3} more` : ""}`);
+	return lost;
+}
+/**
+* Taking a file or a folder away, by a move or a delete. Removing part of the model, or the settings
+* that switch the hooks on, asks the person; removing a file of a protected node is refused like an
+* edit of it. Returns null when nothing guarded goes.
+*/
+function removalGate(root, paths, doing, own) {
+	const mdir = modelDir(root);
+	const model = path.join(root, mdir);
+	const under = (p, dir) => p === dir || p.startsWith(dir + path.sep);
+	const rels = (p) => path.relative(root, p).replace(/\\/g, "/") || ".";
+	let ask = null;
+	for (const p of paths) {
+		const inModel = under(p, model) ? path.relative(model, p).replace(/\\/g, "/") : null;
+		if (under(model, p) || inModel !== null && /^(?:nodes|shapes|flows)(?:\/|$)|^(?:system|tech)\.ya?ml$/.test(inModel)) ask ??= {
+			decision: "ask",
+			reason: `${doing} ${rels(p)}, ${inModel === null ? "which holds" : "part of"} the architecture model under ${mdir}/. Removing a node, a shape or a flow removes the boundaries, auth, allow-lists, tags and requirements it carries. Allow it only if you mean to remove it ("armature rename" moves a node).`
+		};
+		if (inModel !== null) continue;
+		for (const name of [".claude/settings.json", ".claude/settings.local.json"]) {
+			const file = path.join(root, name);
+			if (!under(file, p) || !fs.existsSync(file)) continue;
+			const lost = weakened(name, fs.readFileSync(file, "utf8"), "");
+			if (lost.length) ask ??= weakenAsk(name, lost, `${doing} ${name}, which weakens`);
+		}
+		if (rels(p).startsWith("..")) continue;
+		const ownership = (own ?? (() => readOwnership(root)))();
+		if (!ownership.on || !ownership.nodes.some((n) => n.protect)) continue;
+		const rel = rels(p);
+		const isFile = fs.existsSync(p) && fs.statSync(p).isFile();
+		const match = /[*?[{]/.test(rel) ? matcher([rel]) : null;
+		const files = isFile ? [rel] : readRepo(root).files.filter((f) => match ? match(f) : rel === "." || f.startsWith(`${rel}/`));
+		for (const f of files) {
+			const verdict = protectGate(root, f, ownership);
+			if (verdict) return {
+				decision: "deny",
+				reason: `${doing} ${f}.\n${verdict.reason}`
+			};
+		}
+	}
+	return ask;
+}
+function weakenAsk(rel, lost, lead = `This edit to ${rel} weakens`) {
+	if (!lost.length) return null;
+	return {
+		decision: "ask",
+		reason: `${lead} what the architecture model guards:\n${lost.slice(0, 12).map((x) => `- ${x}`).join("\n")}${lost.length > 12 ? `\n- and ${lost.length - 12} more` : ""}\nRemoving a boundary, an auth, an allow-list, a requirement or a hook, or letting more data or files through, is a person's decision. Allow it only if you mean it.`
+	};
+}
 /** One line on what a change holds, for the question put to the person. Empty when it cannot be worked out. */
 function elementsNote(root, change) {
 	try {
@@ -25844,7 +26653,7 @@ function elementsNote(root, change) {
 				if (e.isDirectory()) {
 					if (e.name !== ".cache" && e.name !== "docs" && e.name !== "changes") scan(p);
 				} else if (/\.ya?ml$/.test(e.name)) {
-					const n = (fs.readFileSync(p, "utf8").match(new RegExp(`^\\s*(?:-\\s*)?(?:change|modify|retire):\\s*["']?${change}["']?\\s*$`, "gm")) ?? []).length;
+					const n = (fs.readFileSync(p, "utf8").match(new RegExp(`(?:^|[\\s{,])(?:change|modify|retire):\\s*["']?${change.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']?\\s*(?=[,}]|$)`, "gm")) ?? []).length;
 					if (n) hits.push(`${path.relative(path.join(root, mdir), p).replace(/\\/g, "/")} (${n})`);
 				}
 			}
@@ -25855,10 +26664,6 @@ function elementsNote(root, change) {
 		return "";
 	}
 }
-var ask = (reason) => ({
-	decision: "ask",
-	reason
-});
 /** Words of a shell command, with quoted strings kept whole. */
 function shellWords(text) {
 	return text.match(/"(?:[^"\\]|\\.)*"|'[^']*'|[^\s"']+(?:"(?:[^"\\]|\\.)*"|'[^']*')?/g) ?? [];
@@ -25914,7 +26719,9 @@ function shellTargets(command, cwd) {
 		const cmd = bare[0] === "git" && bare[1] === "mv" ? "mv" : bare[0] === "sudo" ? bare[1] : bare[0];
 		const args = bare.slice(bare[0] === "git" || bare[0] === "sudo" ? 2 : 1).filter((a) => !a.startsWith("-") && !/^\d?>/.test(a));
 		if (cmd === "touch" || cmd === "tee") args.forEach(add);
-		else if ((cmd === "cp" || cmd === "mv" || cmd === "install" || cmd === "ln") && args.length >= 2) {
+		else if ((cmd === "sed" || cmd === "perl" || cmd === "yq" || cmd === "truncate") && (cmd === "truncate" || bare.some((a) => /^-[A-Za-z]*i/.test(a) || a === "--in-place" || a === "--inplace"))) {
+			for (const a of bare.slice(1)) if (a && !a.startsWith("-") && fs.existsSync(path.resolve(dir, a)) && fs.statSync(path.resolve(dir, a)).isFile()) add(a);
+		} else if ((cmd === "cp" || cmd === "mv" || cmd === "install" || cmd === "ln") && args.length >= 2) {
 			const dest = args[args.length - 1];
 			const destAbs = shellPath(dir, dest);
 			if (dest.endsWith("/") || !!destAbs && fs.existsSync(destAbs) && fs.statSync(destAbs).isDirectory()) for (const src of args.slice(0, -1)) add(path.join(dest, path.basename(src)));
@@ -25924,6 +26731,46 @@ function shellTargets(command, cwd) {
 	return [...new Set(out)];
 }
 /**
+* Paths a shell command takes away, as far as a reading of it can tell: what rm, rmdir, unlink and
+* shred name (also behind sudo, git or xargs), and what mv moves from.
+*/
+function shellRemovals(command, cwd) {
+	const deleted = [];
+	const moved = [];
+	let dir = cwd;
+	for (const part of command.split(/&&|\|\||;|\n|\|/)) {
+		const bare = shellWords(part.trim().replace(/^[({]\s*/, "").replace(/\s*\)$/, "")).map(unquote);
+		if (!bare.length) continue;
+		if ((bare[0] === "cd" || bare[0] === "pushd") && bare[1]) {
+			dir = shellPath(dir, bare[1]) ?? dir;
+			continue;
+		}
+		const named = (words) => words.filter((a) => !a.startsWith("-") && !a.includes("$") && !/^\d?[<>]/.test(a)).map((a) => shellPath(dir, a)).filter((x) => !!x);
+		let at = 0;
+		while (at < bare.length && (/^(?:sudo|command|exec|time|nice|nohup|env)$/.test(bare[at]) || /^[A-Za-z_]\w*=/.test(bare[at]))) at++;
+		if (bare[at] === "git") at++;
+		else if (bare[at] === "xargs") {
+			at++;
+			while (at < bare.length && bare[at].startsWith("-")) at += /^-[InPLsdE]$/.test(bare[at]) ? 2 : 1;
+		} else if (bare[at] === "find") {
+			const exec = bare.findIndex((w) => w === "-exec" || w === "-execdir" || w === "-ok");
+			if (bare.includes("-delete") || exec >= 0 && /^(?:rm|rmdir|unlink|shred)$/.test(bare[exec + 1] ?? "")) {
+				const where = bare.slice(at + 1);
+				const end = where.findIndex((w) => /^[-(!]/.test(w));
+				deleted.push(...named(end < 0 ? where : where.slice(0, end)));
+			}
+			continue;
+		}
+		const cmd = bare[at] ?? "";
+		if (/^(?:rm|rmdir|unlink|shred)$/.test(cmd)) deleted.push(...named(bare.slice(at + 1)));
+		else if (cmd === "mv") moved.push(...named(bare.slice(at + 1)).slice(0, -1));
+	}
+	return {
+		deleted,
+		moved
+	};
+}
+/**
 * Decides whether a shell command may run: the same rules as a write, for what a command plainly
 * does. Reading a command is not parsing a shell; a script that writes files gets past this, and
 * the checker reports what it left behind.
@@ -25931,7 +26778,14 @@ function shellTargets(command, cwd) {
 function bashGate(root, command, cwd = root) {
 	if (!command || !command.trim()) return null;
 	const mdir = modelDir(root);
-	if (/(?:\barmature(?:\.mjs)?|\b(?:dist|src)\/cli\.(?:mjs|js|ts))["']?\s+(?:--root\s+\S+\s+)?approve\b/.test(command)) return ask("This runs \"armature approve\", which records that a person approved a change. Approving a change is your decision: allow it only if you have reviewed the plan and want it built.");
+	let question = null;
+	const ask = (reason) => {
+		question ??= {
+			decision: "ask",
+			reason
+		};
+	};
+	if (/(?:\barmature(?:\.mjs)?|\b(?:dist|src)\/cli\.(?:mjs|js|ts))["']?\s+(?:--root\s+\S+\s+)?approve\b/.test(command)) ask("This runs \"armature approve\", which records that a person approved a change. Approving a change is your decision: allow it only if you have reviewed the plan and want it built.");
 	const writes = /(?:^|[^<>&|\d-])>{1,2}(?!&)|\b(?:sed|perl)\b[^|;&\n]*\s(?:-[A-Za-z]*i|--in-place)|\btee\b|\b(?:mv|cp|rm|truncate|dd|install|sponge)\b|\byq\b[^|;&\n]*\s(?:-i|--inplace)|\bawk\b[^|;&\n]*\s-i\s*inplace|\b(?:python3?|node|ruby|deno|bun|tsx)\b/.test(command);
 	const named = writes ? shellPaths(command, cwd).map((p) => path.relative(root, p).replace(/\\/g, "/")) : [];
 	const isRecord = (rel) => {
@@ -25940,11 +26794,33 @@ function bashGate(root, command, cwd = root) {
 		return !!name && !name.includes("/") && (/\.ya?ml$/.test(name) || /[*?[{]/.test(name));
 	};
 	const touched = named.find(isRecord) ?? new RegExp(`${mdir}/(?:changes/[^\\s'"]+\\.ya?ml|${"approvals.lock.json".replace(/\./g, "\\.")})`).exec(command)?.[0];
-	if (touched && writes) return ask(`This command writes to ${touched}. Approving a change, and the record of what was approved, are a person's decisions: allow it only if you know what it changes there.`);
+	if (touched && writes) ask(`This command writes to ${touched}. Approving a change, and the record of what was approved, are a person's decisions: allow it only if you know what it changes there.`);
 	const system = named.includes(`${mdir}/system.yaml`) || new RegExp(`${mdir}/system\\.ya?ml`).test(command);
-	if (writes && system && /\bgate["']?\s*[:=]\s*["']?off\b/.test(command) && gateOn(root)) return ask("This command sets \"gate: off\" in system.yaml, which switches the planning gate off for everyone who works in this repo. Allow it only if that is what you want.");
+	if (writes && system && /\bgate["']?\s*[:=]\s*["']?off\b/.test(command) && gateOn(root)) ask("This command sets \"gate: off\" in system.yaml, which switches the planning gate off for everyone who works in this repo. Allow it only if that is what you want.");
+	let held = null;
+	const own = () => held ??= readOwnership(root);
+	const gone = shellRemovals(command, cwd);
+	for (const [paths, doing] of [[gone.deleted, "This command deletes"], [gone.moved, "This command moves"]]) {
+		const verdict = paths.length ? removalGate(root, paths, doing, own) : null;
+		if (verdict?.decision === "deny") return verdict;
+		if (verdict) question ??= verdict;
+	}
+	const modelFile = new RegExp(`(?:^|[\\s'"/])${mdir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/(?:nodes/[^\\s'"]+|system|tech|shapes/[^\\s'"]+|flows/[^\\s'"]+)\\.ya?ml`);
+	if (/\b(?:git\s+)?rm\b/.test(command) && modelFile.test(command)) ask(`This command deletes part of the architecture model under ${mdir}/. Removing a node, a shape or a flow can remove the boundaries, auth and requirements it carries. Allow it only if you mean to remove it ("armature rename" moves a node).`);
 	for (const target of shellTargets(command, cwd)) {
-		if (fs.existsSync(target)) continue;
+		const rel = path.relative(root, target).replace(/\\/g, "/");
+		if (rel.startsWith(`${mdir}/`) && GUARD_FILE.test(rel.slice(mdir.length + 1)) || SETTINGS_FILE.test(rel)) return {
+			decision: "deny",
+			reason: `This command writes ${rel} from the shell, where the gate cannot see what it adds or takes away. Make the edit with the file tools (Edit or Write) instead${/\/nodes\//.test(rel) ? "; \"armature rename\" moves or renames a node" : ""}.`
+		};
+		if (fs.existsSync(target)) {
+			const verdict = protectGate(root, rel, own());
+			if (verdict) return {
+				decision: "deny",
+				reason: `This command would change ${rel}.\n${verdict.reason}`
+			};
+			continue;
+		}
 		const verdict = writeGate(root, {
 			file_path: target,
 			content: ""
@@ -25954,7 +26830,7 @@ function bashGate(root, command, cwd = root) {
 			reason: `This command would create ${path.relative(root, target).replace(/\\/g, "/")}.\n${verdict.reason}`
 		};
 	}
-	return null;
+	return question;
 }
 /** The body of the "Model change" section of a plan, or null when the plan has none. */
 function modelChangeSection(plan) {
@@ -26006,11 +26882,16 @@ Make writing those model files the first step of the plan, before any code. Run 
 /** What to tell an agent that has just entered plan mode. */
 function planModeNote(dir = MODEL_DIR, planPath = newPlanPath(`${dir}/docs`, dir)) {
 	return `You are planning. In this repo a plan is a change to the architecture model in ${dir}/:\n1. Run "armature context" for the task and "armature impact <ref>" on every node, interface and shape the work touches.
-2. Give the plan a "Model change" section: the change id, new nodes with their "code:" globs, new or changed interfaces, links, shapes, flows and requirements, and the plan document ${planPath}. If the work changes none of these, write "None" and why.\n3. Make the first step after approval writing those files: the planned elements tagged "change: <id>" (or "modify: <id>" for what exists and changes), the plan document with a header (kind: plan, change: <id>), and ${dir}/changes/<id>.yaml with "state: proposed". Run "armature check". Then set "state: approved" as the last edit: the person is asked to confirm it, and what the change holds at that moment is what they approve. Code comes after.\nThe armature-design skill has the format. A plan without the "Model change" section is sent back.`;
+2. Give the plan a "Model change" section: the change id, new nodes with their "code:" globs, new or changed interfaces, links, shapes, flows and requirements, and the plan document ${planPath}. If the work changes none of these, write "None" and why.\n3. Make the first step after approval writing those files: the planned elements tagged "change: <id>" (or "modify: <id>" for what exists and changes), the plan document with a header (kind: plan, change: <id>), and ${dir}/changes/<id>.yaml with "state: proposed". Run "armature check". Then set "state: approved" as the last edit: the person is asked to confirm it, and what the change holds at that moment is what they approve. Code comes after.\n4. Keep what must hold in view: "armature impact <node>" lists boundaries, auth, allow-lists, data policy, secrets and rules. If the work adds an entry point, sends tagged data out of the system or needs a credential, run "armature surface" and the armature-threat skill, and put the answers in the model: "auth:" and "only:" on interfaces, "secrets:" on nodes, a requirement of kind security for each entry point that reaches sensitive data.
+The armature-design skill has the format. A plan without the "Model change" section is sent back, and approval is refused while the change has security errors.`;
+}
+/** One line for every later plan in a session: the full note was given once, and the rules have not changed. */
+function planReminder(dir = MODEL_DIR) {
+	return `Planning again: the plan needs its "Model change" section (or "None" and why), planned elements go in ${dir}/ as a proposed change before any code, and "armature impact <node>" lists what must hold.`;
 }
 /** A shorter pointer for a prompt that asks for a plan or a design outside plan mode. */
 function planningNote(dir = MODEL_DIR, planPath = newPlanPath(`${dir}/docs`, dir)) {
-	return `This prompt asks for a plan or a design. In this repo that is a change in the architecture model, not a loose document: follow the armature-design skill (${dir}/changes/<id>.yaml with "state: proposed", planned elements tagged with it, and the plan in ${planPath}), run "armature check", then ask the person to review it in "armature view" before any code.`;
+	return `This prompt asks for a plan or a design. In this repo that is a change in the architecture model, not a loose document: follow the armature-design skill (${dir}/changes/<id>.yaml with "state: proposed", planned elements tagged with it, and the plan in ${planPath}), run "armature check", then ask the person to review it in "armature view" before any code. Check "armature impact <node>" for what must hold, and "armature surface" if the work adds an entry point, sends tagged data out or needs a credential.`;
 }
 var PLANNING_WORDS = /\b(plan|design|propose|proposal|architect|architecture for|spec out|roadmap)\b/i;
 // src/agent.ts
@@ -26140,6 +27021,29 @@ function once(root, name, key) {
 	fs.writeFileSync(marker, [...seen.slice(-50), key].join("\n"));
 	return true;
 }
+/** Forgets that a session was told something, so it is told again (after the context was compacted). */
+function forget(root, names, key) {
+	for (const name of names) {
+		const marker = path.join(root, modelDir(root), ".cache", name);
+		try {
+			fs.writeFileSync(marker, fs.readFileSync(marker, "utf8").split("\n").filter((x) => x && x !== key).join("\n"));
+		} catch {}
+	}
+}
+/** The permission mode a session had at its last prompt, and records the one it has now. */
+function lastMode(root, sid, now) {
+	const marker = path.join(root, modelDir(root), ".cache", "session-modes.json");
+	let modes = {};
+	try {
+		modes = JSON.parse(fs.readFileSync(marker, "utf8"));
+	} catch {}
+	const was = modes[sid];
+	modes[sid] = now;
+	const keep = Object.fromEntries(Object.entries(modes).slice(-50));
+	fs.mkdirSync(path.dirname(marker), { recursive: true });
+	fs.writeFileSync(marker, JSON.stringify(keep));
+	return was;
+}
 /** Answers a PreToolUse hook: "deny" sends the reason back to the agent, "ask" puts it in front of the person. */
 function decide(decision, reason) {
 	process.stdout.write(`${JSON.stringify({ hookSpecificOutput: {
@@ -26155,7 +27059,16 @@ async function hook(name, rootFlag) {
 	try {
 		if (name === "session-start") {
 			await buildCodeIndex(root).catch(() => void 0);
-			process.stdout.write(`${orient(compile$1(root))}\n`);
+			const out = [orient(compile$1(root))];
+			if (input.source === "compact" || input.source === "clear") {
+				forget(root, [
+					"prompted-sessions",
+					"plan-sessions",
+					"planning-sessions"
+				], String(input.session_id ?? ""));
+				if (gateOn(root)) out.push(`The conversation was compacted. ${planReminder(modelDir(root))}`);
+			}
+			process.stdout.write(`${out.join("\n\n")}\n`);
 			return;
 		}
 		if (name === "prompt") {
@@ -26168,19 +27081,33 @@ async function hook(name, rootFlag) {
 				const idx = readCodeIndex(root);
 				if (idx) out.push(contextText(compile$1(root), idx, root, prompt, { budget: 5e3 }));
 			}
+			const mode = String(input.permission_mode ?? "default");
+			const was = lastMode(root, sid, mode);
 			if (gateOn(root)) {
-				if (input.permission_mode === "plan") {
+				if (mode === "plan") {
 					if (once(root, "plan-sessions", sid)) out.push(planModeNote(modelDir(root), newPlanPath(docsDir(root), modelDir(root))));
-				} else if (PLANNING_WORDS.test(prompt) && once(root, "planning-sessions", sid)) out.push(planningNote(modelDir(root), newPlanPath(docsDir(root), modelDir(root))));
+					else if (was !== "plan") out.push(planReminder(modelDir(root)));
+				} else if (PLANNING_WORDS.test(prompt)) {
+					if (once(root, "planning-sessions", sid)) out.push(planningNote(modelDir(root), newPlanPath(docsDir(root), modelDir(root))));
+					else out.push(planReminder(modelDir(root)));
+				}
 			}
 			if (out.length) process.stdout.write(`${out.join("\n\n")}\n`);
 			return;
 		}
 		if (name === "pre-write") {
 			const verdict = writeGate(root, input.tool_input ?? {});
-			if (verdict?.approves) notePendingApproval(root, verdict.approves, callKey(input.tool_input));
-			else dropPendingApproval(root);
+			dropPendingApproval(root);
 			if (!verdict) return;
+			if (verdict.approves) {
+				const sec = changeSecurity(compile$1(root), verdict.approves);
+				if (sec.errors.length) {
+					decide("deny", `Change "${verdict.approves}" cannot be put up for approval while it has security errors. Fix them in the model first:\n${sec.errors.map((e) => `- ${e.code}: ${e.message}`).join("\n")}`);
+					return;
+				}
+				verdict.reason += `\n${sec.lines.length ? `What it does to security:\n${sec.lines.join("\n")}` : "It adds no entry point, sends no sensitive data out of the system and holds no secret."}`;
+				notePendingApproval(root, verdict.approves, callKey(input.tool_input));
+			}
 			decide(verdict.decision, verdict.reason);
 			return;
 		}
@@ -42500,6 +43427,10 @@ async function runMcp(rootFlag) {
 		description: "Where a data shape is held and where it goes: stores, interfaces, links, and the outside systems it leaves to. Give a Shape name, or a field tag such as @pii to follow every field that carries it.",
 		inputSchema: { what: string() }
 	}, async ({ what }) => run((root) => traceText(compile(root), what))());
+	server.registerTool("surface", {
+		description: "The security surface: entry points (interfaces an actor, an outside system or a client reaches) with their auth and the sensitive data behind them, tagged data leaving the system, secrets and protected nodes. Give a change id to see only what that change adds. Use it while planning work that adds an entry point, sends data out or needs a credential.",
+		inputSchema: { change: string().optional() }
+	}, async ({ change }) => run((root) => surfaceText(compile(root), change))());
 	server.registerTool("diff", {
 		description: "What the model declares now against a git ref (a commit, branch or tag; default HEAD): nodes, interfaces, links, shapes and fields, flows, requirements and changes that were added, changed or removed. Use it to review what a branch does to the architecture.",
 		inputSchema: { ref: string().optional() }
@@ -42626,6 +43557,8 @@ Reading
   armature impact <ref> [--depth n]   What depends on a node, interface, link or shape, and what lies further along the data
   armature path <node> <node>      How data gets from one node to another along the declared links
   armature trace <Shape|@tag>      Where a shape, or every field tagged @pii, is held and where it leaves the system
+  armature surface [change]        Entry points and their auth, sensitive data leaving the system, secrets;
+                                with a change, only what that change adds
   armature diff [git-ref] [--json] What the model declares now against a commit or branch (default HEAD)
   armature status                  Counts per status, changes, todos
   armature docs [ref] [--loose]    Plans and documents about a node, shape, flow or change, or the whole library;
@@ -42786,6 +43719,12 @@ async function main() {
 			if (!args[1]) return fail("Usage: armature path <node> <node>");
 			console.log(pathText(compile$1(root), args[0], args[1]));
 			return;
+		case "surface": {
+			await buildCodeIndex(root);
+			const g = compile$1(root);
+			console.log(surfaceText(g, args[0]));
+			return;
+		}
 		case "trace":
 			if (!args[0]) return fail("Usage: armature trace <Shape|@tag>");
 			await buildCodeIndex(root);

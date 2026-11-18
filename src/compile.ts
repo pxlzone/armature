@@ -5,6 +5,7 @@ import { Ajv, type ValidateFunction } from 'ajv';
 import YAML from 'yaml';
 import picomatch from 'picomatch';
 import type {
+  DataPolicy,
   Activity, ActivityItem, Boundary, Change, CodeDep, Coverage, Deployment, DetectorCoverage, DocInfo, Edge, Flow, FlowStep, GNode, Graph, Interface, NodeKind, Problem, Requirement, Rule, Shape, Snapshot, Status, Tech, Verb,
 } from './types.js';
 import { warningGroup } from './types.js';
@@ -19,6 +20,7 @@ import { DEFAULT_COMPOSE, looseDockerCommands, readCompose } from './deploy.js';
 import { reach } from './reach.js';
 import { cleanDocsSetting, hasModel, LEGACY_DIR, MODEL_DIR, modelDir, readApprovals } from './paths.js';
 import { findNode, nodeProblem, resolveRef, type RefIndex } from './refs.js';
+import { isSecretName, securityFindings, type SecurityView } from './security.js';
 
 export { APPROVALS_FILE, LEGACY_DIR, MODEL_DIR, modelDir, readApprovals } from './paths.js';
 export const LOCK_FILE = 'shapes.lock.json';
@@ -273,6 +275,10 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       modify: d.modify,
       retire: d.retire,
       never: [],
+      client: d.client === true,
+      protect: d.protect === true,
+      secrets: toArr<any>(d.secrets).map((x) => (typeof x === 'string' ? x : String(x?.name ?? ''))).filter(Boolean),
+      env: [],
       status: 'built',
       statusWhy: '',
       coverage: null,
@@ -475,6 +481,18 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
 
   // ---- interfaces, requirements, rules ------------------------------------
   const ifaces = new Map<string, Interface>();
+  // `only:` names nodes; a name that resolves to nothing is an error, like any other reference.
+  const onlyOf = (v: unknown, ref: string): { only?: string[] } => {
+    const names = toArr<any>(v as any).map(String);
+    if (!names.length) return {};
+    const only: string[] = [];
+    for (const x of names) {
+      const id = resolveNode(x);
+      if (id) only.push(id);
+      else err('reference', `${ref} only "${x}": ${nodeProblem(ids, x)}`, ref);
+    }
+    return { only };
+  };
   const reqs = new Map<string, Requirement>();
   for (const n of nodes.values()) {
     const d = rawById.get(n.id)!.data;
@@ -496,6 +514,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
         id: a.id, ref, node: n.id, holds: false, via: a.via, route: a.route, queue: a.queue,
         takes: shapeList(a.takes, ref, n.source), gives: shapeList(a.gives, ref, n.source),
         dlq: a.dlq, note: a.note, change: a.change, modify: a.modify, retire: a.retire, status: 'built', evidence: 'unchecked',
+        ...(a.auth !== undefined ? { auth: String(a.auth) } : {}), ...onlyOf(a.only, ref),
       });
     }
     for (const h of toArr<any>(d.holds)) {
@@ -505,6 +524,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       add({
         id: o.id, ref, node: n.id, holds: true, takes: shapeList(o.shape, ref, n.source), gives: [],
         note: o.note, change: o.change, modify: o.modify, retire: o.retire, status: 'built', evidence: 'unchecked',
+        ...onlyOf(o.only, ref),
       });
     }
     for (const r of toArr<any>(d.requirements)) {
@@ -513,7 +533,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       if (reqs.has(ref)) err('duplicate', `Requirement "${ref}" is declared more than once.`, ref, n.source);
       checkChange(r.change, ref, n.source);
       checkChange(r.modify, ref, n.source);
-      const q: Requirement = { id: r.id, ref, node: n.id, text: r.text ?? '', change: r.change, modify: r.modify, tests: toArr<string>(r.tests), match: toArr<string>(r.match), covers: toArr<string>(r.covers), state: 'unverified', evidence: [] };
+      const q: Requirement = { id: r.id, ref, node: n.id, text: r.text ?? '', ...(r.kind === 'security' ? { kind: 'security' as const } : {}), change: r.change, modify: r.modify, tests: toArr<string>(r.tests), match: toArr<string>(r.match), covers: toArr<string>(r.covers), state: 'unverified', evidence: [] };
       reqs.set(ref, q);
       n.requirements.push(q);
     }
@@ -539,6 +559,23 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     }
     if (own.length) ownNever.set(n.id, own);
     n.never = [...(n.parent ? nodes.get(n.parent)!.never : []), ...own];
+    // Code on the user's device, and code that needs an approved change to edit: both pass to children.
+    const parent = n.parent ? nodes.get(n.parent) : undefined;
+    if (parent?.client && rawById.get(n.id)!.data.client !== false) n.client = true;
+    if (parent?.protect && rawById.get(n.id)!.data.protect !== false) n.protect = true;
+  }
+  // Where tagged data may leave the system: `data:` in system.yaml, each tag with the nodes it may go to.
+  const dataPolicy: DataPolicy = {};
+  if (sys.data && typeof sys.data === 'object') {
+    for (const [tag, rule] of Object.entries<any>(sys.data)) {
+      const leaves: string[] = [];
+      for (const x of toArr<any>(rule?.leaves).map(String)) {
+        const id = resolveNode(x);
+        if (id) leaves.push(id);
+        else err('reference', `data: @${tag} may leave to "${x}": ${nodeProblem(ids, x)}`, undefined, `${mdir}/system.yaml`);
+      }
+      dataPolicy[tag.replace(/^@/, '')] = { leaves };
+    }
   }
 
   // ---- links --------------------------------------------------------------
@@ -1059,6 +1096,18 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       if (!id) continue;
       for (const n of [id, ...ancestors(id)]) byNode.set(n, [...(byNode.get(n) ?? []), f.path]);
     }
+    // Environment reads: kept where the name looks like a credential or the node declares it.
+    for (const f of Object.values(cidx.files)) {
+      if (f.test) continue;
+      const id = owner.get(f.path);
+      if (!id) continue;
+      const n = nodes.get(id)!;
+      const declared = new Set([id, ...ancestors(id)].flatMap((x) => nodes.get(x)?.secrets ?? []));
+      for (const h of f.hints ?? []) {
+        if (h.k !== 'env' || n.env.length >= 60) continue;
+        if (isSecretName(h.v) || declared.has(h.v)) n.env.push({ name: h.v, file: f.path, line: h.l });
+      }
+    }
     for (const [id, paths] of byNode) {
       const list = paths.map((pth) => cidx.files[pth]);
       const pkgs = new Map<string, number>();
@@ -1504,6 +1553,13 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     }
   }
 
+  // ---- security: entry points, data leaving the system, who may link, secrets --------------
+  const securityView: SecurityView = { nodes: [...nodes.values()], edges, shapes: [...shapes.values()], changes: [...changes.values()], system: { data: dataPolicy } };
+  for (const f of securityFindings(securityView)) {
+    if (f.level === 'error') err(f.code, f.message, f.ref, f.file);
+    else warn(f.code, f.message, f.ref, f.file);
+  }
+
   // ---- accepted warnings: looked at by the team and kept, each with a reason ------------
   let accepted = 0;
   const accepts = toArr<any>(sys.accept).filter((a) => a && typeof a === 'object' && typeof a.code === 'string');
@@ -1546,6 +1602,10 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       hasRemote: repo.hasRemote,
       branch: repo.branch,
       reports: { junit: junitFiles.length, lcov: lcovFiles.length, ...(newestReport ? { at: new Date(newestReport).toISOString() } : {}) },
+      data: dataPolicy,
+      ignore: ignoreEntries.map((x) => (x.why ? x : { path: x.path })),
+      accepts: accepts.map((a) => ({ code: a.code, ...(a.ref ? { ref: String(a.ref) } : {}), ...(a.file ? { file: String(a.file) } : {}), ...(a.match ? { match: String(a.match) } : {}), ...(a.why ? { why: String(a.why) } : {}) })),
+      gate: sys.gate !== 'off',
     },
     nodes: order,
     edges,

@@ -223,7 +223,8 @@ describe('shell commands', () => {
     expect(bashGate(root, `sed -i '' s/proposed/approved/ ${change}`)).toMatchObject({ decision: 'ask' });
     expect(bashGate(root, 'armature approve mail')).toMatchObject({ decision: 'ask' });
     expect(bashGate(root, 'node /x/bin/armature.mjs approve mail')).toMatchObject({ decision: 'ask' });
-    expect(bashGate(root, 'echo "gate: off" >> armature/system.yaml')).toMatchObject({ decision: 'ask' });
+    // system.yaml is written with the file tools, where the person is asked about "gate: off" with the edit in view.
+    expect(bashGate(root, 'echo "gate: off" >> armature/system.yaml')).toMatchObject({ decision: 'deny' });
     // Reading, testing and committing are left alone.
     for (const cmd of ['git status', `cat ${change}`, 'armature check && armature show mail', 'npm test > /tmp/out.txt 2>&1', `git add ${change} && git commit -m "plan"`]) {
       expect(bashGate(root, cmd), cmd).toBeNull();
@@ -242,9 +243,11 @@ describe('shell commands', () => {
     expect(bashGate(root, 'sed --in-place s/proposed/approved/ armature/changes/mail.yaml')).toMatchObject({ decision: 'ask' });
     expect(bashGate(root, 'node /plugins/armature/dist/cli.mjs approve mail')).toMatchObject({ decision: 'ask' });
     expect(bashGate(root, 'npx tsx src/cli.ts approve mail')).toMatchObject({ decision: 'ask' });
-    // "gate: off" as an assignment.
-    expect(bashGate(root, `yq -i '.gate = "off"' armature/system.yaml`)).toMatchObject({ decision: 'ask' });
-    expect(bashGate(root, "cd armature && yq --inplace '.gate=\"off\"' system.yaml")).toMatchObject({ decision: 'ask' });
+    // "gate: off" as an assignment: an in-place edit of system.yaml is refused, and a command the gate
+    // cannot place a target for still asks.
+    expect(bashGate(root, `yq -i '.gate = "off"' armature/system.yaml`)).toMatchObject({ decision: 'deny' });
+    expect(bashGate(root, "cd armature && yq --inplace '.gate=\"off\"' system.yaml")).toMatchObject({ decision: 'deny' });
+    expect(bashGate(root, `python3 -c "open('armature/system.yaml','a').write('gate: off')"`)).toMatchObject({ decision: 'ask' });
     // Reading from inside the model folder, and other commands of the CLI, are left alone.
     for (const cmd of ['cat changes/mail.yaml && ls nodes', 'grep -rn state changes/']) expect(bashGate(root, cmd, inModel), cmd).toBeNull();
     for (const cmd of ['node dist/cli.js check', "yq '.gate' armature/system.yaml"]) expect(bashGate(root, cmd), cmd).toBeNull();
