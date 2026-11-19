@@ -381,6 +381,27 @@ export function mustHold(v: SecurityView & { system: { data: DataPolicy } }, ids
   return out;
 }
 
+/**
+ * Ways in that the declared entry points leave out, for the nodes `pick` takes: routes the code
+ * serves and no interface declares, and interfaces with a route that no actor, outside system or
+ * client is linked to. Either may be a door the model does not show, so the surface says so.
+ */
+export function unlistedRoutes(v: SecurityView, pick: (n: GNode) => boolean, listed: Set<string>): string[] {
+  const out: string[] = [];
+  const inCode = v.nodes.filter(pick).flatMap((n) => (n.runtime?.undeclared ?? []).filter((u) => u.kind === 'route').map((u) => ({ n, u })));
+  if (inCode.length) {
+    out.push(`Routes the code serves that the model does not declare (${inCode.length}): no auth is stated for them and nothing above covers them`);
+    for (const { n, u } of inCode.slice(0, 40)) out.push(`  ${n.id}: ${u.what}${u.file ? `  ${u.file}:${u.line}` : ''}`);
+    if (inCode.length > 40) out.push(`  … ${inCode.length - 40} more: "armature drift"`);
+  }
+  const quiet = v.nodes.filter((n) => pick(n) && !isCaller(n)).flatMap((n) => n.interfaces.filter((i) => i.route && !i.holds && !listed.has(i.ref)));
+  if (quiet.length) {
+    out.push(`Interfaces with a route and no caller from outside declared (${quiet.length}): not counted as entry points. Link the actor or client that calls each, or it stays out of the checks`);
+    for (const i of quiet.slice(0, 40)) out.push(`  ${i.ref} ${i.route}: auth ${i.auth ?? 'NOT STATED'}`);
+  }
+  return out;
+}
+
 /** Entry points, data leaving, secrets and protected nodes, for the whole system or one change. */
 export function surfaceText(v: SecurityView, change?: string): string {
   const out: string[] = [];
@@ -390,6 +411,9 @@ export function surfaceText(v: SecurityView, change?: string): string {
     const { lines, errors } = changeSecurity(v, change);
     out.push(`Security surface of change ${change} (${c.state}):`);
     out.push(...(lines.length ? lines : ['  It adds no entry point, sends no sensitive data out of the system and holds no secret.']));
+    const mine = (n: GNode): boolean => c.nodes.some((id) => inside(n.id, id)) || v.nodes.some((x) => (x.change === change || x.modify === change) && inside(n.id, x.id));
+    out.push(...unlistedRoutes(v, mine, new Set(entryPoints(v).map((ep) => ep.iface.ref))));
+    if (!v.nodes.some((n) => n.runtime)) out.push('No node has been compared with its code (no code index, or nothing it recognises), so routes that exist only in the code are not listed.');
     if (errors.length) out.push('Errors:', ...errors.map((e) => `  ${e.code}: ${e.message}`));
     return out.join('\n');
   }
@@ -400,6 +424,8 @@ export function surfaceText(v: SecurityView, change?: string): string {
     out.push(`    from ${ep.callers.join(', ')}${ep.reaches.size ? `; reaches ${tagList(ep.reaches)}` : '; reaches no tagged data'}`);
     if (ep.reaches.size) out.push(`    ${ep.requirements.length ? `proven by ${ep.requirements.map((q) => `${q.ref} [${q.state}]`).join(', ')}` : 'no security requirement covers it'}`);
   }
+  const unlisted = unlistedRoutes(v, () => true, new Set(entries.map((ep) => ep.iface.ref)));
+  if (unlisted.length) out.push('', ...unlisted);
   const exits = dataExits(v);
   out.push('', `Sensitive data leaving the system (${exits.length} link${exits.length === 1 ? '' : 's'})`);
   for (const x of exits) out.push(`  ${x.edge.owner} ${x.edge.verb} ${x.edge.iface ?? x.edge.to}: ${tagList(x.tags)} -> ${x.to}${x.denied.length ? `  NOT ALLOWED (@${x.denied.join(', @')})` : ''}`);

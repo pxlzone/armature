@@ -427,12 +427,16 @@ describe('the language', () => {
 describe('warnings a team has looked at', () => {
   it('drops an accepted warning, counts it, and notices when the entry goes stale', () => {
     expect(codes(compile(root))).toContain('no-requirement');
-    fs.appendFileSync(path.join(root, 'armature/system.yaml'), 'accept:\n  - code: no-requirement\n    ref: billing\n    why: The worker is a thin wrapper; the API tests cover it.\n  - code: runtime-drift\n    ref: api\n');
+    fs.appendFileSync(path.join(root, 'armature/system.yaml'), 'accept:\n  - code: no-requirement\n    ref: billing\n    why: The worker is a thin wrapper; the API tests cover it.\n  - code: no-code\n    ref: api\n  - code: runtime-drift\n    ref: api\n    why: The detector misreads a string.\n');
     const g = compile(root);
     expect(messages(g, 'no-requirement')).toEqual([]);
     expect(g.accepted).toBe(1);
-    expect(messages(g, 'stale-accept')[0]).toContain('runtime-drift api');
-    expect(messages(g, 'accept-reason')[0]).toContain('runtime-drift api');
+    expect(messages(g, 'stale-accept')[0]).toContain('no-code api');
+    expect(messages(g, 'accept-reason')[0]).toContain('no-code api');
+    // Drift is read from the code index. This run has none, so that entry is unseen, not stale.
+    expect(g.code).toBeNull();
+    expect(messages(g, 'stale-accept')[0]).not.toContain('runtime-drift');
+    expect(g.system.idleAccepts).toEqual([1]);
   });
 
   it('never drops a warning that says a change went past its approval', () => {

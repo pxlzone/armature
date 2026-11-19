@@ -593,9 +593,16 @@ ${fetch}
         # request; warnings where it is only incomplete show as notices.
         # While the team adopts the model, uncomment the next line to report without blocking.
         # continue-on-error: true
-        # To stop the model from getting worse, commit a baseline ("armature check --update-baseline")
-        # and add: --new --fail-on wrong
-        run: node .armature/plugin/bin/armature.mjs check --annotate
+        # On a pull request only what it adds is shown: the same check runs on the base branch and
+        # warnings that were already there are left out. A new warning where the model is wrong
+        # (code the model does not declare, a finished change with no test) fails the job;
+        # remove "--fail-on wrong" to report without failing.
+        run: |
+          if [ "\${{ github.event_name }}" = "pull_request" ]; then
+            node .armature/plugin/bin/armature.mjs check --annotate --since "origin/\${{ github.base_ref }}" --fail-on wrong
+          else
+            node .armature/plugin/bin/armature.mjs check --annotate
+          fi
       - name: Rule files match the model
         run: node .armature/plugin/bin/armature.mjs sync-rules --check
       - name: What this pull request changes in the model
