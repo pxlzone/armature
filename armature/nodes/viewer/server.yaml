@@ -2,6 +2,7 @@ kind: service
 role: serves graph and documents
 tech: [node]
 code: [src/server.ts]
+tests: [test/review.test.ts]
 
 accepts:
   - id: graph
@@ -16,6 +17,13 @@ accepts:
     gives: MarkdownText
     auth: local
     note: One Markdown file of the repo, by path. Nothing outside the repo and nothing that is not Markdown.
+  - id: approve
+    via: http
+    route: POST /approve
+    takes: ApproveRequest
+    gives: Answer
+    auth: local
+    note: Approves one change for the person looking at the page. Needs the token the server put in that page, and its own host and origin. The one thing the viewer writes.
   - id: serve
     via: in-process
     takes: Command
@@ -25,7 +33,15 @@ reads: [project.model#documents]
 calls:
   - to: core.compiler#compile
   - to: core.code-graph#index
+  - to: core.model-tools#edit
+    note: approveChange, for the approve request only.
 
 todos:
-  - text: No test covers the server or the static export.
+  - text: No test covers the server's read routes or the static export.
     kind: debt
+
+requirements:
+  - id: approve-only-from-page
+    text: A change is approved only by a request that carries the page's token from the server's own host and origin.
+    tests: test/review.test.ts
+    match: refuses a request that does not come from the page the server gave out

@@ -483,6 +483,16 @@ export interface Change {
   /** Who approved which elements, from approvals.lock.json. Null when nothing is recorded. */
   approval: { by: string; at: string; added: string[]; removed: string[] } | null;
   progress: { total: number; built: number; reqTotal: number; reqVerified: number };
+  /** What the change does to security, for the person reviewing it. Set by the viewer server and the export, on changes that wait for approval. */
+  security?: { lines: string[]; errors: string[] };
+}
+
+/** Why a change waits for a person: never approved, altered since it was approved, or approved with no record of it. Null when it does not wait. */
+export function awaitingApproval(c: Change): 'proposed' | 'scope-changed' | 'unrecorded' | null {
+  if (c.state === 'proposed') return 'proposed';
+  if (c.state !== 'approved') return null;
+  if (!c.approval) return 'unrecorded';
+  return c.approval.added.length || c.approval.removed.length ? 'scope-changed' : null;
 }
 
 /** Warnings fall in two groups: the model says something the code contradicts, or the model leaves something out. */

@@ -262,7 +262,7 @@ export function writeGate(root: string, input: WriteInput): GateDecision | null 
   // Moving the approval record away removes it as surely as editing it.
   const from = typeof input.source === 'string' ? path.relative(root, path.resolve(root, input.source)).replace(/\\/g, '/') : '';
   if (from === `${mdir}/${APPROVALS_FILE}`) {
-    return { decision: 'ask', reason: `This moves ${from}, the record of which elements of a change a person approved. Without it, nothing holds a change to what was approved. Allow it only if you mean to remove that record.` };
+    return { decision: 'ask', reason: `This moves ${from}, the record of what a person approved. Allow it only to remove that record.` };
   }
   // So does moving any other file: a protected file is taken out of its node, a model file takes its guards with it.
   if (from && !from.startsWith('..') && fs.existsSync(path.resolve(root, from))) {
@@ -274,7 +274,7 @@ export function writeGate(root: string, input: WriteInput): GateDecision | null 
   if (change) {
     const was = before ? yamlValue(before, 'state') || 'proposed' : '';
     if (blind && was !== 'approved' && was !== 'done') {
-      return { decision: 'ask', approves: change, reason: `This writes change "${change}" in a way the gate cannot read, so it may set it to approved. Approving a change is a person's decision: allow it only if you know what this write puts in the file.${elementsNote(root, change)}` };
+      return { decision: 'ask', approves: change, reason: `This writes change "${change}" in a way the gate cannot read, so it may approve it.${elementsNote(root, change)}` };
     }
     // Without the result, go by what the write adds: "state: approved", or the bare word replacing another.
     const added = writtenText(input);
@@ -284,28 +284,28 @@ export function writeGate(root: string, input: WriteInput): GateDecision | null 
       return {
         decision: 'ask',
         approves: change,
-        reason: `This sets change "${change}" to approved. Approving a change is a person's decision: allow it only if you have reviewed the plan (armature view, Work lens) and want it built.${elementsNote(root, change)}`,
+        reason: `This approves change "${change}". Allow it only if you reviewed the plan and want it built.${elementsNote(root, change)}`,
       };
     }
     if (now === 'done' && was !== 'approved' && was !== 'done') {
       return {
         decision: 'ask',
-        reason: `This sets change "${change}" to done, and it was never approved (it is ${was || 'new'}). Marking unapproved work as finished is a person's decision: allow it only if you want this change counted as built.`,
+        reason: `This marks change "${change}" done, and it was never approved (it is ${was || 'new'}).`,
       };
     }
     return null;
   }
   if (rel === `${mdir}/${APPROVALS_FILE}`) {
-    return { decision: 'ask', reason: `${rel} records which elements of a change a person approved. It is written by "armature approve <change>", not by hand. Allow this edit only if you mean to change that record.` };
+    return { decision: 'ask', reason: `This edits ${rel}, the record of what a person approved. "armature approve" writes it, not a hand.` };
   }
   if (rel === `${mdir}/system.yaml`) {
     const was = yamlValue(before, 'gate');
     if (blind && was !== 'off') {
-      return { decision: 'ask', reason: `This writes ${rel} in a way the gate cannot read, so it may set "gate: off" and switch the planning gate off for everyone who works in this repo. Allow it only if you know what this write puts in the file.` };
+      return { decision: 'ask', reason: `This writes ${rel} in a way the gate cannot read, so it may switch the planning gate off.` };
     }
     const now = after !== null ? yamlValue(after, 'gate') : /^\s*gate:\s*["']?off\b/m.test(writtenText(input)) ? 'off' : was;
     if (now === 'off' && was !== 'off') {
-      return { decision: 'ask', reason: 'This sets "gate: off" in system.yaml, which switches the planning gate off for everyone who works in this repo: new source files would no longer need a node or an approved change. Allow it only if that is what you want.' };
+      return { decision: 'ask', reason: 'This sets "gate: off": the planning gate goes off for everyone who works in this repo.' };
     }
     return after !== null ? weakenAsk(rel, modelWeakened(root, rel, before, after)) : null;
   }
@@ -560,7 +560,7 @@ function removalGate(root: string, paths: string[], doing: string, own?: () => O
     // The model, or part of it that carries guards: the whole folder, a folder of nodes, shapes or flows, or one of their files.
     const inModel = under(p, model) ? path.relative(model, p).replace(/\\/g, '/') : null;
     if (under(model, p) || (inModel !== null && /^(?:nodes|shapes|flows)(?:\/|$)|^(?:system|tech)\.ya?ml$/.test(inModel))) {
-      ask ??= { decision: 'ask', reason: `${doing} ${rels(p)}, ${inModel === null ? 'which holds' : 'part of'} the architecture model under ${mdir}/. Removing a node, a shape or a flow removes the boundaries, auth, allow-lists, tags and requirements it carries. Allow it only if you mean to remove it ("armature rename" moves a node).` };
+      ask ??= { decision: 'ask', reason: `${doing} ${rels(p)}, ${inModel === null ? 'which holds' : 'part of'} the architecture model. The boundaries, auth and requirements it carries go with it.` };
     }
     // Nothing else is kept inside the model folder. A folder around it may hold the rest as well.
     if (inModel !== null) continue;
@@ -586,13 +586,15 @@ function removalGate(root: string, paths: string[], doing: string, own?: () => O
   return ask;
 }
 
+/** How many lost guards a question lists: the permission prompt is a small window, and the rest is cut off. */
+const ASK_ITEMS = 5;
+
 function weakenAsk(rel: string, lost: string[], lead = `This edit to ${rel} weakens`): GateDecision | null {
   if (!lost.length) return null;
   return {
     decision: 'ask',
     reason:
-      `${lead} what the architecture model guards:\n${lost.slice(0, 12).map((x) => `- ${x}`).join('\n')}${lost.length > 12 ? `\n- and ${lost.length - 12} more` : ''}\n` +
-      'Removing a boundary, an auth, an allow-list, a requirement or a hook, or letting more data or files through, is a person\'s decision. Allow it only if you mean it.',
+      `${lead} what the model guards:\n${lost.slice(0, ASK_ITEMS).map((x) => `- ${x}`).join('\n')}${lost.length > ASK_ITEMS ? `\n- and ${lost.length - ASK_ITEMS} more` : ''}`,
   };
 }
 
@@ -614,8 +616,8 @@ function elementsNote(root: string, change: string): string {
     };
     scan(path.join(root, mdir));
     return hits.length
-      ? ` It tags ${hits.slice(0, 8).join(', ')}${hits.length > 8 ? `, and ${hits.length - 8} more files` : ''}; "armature show ${change}" lists every element.`
-      : ' Nothing is tagged with it yet, so there is nothing to review: the planned elements should be written first.';
+      ? ` "armature show ${change}" lists what it holds (${hits.length} ${hits.length === 1 ? 'file' : 'files'}).`
+      : ' Nothing is tagged with it yet, so there is nothing to review.';
   } catch {
     return '';
   }
@@ -753,7 +755,11 @@ export function bashGate(root: string, command: string, cwd: string = root): Gat
   };
   // The command by its name, or the CLI file the launcher loads, run directly.
   if (/(?:\barmature(?:\.mjs)?|\b(?:dist|src)\/cli\.(?:mjs|js|ts))["']?\s+(?:--root\s+\S+\s+)?approve\b/.test(command)) {
-    ask('This runs "armature approve", which records that a person approved a change. Approving a change is your decision: allow it only if you have reviewed the plan and want it built.');
+    ask('This runs "armature approve". Allow it only if you reviewed the plan and want it built.');
+  }
+  // The viewer approves for the person looking at it; a command that calls it approves in their place.
+  if (/(?:\blocalhost|\b127\.0\.0\.1|\[::1\]|\b0\.0\.0\.0)(?::\d+)?\/approve\b|x-armature-token|__ARMATURE_APPROVE__/i.test(command)) {
+    ask('This calls the viewer to approve a change. Allow it only if you reviewed the plan and want it built.');
   }
   const writes =
     /(?:^|[^<>&|\d-])>{1,2}(?!&)|\b(?:sed|perl)\b[^|;&\n]*\s(?:-[A-Za-z]*i|--in-place)|\btee\b|\b(?:mv|cp|rm|truncate|dd|install|sponge)\b|\byq\b[^|;&\n]*\s(?:-i|--inplace)|\bawk\b[^|;&\n]*\s-i\s*inplace|\b(?:python3?|node|ruby|deno|bun|tsx)\b/.test(command);
@@ -766,12 +772,12 @@ export function bashGate(root: string, command: string, cwd: string = root): Gat
   };
   const touched = named.find(isRecord) ?? new RegExp(`${mdir}/(?:changes/[^\\s'"]+\\.ya?ml|${APPROVALS_FILE.replace(/\./g, '\\.')})`).exec(command)?.[0];
   if (touched && writes) {
-    ask(`This command writes to ${touched}. Approving a change, and the record of what was approved, are a person's decisions: allow it only if you know what it changes there.`);
+    ask(`This command writes to ${touched}, which records what a person approved.`);
   }
   const system = named.includes(`${mdir}/system.yaml`) || new RegExp(`${mdir}/system\\.ya?ml`).test(command);
   // As YAML ("gate: off") or as an assignment a tool such as yq takes (.gate = "off").
   if (writes && system && /\bgate["']?\s*[:=]\s*["']?off\b/.test(command) && gateOn(root)) {
-    ask('This command sets "gate: off" in system.yaml, which switches the planning gate off for everyone who works in this repo. Allow it only if that is what you want.');
+    ask('This command sets "gate: off": the planning gate goes off for everyone who works in this repo.');
   }
   // The model as it stands, read once and only if something needs it.
   let held: Ownership | null = null;
@@ -786,7 +792,7 @@ export function bashGate(root: string, command: string, cwd: string = root): Gat
   // A delete the reading above did not place (behind a tool it does not know), by the model file it names.
   const modelFile = new RegExp(`(?:^|[\\s'"/])${mdir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/(?:nodes/[^\\s'"]+|system|tech|shapes/[^\\s'"]+|flows/[^\\s'"]+)\\.ya?ml`);
   if (/\b(?:git\s+)?rm\b/.test(command) && modelFile.test(command)) {
-    ask(`This command deletes part of the architecture model under ${mdir}/. Removing a node, a shape or a flow can remove the boundaries, auth and requirements it carries. Allow it only if you mean to remove it ("armature rename" moves a node).`);
+    ask(`This command deletes part of the architecture model under ${mdir}/, with the boundaries, auth and requirements it carries.`);
   }
   for (const target of shellTargets(command, cwd)) {
     const rel = path.relative(root, target).replace(/\\/g, '/');

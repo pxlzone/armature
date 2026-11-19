@@ -8,14 +8,15 @@ client: true
 accepts:
   - id: diagram
     via: http
-    note: The page a person opens. Read-only; people ask the agent to change the model.
+    note: The page a person opens. It changes nothing but the approval of a change; for the rest, people ask the agent.
 
 calls:
   - to: viewer.server#graph
   - to: viewer.server#doc
+  - to: viewer.server#approve
 
 rules:
-  - The viewer never edits the model.
+  - The viewer never edits the model, except to approve a change when a person clicks Approve.
   - Status must not rely on colour alone.
   - Raw HTML in a document is shown as text, never run.
 

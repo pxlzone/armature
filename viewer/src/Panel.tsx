@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ActivityItem, Change, Coverage, Edge, GNode, Graph, Interface, Problem, Requirement, Shape } from '../../src/types.ts';
-import { GROUP_TITLE, WARNING_INFO } from '../../src/types.ts';
+import { GROUP_TITLE, WARNING_INFO, awaitingApproval } from '../../src/types.ts';
+import { ReviewPanel, WAIT_LABEL, type ApproveFn } from './Review.tsx';
 import type { Index, View } from './view.ts';
 import { DocsBlock, Library } from './Docs.tsx';
 import type { Lens, Selection } from './App.tsx';
@@ -31,6 +32,7 @@ interface Props {
   pickShape: (id: string) => void;
   changeId: string | null;
   setChange: (id: string | null) => void;
+  approve: ApproveFn | null;
   isInside: (id: string, anc: string) => boolean;
   docPath: string | null;
   openDoc: (p: string) => void;
@@ -343,6 +345,8 @@ export function Panel(p: Props) {
     );
   }
 
+  if (lens === 'review') return <ReviewPanel graph={graph} changeId={p.changeId} setChange={p.setChange} openDoc={p.openDoc} approve={p.approve} />;
+
   if (lens === 'work') {
     const rankOf = { high: 0, medium: 1, low: 2 } as const;
     const allTodos = graph.nodes.flatMap((n) => n.todos).filter((t) => p.focus === null || p.isInside(t.node, p.focus));
@@ -356,7 +360,7 @@ export function Panel(p: Props) {
     return (
       <aside className="panel">
         <h2>Work</h2>
-        <p className="muted small">A change groups planned elements. Pick one to light it up. A person approves a change before an agent implements it.</p>
+        <p className="muted small">A change groups planned elements. Pick one to light it up. A person approves a change before an agent implements it, in the To approve tab.</p>
         {graph.changes.length === 0 && <p>No changes yet. Add one under {graph.system.dir}/changes/.</p>}
         {graph.changes.map((c) => <ChangeRow key={c.id} c={c} on={c.id === p.changeId} onClick={() => p.setChange(c.id === p.changeId ? null : c.id)} onRead={c.doc && graph.docs.some((d) => d.path === c.doc) ? () => p.openDoc(c.doc as string) : undefined} />)}
         <h3>Open pull requests</h3>
@@ -562,11 +566,12 @@ function ChangeRow({ c, on, onClick, onRead }: { c: Change; on: boolean; onClick
   const pr = c.progress;
   const total = pr.total + pr.reqTotal;
   const done = pr.built + pr.reqVerified;
+  const wait = awaitingApproval(c);
   return (
-    <button className={`row ${on ? 'on' : ''}`} onClick={onClick}>
+    <button className={`row ${on ? 'on' : ''}${wait ? ' need' : ''}`} onClick={onClick}>
       <div className="t">{c.title}</div>
       <div className="s">
-        <Pill kind={c.state} />{' '}
+        <Pill kind={c.state} />{' '}{wait && <><Pill kind="need">{WAIT_LABEL[wait]}</Pill>{' '}</>}
         {pr.total > 0 && `${pr.built}/${pr.total} nodes have code`}{pr.total > 0 && pr.reqTotal > 0 && ' · '}{pr.reqTotal > 0 && `${pr.reqVerified}/${pr.reqTotal} requirements verified`}
       </div>
       {total > 0 && <div className="bar"><div style={{ width: `${(done / total) * 100}%` }} /></div>}
