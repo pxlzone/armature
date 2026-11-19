@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Edge, Graph, GNode, Shape } from '../../src/types.ts';
+import { pendingChanges, type ApproveFn } from './Review.tsx';
 import { buildView, dataDirection, indexGraph, isInside, pathOf, visibleFor, HEADER, HUB_H, HUB_W, TILE, type VEdge, type View, type VNode } from './view.ts';
 import { Panel } from './Panel.tsx';
 import { colorOf, iconOf } from './icons.tsx';
 import { Reader, docsFor } from './Docs.tsx';
 import { SettingsButton, SettingsDialog, changedFromDefault, loadSettings, saveSettings, type ViewSettings } from './Settings.tsx';
 
-export type Lens = 'structure' | 'flow' | 'data' | 'tests' | 'work' | 'docs' | 'activity' | 'code' | 'rules';
+export type Lens = 'structure' | 'flow' | 'data' | 'tests' | 'work' | 'review' | 'docs' | 'activity' | 'code' | 'rules';
 export type Selection = { type: 'node' | 'edge'; id: string } | null;
 
 const LENSES: Array<[Lens, string]> = [
-  ['structure', 'Structure'], ['flow', 'Flow'], ['data', 'Data'], ['tests', 'Tests'], ['work', 'Work'], ['docs', 'Docs'], ['activity', 'Activity'], ['code', 'Code'], ['rules', 'Rules'],
+  ['structure', 'Structure'], ['flow', 'Flow'], ['data', 'Data'], ['tests', 'Tests'], ['work', 'Work'], ['review', 'To approve'], ['docs', 'Docs'], ['activity', 'Activity'], ['code', 'Code'], ['rules', 'Rules'],
 ];
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 4;
@@ -21,6 +22,8 @@ const DIM = 0.15;
 declare global {
   interface Window {
     __ARMATURE_GRAPH__?: Graph | null;
+    /** Set by the live server only: lets this page ask it to approve a change. */
+    __ARMATURE_APPROVE__?: string;
   }
 }
 
@@ -111,6 +114,18 @@ export function App() {
       })
       .catch((e) => setError(String(e)));
   }, []);
+
+  // Approving goes through the server that gave out this page. A saved copy has no server and no key.
+  const approve = useMemo<ApproveFn | null>(() => {
+    const key = window.__ARMATURE_APPROVE__;
+    if (!key) return null;
+    return async (id) => {
+      const res = await fetch('/approve', { method: 'POST', headers: { 'content-type': 'application/json', 'x-armature-token': key }, body: JSON.stringify({ id }) });
+      const out = (await res.json()) as { ok: boolean; message: string };
+      if (out.ok) load();
+      return out;
+    };
+  }, [load]);
 
   useEffect(() => {
     if (window.__ARMATURE_GRAPH__) return;
@@ -287,7 +302,7 @@ export function App() {
       for (const l of d.links) addNode(l.node);
       return { nodes, edges };
     }
-    if (lens === 'work' && changeId) {
+    if ((lens === 'work' || lens === 'review') && changeId) {
       const c = graph.changes.find((x) => x.id === changeId);
       if (!c) return null;
       for (const id of c.edges) addEdge(id);
@@ -473,6 +488,10 @@ export function App() {
   const warnings = graph.problems.length - errors;
   const wrongCount = graph.problems.filter((p) => p.level === 'warning' && p.group === 'wrong').length;
   const incompleteCount = warnings - wrongCount;
+  // Plans nobody has approved yet stand out on the map in every lens.
+  const pending = pendingChanges(graph);
+  const pendingNodes = pending.flatMap((c) => c.nodes);
+  const toApprove = (id: string): boolean => pendingNodes.some((x) => isInside(x, id) || isInside(id, x));
   const headline = lens === 'flow' && flow ? flow.headline : focusNode ? focusNode.description ?? focusNode.role : graph.system.headline;
   const plannedCount = graph.nodes.filter((n) => n.children.length === 0 && n.status === 'planned').length;
 
@@ -690,6 +709,7 @@ export function App() {
             </g>
           </g>
           {badge && <g transform={`translate(${v.w / 2} 0) scale(${hb})`}><Badge x={0} y={0} text={badge} /></g>}
+          {pendingNodes.includes(v.id) && <g transform={`translate(${v.w / 2} ${v.h}) scale(${hb})`}><Tag x={0} y={0} text="to approve" warn /></g>}
         </g>
       </g>
     );
@@ -707,9 +727,10 @@ export function App() {
     const planned = st === 'planned';
     const building = st === 'building';
     const unused = n.unused;
-    const stroke = unused ? 'var(--ink-3)' : st === 'failing' ? 'var(--red)' : st === 'stale' ? 'var(--amber)' : selected ? 'var(--ink)' : strong ? 'var(--accent)' : st === 'verified' ? 'var(--ok)' : planned || building ? 'var(--ink-3)' : 'var(--line-2)';
+    const waiting = toApprove(v.id);
+    const stroke = unused ? 'var(--ink-3)' : st === 'failing' ? 'var(--red)' : st === 'stale' ? 'var(--amber)' : selected ? 'var(--ink)' : waiting ? 'var(--amber)' : strong ? 'var(--accent)' : st === 'verified' ? 'var(--ok)' : planned || building ? 'var(--ink-3)' : 'var(--line-2)';
     const dash = planned || building ? '6 5' : undefined;
-    const sw = st === 'verified' || st === 'failing' || st === 'stale' || selected || strong ? 2.2 : 1.4;
+    const sw = waiting || st === 'verified' || st === 'failing' || st === 'stale' || selected || strong ? 2.2 : 1.4;
     let fill = unused ? 'var(--unused)' : planned ? 'var(--canvas)' : building ? 'url(#hatch)' : 'var(--tile)';
     if (lens === 'activity' && !planned) {
       const heat = Math.sqrt(activityCount(n, activityType).total / maxActivity);
@@ -745,9 +766,10 @@ export function App() {
               ))}
             </>
           )}
-          {planned && <Tag x={w / 2} y={h} text="planned" />}
-          {unused && <Tag x={w / 2} y={h} text="unused" />}
-          {building && <Tag x={w / 2} y={h} text="building" accent />}
+          {waiting && <Tag x={w / 2} y={h} text="to approve" warn />}
+          {!waiting && planned && <Tag x={w / 2} y={h} text="planned" />}
+          {!waiting && unused && <Tag x={w / 2} y={h} text="unused" />}
+          {!waiting && building && <Tag x={w / 2} y={h} text="building" accent />}
           {st === 'verified' && <StatusDot x={w - 3} color="var(--ok)" glyph="✓" />}
           {st === 'failing' && <StatusDot x={w - 3} color="var(--red)" glyph="!" />}
           {st === 'stale' && <StatusDot x={w - 3} color="var(--amber)" glyph="≠" />}
@@ -796,6 +818,7 @@ export function App() {
             {LENSES.map(([id, label]) => (
               <button key={id} role="tab" aria-selected={lens === id} className={lens === id ? 'on' : ''} onClick={() => { if (id !== lens) clearPicks(); setLens(id); setShowProblems(false); setSel(null); }}>
                 {label}
+                {id === 'review' && pending.length > 0 && <span className="count" aria-label={`${pending.length} waiting`}>{pending.length}</span>}
               </button>
             ))}
           </div>
@@ -924,6 +947,7 @@ export function App() {
             <span><i className="lg" />Built</span>
             <span><i className="lg building" />Building</span>
             <span><i className="lg planned" />Planned</span>
+            {pending.length > 0 && <span><i className="lg need" />To approve</span>}
             <span><i className="lg unused" />Unused (dead code)</span>
             <span><i className="lg stale" />Stale</span>
             <span><i className="lg failing" />Failing</span>
@@ -954,6 +978,7 @@ export function App() {
           pickShape={(id) => { setLens('data'); setShapeId(id); setSel(null); setShowProblems(false); }}
           changeId={changeId}
           setChange={setChangeId}
+          approve={approve}
           activityType={activityType}
           setActivityType={setActivityType}
           isInside={isInside}
@@ -974,10 +999,10 @@ function StatusDot({ x, color, glyph }: { x: number; color: string; glyph: strin
   );
 }
 
-function Tag({ x, y, text, accent }: { x: number; y: number; text: string; accent?: boolean }) {
+function Tag({ x, y, text, accent, warn }: { x: number; y: number; text: string; accent?: boolean; warn?: boolean }) {
   const w = text.length * 5.6 + 12;
   return (
-    <g transform={`translate(${x} ${y})`} className={accent ? 'tagchip accent' : 'tagchip'}>
+    <g transform={`translate(${x} ${y})`} className={warn ? 'tagchip warn' : accent ? 'tagchip accent' : 'tagchip'}>
       <rect x={-w / 2} y={-7} width={w} height={14} rx={7} />
       <text textAnchor="middle" dominantBaseline="central" y={0.5}>{text}</text>
     </g>

@@ -26,6 +26,11 @@ Prompt:
   fields:
     text: string
 
+ApproveRequest:
+  note: The change a person approved in the viewer.
+  fields:
+    id: string
+
 MarkdownText:
   note: One document of the repo, as written.
   fields:

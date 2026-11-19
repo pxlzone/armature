@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import os from "node:os";
 import http from "node:http";
 import process$1 from "node:process";
@@ -15294,6 +15294,13 @@ var DOC_KINDS = [
 	"research",
 	"note"
 ];
+/** Why a change waits for a person: never approved, altered since it was approved, or approved with no record of it. Null when it does not wait. */
+function awaitingApproval(c) {
+	if (c.state === "proposed") return "proposed";
+	if (c.state !== "approved") return null;
+	if (!c.approval) return "unrecorded";
+	return c.approval.added.length || c.approval.removed.length ? "scope-changed" : null;
+}
 /** What each warning code means, and which group it belongs to. Data only, shared with the viewer. */
 var WARNING_INFO = {
 	"runtime-drift": {
@@ -25517,15 +25524,66 @@ function viewerHtml() {
 	if (!fs.existsSync(file)) throw new Error("The viewer is not built yet. Run \"npm run build\" in the Armature repo folder.");
 	return fs.readFileSync(file, "utf8");
 }
-function embed(html, graph) {
+function embed(html, graph, token) {
 	const data = graph ? JSON.stringify(graph).replace(/</g, "\\u003c") : "null";
-	return html.replace("</head>", `<script>window.__ARMATURE_GRAPH__=${data};<\/script></head>`);
+	const key = token ? `window.__ARMATURE_APPROVE__=${JSON.stringify(token)};` : "";
+	return html.replace("</head>", `<script>window.__ARMATURE_GRAPH__=${data};${key}<\/script></head>`);
+}
+/** Adds, to each change that waits for approval, what it does to security: the person reads it before they approve. */
+function forReview(graph) {
+	for (const c of graph.changes) {
+		if (!awaitingApproval(c)) continue;
+		const sec = changeSecurity(graph, c.id);
+		c.security = {
+			lines: sec.lines,
+			errors: sec.errors.map((e) => `${e.code}: ${e.message}`)
+		};
+	}
+	return graph;
+}
+/**
+* Approves a change for the person looking at the viewer. Refused unless the request comes from the
+* page this server gave out: its own host and origin, and the token only that page holds.
+*/
+function approveFromPage(root, token, req, body) {
+	const host = req.headers.host ?? "";
+	const origin = req.headers.origin;
+	const sent = Buffer.from(String(req.headers["x-armature-token"] ?? ""));
+	if (!/^(?:localhost|127\.0\.0\.1):\d+$/.test(host) || origin !== void 0 && origin !== `http://${host}` || sent.length !== token.length || !timingSafeEqual(sent, Buffer.from(token))) return {
+		status: 403,
+		ok: false,
+		message: "Approving is done from the viewer page, by a person."
+	};
+	let id;
+	try {
+		id = JSON.parse(body).id;
+	} catch {
+		id = void 0;
+	}
+	if (typeof id !== "string" || !/^[\w.-]+$/.test(id)) return {
+		status: 400,
+		ok: false,
+		message: "No change named."
+	};
+	const sec = changeSecurity(compile$1(root), id);
+	if (sec.errors.length) return {
+		status: 409,
+		ok: false,
+		message: `Change "${id}" cannot be approved while it has security errors:\n${sec.errors.map((e) => `- ${e.code}: ${e.message}`).join("\n")}`
+	};
+	const message = approveChange(root, id);
+	const ok = message.startsWith("Approved change");
+	return {
+		status: ok ? 200 : 409,
+		ok,
+		message
+	};
 }
 function exportHtml(root, out, github) {
-	const graph = compile$1(root, {
+	const graph = forReview(compile$1(root, {
 		github,
 		activity: true
-	});
+	}));
 	graph.root = path.basename(root);
 	graph.docTexts = {};
 	let total = 0;
@@ -25543,14 +25601,15 @@ function exportHtml(root, out, github) {
 function serve(root, port, github) {
 	viewerHtml();
 	const clients = /* @__PURE__ */ new Set();
+	const token = randomBytes(24).toString("hex");
 	const server = http.createServer((req, res) => {
 		const url = (req.url ?? "/").split("?")[0];
 		if (url === "/graph.json") {
 			try {
-				const graph = compile$1(root, {
+				const graph = forReview(compile$1(root, {
 					github,
 					activity: true
-				});
+				}));
 				res.writeHead(200, {
 					"content-type": "application/json",
 					"cache-control": "no-store"
@@ -25560,6 +25619,39 @@ function serve(root, port, github) {
 				res.writeHead(500, { "content-type": "application/json" });
 				res.end(JSON.stringify({ error: String(e?.message ?? e) }));
 			}
+			return;
+		}
+		if (url === "/approve") {
+			if (req.method !== "POST") {
+				res.writeHead(405, { allow: "POST" });
+				res.end();
+				return;
+			}
+			let body = "";
+			req.on("data", (chunk) => {
+				body += chunk;
+				if (body.length > 4096) req.destroy();
+			});
+			req.on("end", () => {
+				let out;
+				try {
+					out = approveFromPage(root, token, req, body);
+				} catch (e) {
+					out = {
+						status: 500,
+						ok: false,
+						message: String(e?.message ?? e)
+					};
+				}
+				res.writeHead(out.status, {
+					"content-type": "application/json",
+					"cache-control": "no-store"
+				});
+				res.end(JSON.stringify({
+					ok: out.ok,
+					message: out.message
+				}));
+			});
 			return;
 		}
 		if (url === "/doc") {
@@ -25587,7 +25679,7 @@ function serve(root, port, github) {
 				"content-type": "text/html; charset=utf-8",
 				"cache-control": "no-store"
 			});
-			res.end(embed(viewerHtml(), null));
+			res.end(embed(viewerHtml(), null, token));
 			return;
 		}
 		res.writeHead(404);
@@ -26329,7 +26421,7 @@ function writeGate(root, input) {
 	const from = typeof input.source === "string" ? path.relative(root, path.resolve(root, input.source)).replace(/\\/g, "/") : "";
 	if (from === `${mdir}/approvals.lock.json`) return {
 		decision: "ask",
-		reason: `This moves ${from}, the record of which elements of a change a person approved. Without it, nothing holds a change to what was approved. Allow it only if you mean to remove that record.`
+		reason: `This moves ${from}, the record of what a person approved. Allow it only to remove that record.`
 	};
 	if (from && !from.startsWith("..") && fs.existsSync(path.resolve(root, from))) {
 		const gone = removalGate(root, [path.resolve(root, from)], "This moves");
@@ -26341,7 +26433,7 @@ function writeGate(root, input) {
 		if (blind && was !== "approved" && was !== "done") return {
 			decision: "ask",
 			approves: change,
-			reason: `This writes change "${change}" in a way the gate cannot read, so it may set it to approved. Approving a change is a person's decision: allow it only if you know what this write puts in the file.${elementsNote(root, change)}`
+			reason: `This writes change "${change}" in a way the gate cannot read, so it may approve it.${elementsNote(root, change)}`
 		};
 		const added = writtenText(input);
 		const guess = /^\s*(?:state:\s*)?["']?(approved|done)\b["']?\s*$/m.exec(added)?.[1] ?? "";
@@ -26349,27 +26441,27 @@ function writeGate(root, input) {
 		if (now === "approved" && was !== "approved") return {
 			decision: "ask",
 			approves: change,
-			reason: `This sets change "${change}" to approved. Approving a change is a person's decision: allow it only if you have reviewed the plan (armature view, Work lens) and want it built.${elementsNote(root, change)}`
+			reason: `This approves change "${change}". Allow it only if you reviewed the plan and want it built.${elementsNote(root, change)}`
 		};
 		if (now === "done" && was !== "approved" && was !== "done") return {
 			decision: "ask",
-			reason: `This sets change "${change}" to done, and it was never approved (it is ${was || "new"}). Marking unapproved work as finished is a person's decision: allow it only if you want this change counted as built.`
+			reason: `This marks change "${change}" done, and it was never approved (it is ${was || "new"}).`
 		};
 		return null;
 	}
 	if (rel === `${mdir}/approvals.lock.json`) return {
 		decision: "ask",
-		reason: `${rel} records which elements of a change a person approved. It is written by "armature approve <change>", not by hand. Allow this edit only if you mean to change that record.`
+		reason: `This edits ${rel}, the record of what a person approved. "armature approve" writes it, not a hand.`
 	};
 	if (rel === `${mdir}/system.yaml`) {
 		const was = yamlValue(before, "gate");
 		if (blind && was !== "off") return {
 			decision: "ask",
-			reason: `This writes ${rel} in a way the gate cannot read, so it may set "gate: off" and switch the planning gate off for everyone who works in this repo. Allow it only if you know what this write puts in the file.`
+			reason: `This writes ${rel} in a way the gate cannot read, so it may switch the planning gate off.`
 		};
 		if ((after !== null ? yamlValue(after, "gate") : /^\s*gate:\s*["']?off\b/m.test(writtenText(input)) ? "off" : was) === "off" && was !== "off") return {
 			decision: "ask",
-			reason: "This sets \"gate: off\" in system.yaml, which switches the planning gate off for everyone who works in this repo: new source files would no longer need a node or an approved change. Allow it only if that is what you want."
+			reason: "This sets \"gate: off\": the planning gate goes off for everyone who works in this repo."
 		};
 		return after !== null ? weakenAsk(rel, modelWeakened(root, rel, before, after)) : null;
 	}
@@ -26588,7 +26680,7 @@ function removalGate(root, paths, doing, own) {
 		const inModel = under(p, model) ? path.relative(model, p).replace(/\\/g, "/") : null;
 		if (under(model, p) || inModel !== null && /^(?:nodes|shapes|flows)(?:\/|$)|^(?:system|tech)\.ya?ml$/.test(inModel)) ask ??= {
 			decision: "ask",
-			reason: `${doing} ${rels(p)}, ${inModel === null ? "which holds" : "part of"} the architecture model under ${mdir}/. Removing a node, a shape or a flow removes the boundaries, auth, allow-lists, tags and requirements it carries. Allow it only if you mean to remove it ("armature rename" moves a node).`
+			reason: `${doing} ${rels(p)}, ${inModel === null ? "which holds" : "part of"} the architecture model. The boundaries, auth and requirements it carries go with it.`
 		};
 		if (inModel !== null) continue;
 		for (const name of [".claude/settings.json", ".claude/settings.local.json"]) {
@@ -26614,11 +26706,13 @@ function removalGate(root, paths, doing, own) {
 	}
 	return ask;
 }
+/** How many lost guards a question lists: the permission prompt is a small window, and the rest is cut off. */
+var ASK_ITEMS = 5;
 function weakenAsk(rel, lost, lead = `This edit to ${rel} weakens`) {
 	if (!lost.length) return null;
 	return {
 		decision: "ask",
-		reason: `${lead} what the architecture model guards:\n${lost.slice(0, 12).map((x) => `- ${x}`).join("\n")}${lost.length > 12 ? `\n- and ${lost.length - 12} more` : ""}\nRemoving a boundary, an auth, an allow-list, a requirement or a hook, or letting more data or files through, is a person's decision. Allow it only if you mean it.`
+		reason: `${lead} what the model guards:\n${lost.slice(0, ASK_ITEMS).map((x) => `- ${x}`).join("\n")}${lost.length > ASK_ITEMS ? `\n- and ${lost.length - ASK_ITEMS} more` : ""}`
 	};
 }
 /** One line on what a change holds, for the question put to the person. Empty when it cannot be worked out. */
@@ -26638,7 +26732,7 @@ function elementsNote(root, change) {
 			}
 		};
 		scan(path.join(root, mdir));
-		return hits.length ? ` It tags ${hits.slice(0, 8).join(", ")}${hits.length > 8 ? `, and ${hits.length - 8} more files` : ""}; "armature show ${change}" lists every element.` : " Nothing is tagged with it yet, so there is nothing to review: the planned elements should be written first.";
+		return hits.length ? ` "armature show ${change}" lists what it holds (${hits.length} ${hits.length === 1 ? "file" : "files"}).` : " Nothing is tagged with it yet, so there is nothing to review.";
 	} catch {
 		return "";
 	}
@@ -26764,7 +26858,8 @@ function bashGate(root, command, cwd = root) {
 			reason
 		};
 	};
-	if (/(?:\barmature(?:\.mjs)?|\b(?:dist|src)\/cli\.(?:mjs|js|ts))["']?\s+(?:--root\s+\S+\s+)?approve\b/.test(command)) ask("This runs \"armature approve\", which records that a person approved a change. Approving a change is your decision: allow it only if you have reviewed the plan and want it built.");
+	if (/(?:\barmature(?:\.mjs)?|\b(?:dist|src)\/cli\.(?:mjs|js|ts))["']?\s+(?:--root\s+\S+\s+)?approve\b/.test(command)) ask("This runs \"armature approve\". Allow it only if you reviewed the plan and want it built.");
+	if (/(?:\blocalhost|\b127\.0\.0\.1|\[::1\]|\b0\.0\.0\.0)(?::\d+)?\/approve\b|x-armature-token|__ARMATURE_APPROVE__/i.test(command)) ask("This calls the viewer to approve a change. Allow it only if you reviewed the plan and want it built.");
 	const writes = /(?:^|[^<>&|\d-])>{1,2}(?!&)|\b(?:sed|perl)\b[^|;&\n]*\s(?:-[A-Za-z]*i|--in-place)|\btee\b|\b(?:mv|cp|rm|truncate|dd|install|sponge)\b|\byq\b[^|;&\n]*\s(?:-i|--inplace)|\bawk\b[^|;&\n]*\s-i\s*inplace|\b(?:python3?|node|ruby|deno|bun|tsx)\b/.test(command);
 	const named = writes ? shellPaths(command, cwd).map((p) => path.relative(root, p).replace(/\\/g, "/")) : [];
 	const isRecord = (rel) => {
@@ -26773,9 +26868,9 @@ function bashGate(root, command, cwd = root) {
 		return !!name && !name.includes("/") && (/\.ya?ml$/.test(name) || /[*?[{]/.test(name));
 	};
 	const touched = named.find(isRecord) ?? new RegExp(`${mdir}/(?:changes/[^\\s'"]+\\.ya?ml|${"approvals.lock.json".replace(/\./g, "\\.")})`).exec(command)?.[0];
-	if (touched && writes) ask(`This command writes to ${touched}. Approving a change, and the record of what was approved, are a person's decisions: allow it only if you know what it changes there.`);
+	if (touched && writes) ask(`This command writes to ${touched}, which records what a person approved.`);
 	const system = named.includes(`${mdir}/system.yaml`) || new RegExp(`${mdir}/system\\.ya?ml`).test(command);
-	if (writes && system && /\bgate["']?\s*[:=]\s*["']?off\b/.test(command) && gateOn(root)) ask("This command sets \"gate: off\" in system.yaml, which switches the planning gate off for everyone who works in this repo. Allow it only if that is what you want.");
+	if (writes && system && /\bgate["']?\s*[:=]\s*["']?off\b/.test(command) && gateOn(root)) ask("This command sets \"gate: off\": the planning gate goes off for everyone who works in this repo.");
 	let held = null;
 	const own = () => held ??= readOwnership(root);
 	const gone = shellRemovals(command, cwd);
@@ -26785,7 +26880,7 @@ function bashGate(root, command, cwd = root) {
 		if (verdict) question ??= verdict;
 	}
 	const modelFile = new RegExp(`(?:^|[\\s'"/])${mdir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/(?:nodes/[^\\s'"]+|system|tech|shapes/[^\\s'"]+|flows/[^\\s'"]+)\\.ya?ml`);
-	if (/\b(?:git\s+)?rm\b/.test(command) && modelFile.test(command)) ask(`This command deletes part of the architecture model under ${mdir}/. Removing a node, a shape or a flow can remove the boundaries, auth and requirements it carries. Allow it only if you mean to remove it ("armature rename" moves a node).`);
+	if (/\b(?:git\s+)?rm\b/.test(command) && modelFile.test(command)) ask(`This command deletes part of the architecture model under ${mdir}/, with the boundaries, auth and requirements it carries.`);
 	for (const target of shellTargets(command, cwd)) {
 		const rel = path.relative(root, target).replace(/\\/g, "/");
 		if (rel.startsWith(`${mdir}/`) && GUARD_FILE.test(rel.slice(mdir.length + 1)) || SETTINGS_FILE.test(rel)) return {
@@ -27081,7 +27176,8 @@ async function hook(name, rootFlag) {
 					decide("deny", `Change "${verdict.approves}" cannot be put up for approval while it has security errors. Fix them in the model first:\n${sec.errors.map((e) => `- ${e.code}: ${e.message}`).join("\n")}`);
 					return;
 				}
-				verdict.reason += `\n${sec.lines.length ? `What it does to security:\n${sec.lines.join("\n")}` : "It adds no entry point, sends no sensitive data out of the system and holds no secret."}`;
+				const more = sec.lines.length - 5;
+				verdict.reason += `\n${sec.lines.length ? `Security:\n${sec.lines.slice(0, 5).join("\n")}${more > 0 ? `\n  and ${more} more: "armature approve" prints all` : ""}` : "Security: no new entry point, no sensitive data sent out, no secret."}`;
 				notePendingApproval(root, verdict.approves, callKey(input.tool_input));
 			}
 			decide(verdict.decision, verdict.reason);

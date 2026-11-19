@@ -241,7 +241,9 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
           decide('deny', `Change "${verdict.approves}" cannot be put up for approval while it has security errors. Fix them in the model first:\n${sec.errors.map((e) => `- ${e.code}: ${e.message}`).join('\n')}`);
           return;
         }
-        verdict.reason += `\n${sec.lines.length ? `What it does to security:\n${sec.lines.join('\n')}` : 'It adds no entry point, sends no sensitive data out of the system and holds no secret.'}`;
+        // Kept short: the permission prompt is a small window and cuts the rest off.
+        const more = sec.lines.length - 5;
+        verdict.reason += `\n${sec.lines.length ? `Security:\n${sec.lines.slice(0, 5).join('\n')}${more > 0 ? `\n  and ${more} more: "armature approve" prints all` : ''}` : 'Security: no new entry point, no sensitive data sent out, no secret.'}`;
         // If the person says yes, this edit goes through and the approval is recorded after it.
         notePendingApproval(root, verdict.approves, callKey(input.tool_input));
       }
