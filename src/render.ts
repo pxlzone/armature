@@ -54,7 +54,7 @@ function shapeBlock(s: Shape): string[] {
 }
 
 function reqLine(q: Requirement): string {
-  const state = q.outdated ? 'unverified: the passing report is older than the code' : q.state;
+  const state = q.outdated ? 'unverified: the passing report is older than the code' : q.confirmed && q.state === 'verified' ? `verified: read by ${q.confirmed.by || 'a person'} on ${q.confirmed.at}, no test` : q.state;
   return `[${state}] ${q.ref}${q.kind ? ` (${q.kind})` : ''}: ${q.text}${q.change ? ` (change ${q.change})` : ''}${q.covers.length ? ` (covers ${q.covers.join(', ')})` : ''}`;
 }
 

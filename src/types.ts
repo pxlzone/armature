@@ -78,6 +78,10 @@ export interface Requirement {
   /** True when the only passing tests are in a report older than the code they tested. */
   outdated?: boolean;
   evidence: string[]; // test names that matched
+  /** Set when a person read the node's files and recorded the requirement as true, and no file changed since. */
+  confirmed?: { by: string; at: string };
+  /** Hash of the text and the node's files. Filled only where a confirmation needs it. */
+  filesHash?: string;
 }
 
 /** A node whose code this node must not import and that no link of it may reach. */
@@ -506,6 +510,8 @@ export interface Problem {
   file?: string;
   /** Warnings only. */
   group?: WarningGroup;
+  /** For a warning that sums up several things (files, routes, requirements): each of them, so two runs can be compared thing by thing. */
+  items?: string[];
 }
 
 /** What each warning code means, and which group it belongs to. Data only, shared with the viewer. */
@@ -526,6 +532,10 @@ export const WARNING_INFO: Record<string, { group: WarningGroup; what: string }>
   'not-in-code': { group: 'wrong', what: 'The model declares a route or a queue on a node whose code registers others of the same kind, and this one is not among them.' },
   overlap: { group: 'wrong', what: 'Two nodes that are not parent and child claim the same files. Each file goes to one of them, so the other owns less than its globs say.' },
   'built-unapproved': { group: 'wrong', what: 'A node has code, but the change that adds it is still proposed: the code was written before a person approved the change.' },
+  'done-untested': { group: 'wrong', what: 'A change is marked done, but one of its requirements names no test, so no test report can ever verify it.' },
+  'stale-confirmation': { group: 'wrong', what: 'A requirement was confirmed by a person reading the code, and the files of its node changed since. Read them again, then run "armature confirm <node:requirement>".' },
+  'untested-requirement': { group: 'incomplete', what: 'Requirements of a node with code name no test: no "tests:", no "match:", and no test title tagged "[req node:id]". They stay unverified whatever the tests do.' },
+  'unread-node': { group: 'incomplete', what: 'A node owns files, none in a language the code index reads (configuration, for instance), so its links, interfaces and requirements are not checked against them.' },
   'no-auth': { group: 'incomplete', what: 'An entry point (an interface an actor, an outside system or a client links to) does not say who may call it. Add "auth:".' },
   'no-security-requirement': { group: 'incomplete', what: 'An entry point reaches sensitive data and no requirement of kind security covers it.' },
   'undeclared-secret': { group: 'incomplete', what: 'A node\'s code reads an environment variable that looks like a credential, and its "secrets:" does not list it.' },
@@ -588,6 +598,8 @@ export interface Graph {
     ignore: Array<{ path: string; why?: string }>;
     /** Warnings the team keeps, from `accept:`. */
     accepts: Array<{ code: string; ref?: string; file?: string; match?: string; why?: string }>;
+    /** Positions in the `accept:` list of entries that match no warning any more. */
+    idleAccepts: number[];
     /** False when system.yaml says `gate: off`. */
     gate: boolean;
   };

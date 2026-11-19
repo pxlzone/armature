@@ -20,11 +20,11 @@ A review here asks three things: did the model change in a way that weakens it, 
 1. Find the change: `armature status` lists open changes; the branch's plan document names it. Read the plan with `armature docs <change>`.
 2. `armature show <change>` lists the elements and whether what the person approved still matches (`scope-changed` if not). Code for elements outside the approval is a finding.
 3. For each file the diff touches, `armature where <file>` names its node. A file in a node the change does not add or modify is either a missing `modify:` or work outside the plan.
-4. Check each new requirement has a test, tagged `[req node:id]` or listed under `tests:`, and that the tests ran after the last code edit (`armature status`).
+4. Check each new requirement has a test, tagged `[req node:id]` or listed under `tests:` (the field is `tests:`, not `test:`), and that the tests ran after the last code edit (`armature status`). `untested-requirement` names the ones that have none, with the test files that already exercise the node. Whatever its state, read each requirement's sentence against the code: a requirement can be false while every check passes.
 
 ## 3. Does the code match the model
 
-1. Run `armature check --only wrong` and `armature check --only errors`. With a baseline, `armature check --new` shows only what this branch added.
+1. Run `armature check --only wrong` and `armature check --only errors`. `armature check --since <base>` shows only what this branch added. `unread-node` names nodes the check cannot read (configuration): for those, read the files yourself against the requirements, and say in the review that armature did not.
 2. Run `armature drift <node>` for each node the diff touches: routes, tables, queues and calls the code has and the model does not.
 3. For every entry point the change adds, read the handler: does it enforce the `auth:` the model declares, and does its test prove the security requirement? The model's `auth:` is a declaration; only the code and the test make it true.
 4. For every credential: is it read only by the node that lists it, and never logged, returned or sent to a client?

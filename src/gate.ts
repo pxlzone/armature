@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import YAML from 'yaml';
 import { matcher, readRepo } from './repo.js';
-import { APPROVALS_FILE, docsDir, MODEL_DIR, newPlanPath, readApprovals } from './paths.js';
+import { APPROVALS_FILE, CONFIRMED_FILE, docsDir, MODEL_DIR, newPlanPath, readApprovals } from './paths.js';
 import { type Guards, noGuards, optOut, tagGuard, weakenedBetween } from './security.js';
 
 /**
@@ -297,6 +297,9 @@ export function writeGate(root: string, input: WriteInput): GateDecision | null 
   }
   if (rel === `${mdir}/${APPROVALS_FILE}`) {
     return { decision: 'ask', reason: `This edits ${rel}, the record of what a person approved. "armature approve" writes it, not a hand.` };
+  }
+  if (rel === `${mdir}/${CONFIRMED_FILE}`) {
+    return { decision: 'ask', reason: `This edits ${rel}, the record of requirements a person read against the code. "armature confirm" writes it, not a hand.` };
   }
   if (rel === `${mdir}/system.yaml`) {
     const was = yamlValue(before, 'gate');
@@ -757,6 +760,10 @@ export function bashGate(root: string, command: string, cwd: string = root): Gat
   if (/(?:\barmature(?:\.mjs)?|\b(?:dist|src)\/cli\.(?:mjs|js|ts))["']?\s+(?:--root\s+\S+\s+)?approve\b/.test(command)) {
     ask('This runs "armature approve". Allow it only if you reviewed the plan and want it built.');
   }
+  // Confirming a requirement says a person read the code and found it true: only that person can say so.
+  if (/(?:\barmature(?:\.mjs)?|\b(?:dist|src)\/cli\.(?:mjs|js|ts))["']?\s+(?:--root\s+\S+\s+)?confirm\b[^|;&\n]*\s["']?[\w.-]+:[\w-]+/.test(command)) {
+    ask('This runs "armature confirm" on a requirement: it records that you read the code and found the requirement true, with no test. Allow it only if you did.');
+  }
   // The viewer approves for the person looking at it; a command that calls it approves in their place.
   if (/(?:\blocalhost|\b127\.0\.0\.1|\[::1\]|\b0\.0\.0\.0)(?::\d+)?\/approve\b|x-armature-token|__ARMATURE_APPROVE__/i.test(command)) {
     ask('This calls the viewer to approve a change. Allow it only if you reviewed the plan and want it built.');
@@ -766,7 +773,7 @@ export function bashGate(root: string, command: string, cwd: string = root): Gat
   // The files the command names, wherever it stands: "changes/mail.yaml" from inside the model folder is the same file.
   const named = writes ? shellPaths(command, cwd).map((p) => path.relative(root, p).replace(/\\/g, '/')) : [];
   const isRecord = (rel: string): boolean => {
-    if (rel === `${mdir}/${APPROVALS_FILE}`) return true;
+    if (rel === `${mdir}/${APPROVALS_FILE}` || rel === `${mdir}/${CONFIRMED_FILE}`) return true;
     const name = rel.startsWith(`${mdir}/changes/`) ? rel.slice(mdir.length + 9) : '';
     return !!name && !name.includes('/') && (/\.ya?ml$/.test(name) || /[*?[{]/.test(name));
   };

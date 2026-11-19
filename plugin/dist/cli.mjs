@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import crypto, { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import os from "node:os";
 import http from "node:http";
 import process$1 from "node:process";
@@ -370,6 +370,29 @@ function mustHold(v, ids) {
 	for (const t of policed) out.push(`- @${t} data may leave the system only to: ${policy[t].leaves.join(", ") || "nowhere"}`);
 	return out;
 }
+/**
+* Ways in that the declared entry points leave out, for the nodes `pick` takes: routes the code
+* serves and no interface declares, and interfaces with a route that no actor, outside system or
+* client is linked to. Either may be a door the model does not show, so the surface says so.
+*/
+function unlistedRoutes(v, pick, listed) {
+	const out = [];
+	const inCode = v.nodes.filter(pick).flatMap((n) => (n.runtime?.undeclared ?? []).filter((u) => u.kind === "route").map((u) => ({
+		n,
+		u
+	})));
+	if (inCode.length) {
+		out.push(`Routes the code serves that the model does not declare (${inCode.length}): no auth is stated for them and nothing above covers them`);
+		for (const { n, u } of inCode.slice(0, 40)) out.push(`  ${n.id}: ${u.what}${u.file ? `  ${u.file}:${u.line}` : ""}`);
+		if (inCode.length > 40) out.push(`  … ${inCode.length - 40} more: "armature drift"`);
+	}
+	const quiet = v.nodes.filter((n) => pick(n) && !isCaller(n)).flatMap((n) => n.interfaces.filter((i) => i.route && !i.holds && !listed.has(i.ref)));
+	if (quiet.length) {
+		out.push(`Interfaces with a route and no caller from outside declared (${quiet.length}): not counted as entry points. Link the actor or client that calls each, or it stays out of the checks`);
+		for (const i of quiet.slice(0, 40)) out.push(`  ${i.ref} ${i.route}: auth ${i.auth ?? "NOT STATED"}`);
+	}
+	return out;
+}
 /** Entry points, data leaving, secrets and protected nodes, for the whole system or one change. */
 function surfaceText(v, change) {
 	const out = [];
@@ -379,6 +402,9 @@ function surfaceText(v, change) {
 		const { lines, errors } = changeSecurity(v, change);
 		out.push(`Security surface of change ${change} (${c.state}):`);
 		out.push(...lines.length ? lines : ["  It adds no entry point, sends no sensitive data out of the system and holds no secret."]);
+		const mine = (n) => c.nodes.some((id) => inside$1(n.id, id)) || v.nodes.some((x) => (x.change === change || x.modify === change) && inside$1(n.id, x.id));
+		out.push(...unlistedRoutes(v, mine, new Set(entryPoints(v).map((ep) => ep.iface.ref))));
+		if (!v.nodes.some((n) => n.runtime)) out.push("No node has been compared with its code (no code index, or nothing it recognises), so routes that exist only in the code are not listed.");
 		if (errors.length) out.push("Errors:", ...errors.map((e) => `  ${e.code}: ${e.message}`));
 		return out.join("\n");
 	}
@@ -389,6 +415,8 @@ function surfaceText(v, change) {
 		out.push(`    from ${ep.callers.join(", ")}${ep.reaches.size ? `; reaches ${tagList(ep.reaches)}` : "; reaches no tagged data"}`);
 		if (ep.reaches.size) out.push(`    ${ep.requirements.length ? `proven by ${ep.requirements.map((q) => `${q.ref} [${q.state}]`).join(", ")}` : "no security requirement covers it"}`);
 	}
+	const unlisted = unlistedRoutes(v, () => true, new Set(entries.map((ep) => ep.iface.ref)));
+	if (unlisted.length) out.push("", ...unlisted);
 	const exits = dataExits(v);
 	out.push("", `Sensitive data leaving the system (${exits.length} link${exits.length === 1 ? "" : "s"})`);
 	for (const x of exits) out.push(`  ${x.edge.owner} ${x.edge.verb} ${x.edge.iface ?? x.edge.to}: ${tagList(x.tags)} -> ${x.to}${x.denied.length ? `  NOT ALLOWED (@${x.denied.join(", @")})` : ""}`);
@@ -15367,6 +15395,22 @@ var WARNING_INFO = {
 		group: "wrong",
 		what: "A node has code, but the change that adds it is still proposed: the code was written before a person approved the change."
 	},
+	"done-untested": {
+		group: "wrong",
+		what: "A change is marked done, but one of its requirements names no test, so no test report can ever verify it."
+	},
+	"stale-confirmation": {
+		group: "wrong",
+		what: "A requirement was confirmed by a person reading the code, and the files of its node changed since. Read them again, then run \"armature confirm <node:requirement>\"."
+	},
+	"untested-requirement": {
+		group: "incomplete",
+		what: "Requirements of a node with code name no test: no \"tests:\", no \"match:\", and no test title tagged \"[req node:id]\". They stay unverified whatever the tests do."
+	},
+	"unread-node": {
+		group: "incomplete",
+		what: "A node owns files, none in a language the code index reads (configuration, for instance), so its links, interfaces and requirements are not checked against them."
+	},
 	"no-auth": {
 		group: "incomplete",
 		what: "An entry point (an interface an actor, an outside system or a client links to) does not say who may call it. Add \"auth:\"."
@@ -19868,6 +19912,17 @@ function readApprovals(root) {
 		return {};
 	}
 }
+/** Requirements a person read against the code and found true. Written by "armature confirm <node:requirement>"; never edited by hand. */
+var CONFIRMED_FILE = "confirmed.lock.json";
+/** The confirmations recorded for a repo, by requirement ref. */
+function readConfirmations(root) {
+	try {
+		const data = JSON.parse(fs.readFileSync(path.join(root, MODEL_DIR, CONFIRMED_FILE), "utf8"));
+		return data && typeof data === "object" ? data : {};
+	} catch {
+		return {};
+	}
+}
 var LANG_OF = {
 	".ts": "typescript",
 	".mts": "typescript",
@@ -22097,6 +22152,23 @@ var BUILTIN_SKIP = [
 	"**/.gitkeep",
 	"**/{pnpm-lock.yaml,package-lock.json,npm-shrinkwrap.json,yarn.lock,bun.lock,bun.lockb,poetry.lock,uv.lock,Cargo.lock,Gemfile.lock,composer.lock,go.sum}"
 ];
+/** Warnings that only a code index can raise: without one, an accept entry for them is not idle, only unseen. */
+var NEEDS_INDEX = /* @__PURE__ */ new Set([
+	"runtime-drift",
+	"undeclared-import",
+	"not-in-code",
+	"dead-code",
+	"unused-reachable",
+	"shape-fields",
+	"undeclared-secret",
+	"unread-node"
+]);
+/** The same for warnings that need a test report. */
+var NEEDS_REPORT = /* @__PURE__ */ new Set([
+	"no-test-match",
+	"outdated-report",
+	"report"
+]);
 /**
 * Warnings that say a change went past its approval. What the planning gate cannot stop before the
 * fact is reported by these afterwards, so no `accept:` entry may silence them.
@@ -22189,14 +22261,15 @@ function compile$1(root, opts = {}) {
 			file
 		});
 	};
-	const warn = (code, message, ref, file) => {
+	const warn = (code, message, ref, file, items) => {
 		problems.push({
 			level: "warning",
 			code,
 			message,
 			ref,
 			file,
-			group: warningGroup(code)
+			group: warningGroup(code),
+			...items?.length ? { items } : {}
 		});
 	};
 	const mdir = MODEL_DIR;
@@ -23096,6 +23169,34 @@ function compile$1(root, opts = {}) {
 		else if (p?.fresh) q.state = "verified";
 		else if (p?.old) q.outdated = true;
 	}
+	const filesHashOf = (q) => {
+		const h = crypto.createHash("sha256").update(q.text);
+		const list = [...filesOf].filter(([nid]) => isInside(nid, q.node)).flatMap(([, l]) => l).sort();
+		for (const f of list) {
+			h.update(`\0${f}\0`);
+			try {
+				h.update(fs.readFileSync(path.join(root, f)));
+			} catch {}
+		}
+		return h.digest("hex").slice(0, 32);
+	};
+	const confirmations = readConfirmations(root);
+	for (const q of reqs.values()) {
+		const c = confirmations[q.ref];
+		if (!c && !opts.hashRequirements?.includes(q.ref)) continue;
+		q.filesHash = filesHashOf(q);
+		if (!c) continue;
+		if (c.hash !== q.filesHash) {
+			warn("stale-confirmation", `Requirement "${q.ref}" was confirmed by ${c.by || "a person"} on ${c.at}, and its text or the files of "${q.node}" changed since. Read them again, then run "armature confirm ${q.ref}".`, q.ref, nodes.get(q.node).source);
+			continue;
+		}
+		q.confirmed = {
+			by: c.by,
+			at: c.at
+		};
+		q.evidence.push(`read by ${c.by || "a person"} on ${c.at}: confirmed against the files, not by a test`);
+		if (q.state === "unverified" && !q.outdated) q.state = "verified";
+	}
 	const failedFile = path.join(archAbs, ".cache", FAILED_FILE);
 	if (cases.length > 0) rememberFailures(failedFile, [...reqs.values()].filter((q) => q.state === "failing").map((q) => q.ref));
 	else for (const ref of readFailures(failedFile)) {
@@ -23372,7 +23473,7 @@ function compile$1(root, opts = {}) {
 		codeDeps.push(...[...pairs.values()].sort((x, y) => y.count - x.count));
 		const undeclared = /* @__PURE__ */ new Map();
 		for (const d of codeDeps) if (d.kind === "undeclared") undeclared.set(d.from, [...undeclared.get(d.from) ?? [], d]);
-		for (const [id, deps] of undeclared) warn("undeclared-import", `"${id}" imports code from ${deps.slice(0, 4).map((d) => `${d.to} (${d.count})`).join(", ")}${deps.length > 4 ? ", …" : ""} with no link declared. Declare the link, move the shared code to a library node, or fix the code globs.`, id, nodes.get(id).source);
+		for (const [id, deps] of undeclared) warn("undeclared-import", `"${id}" imports code from ${deps.slice(0, 4).map((d) => `${d.to} (${d.count})`).join(", ")}${deps.length > 4 ? ", …" : ""} with no link declared. Declare the link, move the shared code to a library node, or fix the code globs.`, id, nodes.get(id).source, deps.map((d) => d.to));
 		const importers = /* @__PURE__ */ new Map();
 		for (const f of Object.values(cidx.files)) for (const i of f.imports) if (i.file) importers.set(i.file, [...importers.get(i.file) ?? [], f.path]);
 		const testsOf = (file) => {
@@ -23404,12 +23505,25 @@ function compile$1(root, opts = {}) {
 				kinds: [...rt.kinds.get(n.id) ?? []].sort()
 			});
 		}
+		for (const d of detectors) {
+			const n = nodes.get(d.node);
+			if (d.indexed > 0 || n.children.length > 0) continue;
+			const links = edges.filter((e) => e.owner === n.id).length;
+			const open_ = n.requirements.filter((q) => q.state !== "verified");
+			const parts = [
+				links ? `${links} link${links === 1 ? "" : "s"}` : "",
+				n.interfaces.length ? `${n.interfaces.length} interface${n.interfaces.length === 1 ? "" : "s"}` : "",
+				open_.length ? `${open_.length} requirement${open_.length === 1 ? "" : "s"}` : ""
+			].filter(Boolean);
+			if (!parts.length) continue;
+			warn("unread-node", `"${n.id}" owns ${d.files} file${d.files === 1 ? "" : "s"} and none is in a language armature reads, so its ${parts.join(", ")} ${parts.length === 1 && /^1 /.test(parts[0]) ? "is" : "are"} not checked against them.${open_.length ? ` Prove each requirement with a test, or have a person read the files and run "armature confirm ${open_[0].ref}".` : ""}`, n.id, n.source);
+		}
 		for (const r of rt.reports) nodes.get(r.node).runtime = r;
 		codeDeps.push(...rt.deps);
 		for (const r of rt.reports) {
 			if (r.undeclared.length === 0) continue;
 			const items = r.undeclared.slice(0, 5).map((u) => `${u.kind} ${u.what}${u.op ? ` (${u.op})` : ""}`).join(", ");
-			warn("runtime-drift", `"${r.node}" does ${r.undeclared.length} thing${r.undeclared.length === 1 ? "" : "s"} at run time the model does not declare: ${items}${r.undeclared.length > 5 ? ", …" : ""}. See "armature drift ${r.node}".`, r.node, nodes.get(r.node).source);
+			warn("runtime-drift", `"${r.node}" does ${r.undeclared.length} thing${r.undeclared.length === 1 ? "" : "s"} at run time the model does not declare: ${items}${r.undeclared.length > 5 ? ", …" : ""}. See "armature drift ${r.node}".`, r.node, nodes.get(r.node).source, r.undeclared.map((u) => `${u.kind} ${u.what}${u.op ? ` (${u.op})` : ""}`));
 		}
 		codeSummary = {
 			files: Object.keys(cidx.files).length,
@@ -23444,7 +23558,7 @@ function compile$1(root, opts = {}) {
 		for (const n of nodes.values()) {
 			if (n.dead.length && !unusedHere(n.id)) {
 				const lines = n.dead.reduce((a, d) => a + d.lines, 0);
-				warn("dead-code", `"${n.id}": ${n.dead.length} file${n.dead.length === 1 ? "" : "s"} (${lines} lines) that no entry point reaches: ${n.dead.slice(0, 4).map((d) => d.path).join(", ")}${n.dead.length > 4 ? ", …" : ""}. See "armature islands ${n.id}".`, n.id, n.source);
+				warn("dead-code", `"${n.id}": ${n.dead.length} file${n.dead.length === 1 ? "" : "s"} (${lines} lines) that no entry point reaches: ${n.dead.slice(0, 4).map((d) => d.path).join(", ")}${n.dead.length > 4 ? ", …" : ""}. See "armature islands ${n.id}".`, n.id, n.source, n.dead.map((d) => d.path));
 			}
 			if (n.unused) {
 				const live = [...owner].filter(([f, id]) => isInside(id, n.id) && r.reachable.has(f)).map(([f]) => f);
@@ -23491,7 +23605,7 @@ function compile$1(root, opts = {}) {
 		if (n.files === 0) return ["planned", "No file matches its code globs."];
 		if (open(n.change)) return ["building", `Files exist, and change "${n.change}" is not done.`];
 		const active = n.requirements.filter((q) => !open(q.change));
-		if (active.length > 0 && active.every((q) => q.state === "verified")) return ["verified", `All ${active.length} requirement${active.length === 1 ? " has" : "s have"} a passing test.`];
+		if (active.length > 0 && active.every((q) => q.state === "verified")) return ["verified", active.some((q) => q.confirmed) ? `All ${active.length} requirement${active.length === 1 ? " is" : "s are"} verified, by a passing test or by a person who read the code.` : `All ${active.length} requirement${active.length === 1 ? " has" : "s have"} a passing test.`];
 		if (active.length === 0) return ["built", "Files exist. No requirement declared yet."];
 		return ["built", `Files exist. ${active.filter((q) => q.state !== "verified").length} of ${active.length} requirement${active.length === 1 ? "" : "s"} not verified.`];
 	};
@@ -23669,6 +23783,43 @@ function compile$1(root, opts = {}) {
 	for (const q of reqs.values()) join((c) => c.requirements, q.ref, `requirement ${q.ref}`, q);
 	for (const sh of shapes.values()) join((c) => c.shapes, sh.id, `shape ${sh.id}`, sh);
 	for (const f of flows) join((c) => c.flows, f.id, `flow ${f.id}`, f);
+	const named = /* @__PURE__ */ new Set();
+	{
+		for (const q of reqs.values()) if (q.tests.length || q.match.length || proof.has(q.ref) || q.confirmed) named.add(q.ref);
+		const loose = [...reqs.values()].filter((q) => !named.has(q.ref));
+		if (loose.length) {
+			const found = repo.hasGit ? git$1(root, [
+				"grep",
+				"--untracked",
+				"-o",
+				"-I",
+				"-E",
+				"\\[req [^] ]+\\]"
+			]) : null;
+			let text = (found ?? "").split("\n").filter((l) => TEST_FILE.test(l.slice(0, l.indexOf(":")))).join("\n");
+			if (found === null) for (const f of repo.files.filter((x) => TEST_FILE.test(x))) try {
+				text += fs.readFileSync(path.join(root, f), "utf8");
+			} catch {}
+			for (const m of text.matchAll(/\[req ([^\]\s]+)\]/g)) {
+				const [nref, slug] = m[1].split(":");
+				const nid = reqs.has(m[1]) ? null : resolveNode(nref);
+				named.add(nid ? `${nid}:${slug}` : m[1]);
+			}
+		}
+		const byNode = /* @__PURE__ */ new Map();
+		for (const q of loose) {
+			const n = nodes.get(q.node);
+			if (named.has(q.ref) || n.files === 0 || n.unused || changes.get(q.change ?? "")?.state === "dropped") continue;
+			byNode.set(q.node, [...byNode.get(q.node) ?? [], q]);
+		}
+		for (const [id, list] of byNode) {
+			const n = nodes.get(id);
+			const tm = testMatch.get(id);
+			const tests = n.testedBy.length ? n.testedBy : tm ? repo.files.filter(tm) : [];
+			const hint = tests.length ? ` Test files that already exercise this node: ${tests.slice(0, 5).join(", ")}${tests.length > 5 ? `, … (${tests.length} in all)` : ""}.` : "";
+			warn("untested-requirement", `"${id}": ${list.length} requirement${list.length === 1 ? " names" : "s name"} no test, so ${list.length === 1 ? "it stays" : "they stay"} unverified whatever the tests do: ${list.slice(0, 6).map((q) => q.id).join(", ")}${list.length > 6 ? ", …" : ""}. Give each "tests:" or "match:", or tag a test title "[req ${list[0].ref}]".${hint}`, id, n.source, list.map((q) => q.id));
+		}
+	}
 	const approvals = readApprovals(root);
 	for (const c of changes.values()) {
 		c.elements.sort();
@@ -23711,6 +23862,7 @@ function compile$1(root, opts = {}) {
 			for (const q of rq) {
 				if (q.state === "verified") continue;
 				if (q.state === "failing" || cases.length > 0 && !q.outdated) err("not-done", `Change "${c.id}" is marked done, but requirement "${q.ref}" is not verified.`, c.id);
+				else if (!named.has(q.ref)) warn("done-untested", `Change "${c.id}" is marked done, but requirement "${q.ref}" names no test, so no test report can verify it. Give it "tests:" or "match:", or tag a test title "[req ${q.ref}]".`, q.ref, nodes.get(q.node).source);
 				else unproven++;
 			}
 			if (unproven) warn("done-unchecked", `Change "${c.id}" is marked done, but ${unproven} of its requirements cannot be checked here: ${cases.length ? "the test report is older than the code" : "there is no test report"}. Run the tests with a JUnit reporter.`, c.id);
@@ -23797,6 +23949,7 @@ function compile$1(root, opts = {}) {
 	for (const f of securityFindings(securityView)) if (f.level === "error") err(f.code, f.message, f.ref, f.file);
 	else warn(f.code, f.message, f.ref, f.file);
 	let accepted = 0;
+	const idleAccepts = [];
 	const accepts = toArr(sys.accept).filter((a) => a && typeof a === "object" && typeof a.code === "string");
 	if (accepts.length) {
 		const used = /* @__PURE__ */ new Set();
@@ -23818,8 +23971,11 @@ function compile$1(root, opts = {}) {
 			a.file,
 			a.match ? `"${a.match}"` : ""
 		].filter(Boolean).join(" ");
-		const idle = accepts.filter((a, i) => !used.has(i) && !NEVER_ACCEPTED.has(a.code));
-		if (idle.length) warn("stale-accept", `${idle.length} accept entr${idle.length === 1 ? "y matches" : "ies match"} no warning any more: ${idle.slice(0, 5).map(describe).join(", ")}${idle.length > 5 ? ", …" : ""}. Remove ${idle.length === 1 ? "it" : "them"}.`, void 0, `${mdir}/system.yaml`);
+		const blind = (code) => !codeIdx && NEEDS_INDEX.has(code) || cases.length === 0 && NEEDS_REPORT.has(code);
+		const idle = accepts.filter((a, i) => !used.has(i) && !NEVER_ACCEPTED.has(a.code) && !blind(a.code));
+		const all = toArr(sys.accept);
+		idleAccepts.push(...idle.map((a) => all.indexOf(a)));
+		if (idle.length) warn("stale-accept", `${idle.length} accept entr${idle.length === 1 ? "y matches" : "ies match"} no warning any more: ${idle.slice(0, 5).map(describe).join(", ")}${idle.length > 5 ? ", …" : ""}. "armature check --prune-accepts" removes ${idle.length === 1 ? "it" : "them"}.`, void 0, `${mdir}/system.yaml`);
 		const bare = accepts.filter((a) => !String(a.why ?? "").trim());
 		if (bare.length) warn("accept-reason", `${bare.length} accept entr${bare.length === 1 ? "y gives" : "ies give"} no reason: ${bare.slice(0, 5).map(describe).join(", ")}${bare.length > 5 ? ", …" : ""}.`, void 0, `${mdir}/system.yaml`);
 	}
@@ -23852,6 +24008,7 @@ function compile$1(root, opts = {}) {
 				...a.match ? { match: String(a.match) } : {},
 				...a.why ? { why: String(a.why) } : {}
 			})),
+			idleAccepts,
 			gate: sys.gate !== "off"
 		},
 		nodes: order,
@@ -23931,6 +24088,37 @@ function confirmShapes(root, only) {
 		missing
 	};
 }
+/**
+* Records that a person read the files of a requirement's node and found the requirement true.
+* It counts as verified until the requirement's text or any of those files changes.
+*/
+function confirmRequirements(root, refs, by) {
+	const graph = compile$1(root, { hashRequirements: refs });
+	const all = new Map(graph.nodes.flatMap((n) => n.requirements).map((q) => [q.ref, q]));
+	const file = path.join(root, MODEL_DIR, CONFIRMED_FILE);
+	const lock = readConfirmations(root);
+	const out = {
+		confirmed: [],
+		missing: [],
+		failing: []
+	};
+	for (const ref of refs) {
+		const q = all.get(ref);
+		if (!q?.filesHash) out.missing.push(ref);
+		else if (q.state === "failing") out.failing.push(ref);
+		else {
+			lock[ref] = {
+				by,
+				at: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10),
+				hash: q.filesHash
+			};
+			out.confirmed.push(ref);
+		}
+	}
+	for (const ref of Object.keys(lock)) if (!all.has(ref)) delete lock[ref];
+	if (out.confirmed.length) fs.writeFileSync(file, `${JSON.stringify(Object.fromEntries(Object.entries(lock).sort(([a], [b]) => a.localeCompare(b))), null, 2)}\n`);
+	return out;
+}
 // src/render.ts
 var STATUS_MARK = {
 	retiring: "retiring",
@@ -23979,7 +24167,7 @@ function shapeBlock(s) {
 	return lines;
 }
 function reqLine(q) {
-	return `[${q.outdated ? "unverified: the passing report is older than the code" : q.state}] ${q.ref}${q.kind ? ` (${q.kind})` : ""}: ${q.text}${q.change ? ` (change ${q.change})` : ""}${q.covers.length ? ` (covers ${q.covers.join(", ")})` : ""}`;
+	return `[${q.outdated ? "unverified: the passing report is older than the code" : q.confirmed && q.state === "verified" ? `verified: read by ${q.confirmed.by || "a person"} on ${q.confirmed.at}, no test` : q.state}] ${q.ref}${q.kind ? ` (${q.kind})` : ""}: ${q.text}${q.change ? ` (change ${q.change})` : ""}${q.covers.length ? ` (covers ${q.covers.join(", ")})` : ""}`;
 }
 /** Requirements that say they cover an interface, a link, a shape or a flow. */
 function covering(g, id) {
@@ -24945,6 +25133,115 @@ function newSince(problems, baseline) {
 		}
 		return true;
 	});
+}
+/**
+* Errors, and the warnings that were not there in `then`. A warning that sums up several things
+* (undeclared routes of a node, requirements with no test) is new again when it lists something
+* it did not list before, and then says only what was added.
+*/
+function newSinceRun(now, then) {
+	const left = /* @__PURE__ */ new Map();
+	for (const p of then) if (p.level === "warning") left.set(keyOf(p), [...left.get(keyOf(p)) ?? [], p]);
+	const out = [];
+	for (const p of now) {
+		const old = p.level === "warning" ? left.get(keyOf(p))?.shift() : void 0;
+		if (!old) out.push(p);
+		else if (p.items) {
+			const had = new Set(old.items ?? []);
+			const fresh = p.items.filter((x) => !had.has(x));
+			if (fresh.length) out.push({
+				...p,
+				items: fresh,
+				message: `${p.message} New here: ${fresh.slice(0, 8).join(", ")}${fresh.length > 8 ? `, … (${fresh.length} in all)` : ""}.`
+			});
+		}
+	}
+	return out;
+}
+/**
+* What the check said at a git ref: the whole repo as it was, checked out beside this one, indexed
+* and compiled the same way. Null when that commit has no model; a string when the ref cannot be read.
+* Test reports under the cache folder are copied across, so both sides read the same ones.
+*/
+async function problemsAt(root, ref) {
+	const run = (args) => execFileSync("git", args, {
+		cwd: root,
+		encoding: "utf8",
+		stdio: [
+			"ignore",
+			"pipe",
+			"ignore"
+		]
+	}).trim();
+	let commit;
+	let prefix;
+	try {
+		commit = run([
+			"rev-parse",
+			"--verify",
+			"--quiet",
+			`${ref}^{commit}`
+		]);
+		prefix = run(["rev-parse", "--show-prefix"]);
+	} catch {
+		return `"${ref}" is not a commit, branch or tag in this repo.`;
+	}
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "armature-since-"));
+	const tree = path.join(dir, "tree");
+	try {
+		run([
+			"worktree",
+			"add",
+			"--detach",
+			"--force",
+			tree,
+			commit
+		]);
+		const there = path.join(tree, prefix);
+		if (!fs.existsSync(path.join(there, "armature", "system.yaml"))) return null;
+		const reports = path.join(root, MODEL_DIR, ".cache", "reports");
+		if (fs.existsSync(reports)) fs.cpSync(reports, path.join(there, MODEL_DIR, ".cache", "reports"), {
+			recursive: true,
+			preserveTimestamps: true
+		});
+		await buildCodeIndex(there).catch(() => void 0);
+		return compile$1(there).problems;
+	} catch (e) {
+		return `Cannot check out "${ref}" to compare with: ${String(e?.message ?? e).split("\n")[0]}`;
+	} finally {
+		try {
+			run([
+				"worktree",
+				"remove",
+				"--force",
+				tree
+			]);
+		} catch {}
+		fs.rmSync(dir, {
+			recursive: true,
+			force: true
+		});
+		try {
+			run(["worktree", "prune"]);
+		} catch {}
+	}
+}
+/** Removes the entries at these positions from `accept:` in system.yaml, keeping comments. Returns how many went. */
+function pruneAccepts(root, positions) {
+	if (!positions.length) return 0;
+	const file = path.join(root, MODEL_DIR, "system.yaml");
+	const doc = import_dist$1.parseDocument(fs.readFileSync(file, "utf8"));
+	const list = doc.get("accept");
+	if (!import_dist$1.isSeq(list)) return 0;
+	let gone = 0;
+	for (const i of [...new Set(positions)].sort((a, b) => b - a)) {
+		if (i < 0 || i >= list.items.length) continue;
+		list.items.splice(i, 1);
+		gone++;
+	}
+	if (list.items.length === 0) doc.delete("accept");
+	if (gone) fs.writeFileSync(file, doc.toString());
+	return gone;
 }
 // src/diff.ts
 var join = (list) => list.join(", ");
@@ -26453,6 +26750,10 @@ function writeGate(root, input) {
 		decision: "ask",
 		reason: `This edits ${rel}, the record of what a person approved. "armature approve" writes it, not a hand.`
 	};
+	if (rel === `${mdir}/confirmed.lock.json`) return {
+		decision: "ask",
+		reason: `This edits ${rel}, the record of requirements a person read against the code. "armature confirm" writes it, not a hand.`
+	};
 	if (rel === `${mdir}/system.yaml`) {
 		const was = yamlValue(before, "gate");
 		if (blind && was !== "off") return {
@@ -26859,11 +27160,12 @@ function bashGate(root, command, cwd = root) {
 		};
 	};
 	if (/(?:\barmature(?:\.mjs)?|\b(?:dist|src)\/cli\.(?:mjs|js|ts))["']?\s+(?:--root\s+\S+\s+)?approve\b/.test(command)) ask("This runs \"armature approve\". Allow it only if you reviewed the plan and want it built.");
+	if (/(?:\barmature(?:\.mjs)?|\b(?:dist|src)\/cli\.(?:mjs|js|ts))["']?\s+(?:--root\s+\S+\s+)?confirm\b[^|;&\n]*\s["']?[\w.-]+:[\w-]+/.test(command)) ask("This runs \"armature confirm\" on a requirement: it records that you read the code and found the requirement true, with no test. Allow it only if you did.");
 	if (/(?:\blocalhost|\b127\.0\.0\.1|\[::1\]|\b0\.0\.0\.0)(?::\d+)?\/approve\b|x-armature-token|__ARMATURE_APPROVE__/i.test(command)) ask("This calls the viewer to approve a change. Allow it only if you reviewed the plan and want it built.");
 	const writes = /(?:^|[^<>&|\d-])>{1,2}(?!&)|\b(?:sed|perl)\b[^|;&\n]*\s(?:-[A-Za-z]*i|--in-place)|\btee\b|\b(?:mv|cp|rm|truncate|dd|install|sponge)\b|\byq\b[^|;&\n]*\s(?:-i|--inplace)|\bawk\b[^|;&\n]*\s-i\s*inplace|\b(?:python3?|node|ruby|deno|bun|tsx)\b/.test(command);
 	const named = writes ? shellPaths(command, cwd).map((p) => path.relative(root, p).replace(/\\/g, "/")) : [];
 	const isRecord = (rel) => {
-		if (rel === `${mdir}/approvals.lock.json`) return true;
+		if (rel === `${mdir}/approvals.lock.json` || rel === `${mdir}/confirmed.lock.json`) return true;
 		const name = rel.startsWith(`${mdir}/changes/`) ? rel.slice(mdir.length + 9) : "";
 		return !!name && !name.includes("/") && (/\.ya?ml$/.test(name) || /[*?[{]/.test(name));
 	};
@@ -27548,9 +27850,16 @@ ${fetch}
         # request; warnings where it is only incomplete show as notices.
         # While the team adopts the model, uncomment the next line to report without blocking.
         # continue-on-error: true
-        # To stop the model from getting worse, commit a baseline ("armature check --update-baseline")
-        # and add: --new --fail-on wrong
-        run: node .armature/plugin/bin/armature.mjs check --annotate
+        # On a pull request only what it adds is shown: the same check runs on the base branch and
+        # warnings that were already there are left out. A new warning where the model is wrong
+        # (code the model does not declare, a finished change with no test) fails the job;
+        # remove "--fail-on wrong" to report without failing.
+        run: |
+          if [ "\${{ github.event_name }}" = "pull_request" ]; then
+            node .armature/plugin/bin/armature.mjs check --annotate --since "origin/\${{ github.base_ref }}" --fail-on wrong
+          else
+            node .armature/plugin/bin/armature.mjs check --annotate
+          fi
       - name: Rule files match the model
         run: node .armature/plugin/bin/armature.mjs sync-rules --check
       - name: What this pull request changes in the model
@@ -43640,12 +43949,20 @@ Code graph
 Checking
   armature islands [node]           Dead code: files no entry point reaches, by node
   armature tech [id]               Technologies from armature/tech.yaml and who uses them
-  armature check [--json] [--annotate] [--only errors|wrong|incomplete] [--new] [--fail-on wrong|warnings]
+  armature check [--json] [--annotate] [--only errors|wrong|incomplete] [--since git-ref] [--new] [--fail-on wrong|warnings]
                                 Errors, then warnings where the model is wrong, then where it is incomplete.
-                                Exits 1 on errors. --annotate adds GitHub Actions annotations.
-                                --new shows only warnings that are not in the baseline; --fail-on makes
-                                warnings of that kind exit 1 too. --update-baseline records today's warnings
+                                Exits 1 on errors. Builds the code index first (--no-index skips that).
+                                --annotate adds GitHub Actions annotations.
+                                --since shows only warnings the same check did not give at that commit
+                                (a pull request: --since origin/main); --new does the same against a
+                                committed baseline, which --update-baseline writes. --fail-on makes
+                                warnings of that kind exit 1 too.
+                                --prune-accepts removes accept entries that match no warning any more
   armature confirm [Shape...]      Record shape sources as read, so later edits flag them stale
+  armature confirm <node:requirement> [--by name]
+                                Record that a person read the node's files and found the requirement true,
+                                for what no test can reach (configuration). It holds until the text or
+                                one of those files changes. A person runs this
 
 Changing the model
   armature approve <change> [--by name]   Approve a change and record who approved which elements. A person runs this
@@ -43689,7 +44006,8 @@ function parse(argv) {
 		"ref",
 		"only",
 		"fail-on",
-		"by"
+		"by",
+		"since"
 	]);
 	for (let i = 0; i < rest.length; i++) {
 		const a = rest[i];
@@ -43938,7 +44256,16 @@ async function main() {
 			console.log(todos(compile$1(root), typeof flags.kind === "string" ? flags.kind : void 0));
 			return;
 		case "check": {
-			const g = compile$1(root);
+			let indexed = true;
+			if (!flags["no-index"]) await buildCodeIndex(root).catch(() => indexed = false);
+			let g = compile$1(root);
+			if (flags["prune-accepts"]) {
+				const n = pruneAccepts(root, g.system.idleAccepts);
+				console.log(n ? `Removed ${n} accept entr${n === 1 ? "y" : "ies"} that matched no warning from ${MODEL_DIR}/system.yaml.` : "Every accept entry still matches a warning.");
+				if (!g.code) console.log("There is no code index, so entries for warnings that come from the code were left alone.");
+				if (!n) return;
+				g = compile$1(root);
+			}
 			const only = typeof flags.only === "string" ? flags.only : null;
 			if (only && only !== "wrong" && only !== "incomplete" && only !== "errors") return fail("--only takes errors, wrong or incomplete.");
 			const failOn = typeof flags["fail-on"] === "string" ? flags["fail-on"] : null;
@@ -43956,11 +44283,26 @@ async function main() {
 				pool = newSince(g.problems, base);
 				known = g.problems.length - pool.length;
 			}
+			const since = typeof flags.since === "string" ? flags.since : null;
+			if (flags.since === true || since === "") return fail("--since takes a commit, branch or tag: armature check --since origin/main");
+			let sinceNote = "";
+			if (since) {
+				const then = await problemsAt(root, since);
+				if (typeof then === "string") return fail(then);
+				if (then === null) sinceNote = `${since} has no model, so everything here is new.`;
+				else {
+					pool = newSinceRun(pool, then);
+					const hidden = g.problems.length - known - pool.length;
+					sinceNote = `Compared with ${since}: ${hidden} warning${hidden === 1 ? "" : "s"} that ${hidden === 1 ? "was" : "were"} already there ${hidden === 1 ? "is" : "are"} not shown.`;
+				}
+			}
 			const shown = only ? pool.filter((p) => only === "errors" ? p.level === "error" : p.level === "warning" && p.group === only) : pool;
 			if (flags.json) console.log(JSON.stringify(shown, null, 2));
 			else {
 				console.log(formatProblems(shown, g.accepted));
 				if (known) console.log(`${known} warning${known === 1 ? "" : "s"} already in the baseline ${known === 1 ? "is" : "are"} not shown.`);
+				if (sinceNote) console.log(sinceNote);
+				if (!indexed || !g.code) console.log("No code index: nothing read from the code (drift, imports, dead code) was checked.");
 			}
 			if (flags.annotate) {
 				const esc = (t) => t.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
@@ -43974,6 +44316,19 @@ async function main() {
 			return;
 		}
 		case "confirm": {
+			const reqRefs = args.filter((a) => a.includes(":"));
+			if (reqRefs.length) {
+				if (reqRefs.length !== args.length) return fail("Confirm requirements (node:requirement) and shapes in separate commands.");
+				await buildCodeIndex(root).catch(() => void 0);
+				const by = typeof flags.by === "string" && flags.by.trim() ? flags.by.trim() : git$1(root, ["config", "user.name"])?.trim() || process.env.USER || "";
+				if (!by) return fail("Say who read it: armature confirm <node:requirement> --by <name>");
+				const r = confirmRequirements(root, reqRefs, by);
+				if (r.confirmed.length) console.log(`Confirmed by ${by}: ${r.confirmed.join(", ")}. ${r.confirmed.length === 1 ? "It counts" : "They count"} as verified until the text or a file of the node changes. Commit ${MODEL_DIR}/confirmed.lock.json.`);
+				if (r.failing.length) console.log(`Not confirmed, a test fails: ${r.failing.join(", ")}. Fix the code or the test first.`);
+				if (r.missing.length) console.log(`No such requirement: ${r.missing.join(", ")}`);
+				if (!r.confirmed.length) process.exit(1);
+				return;
+			}
 			const r = confirmShapes(root, args);
 			console.log(r.confirmed.length ? `Confirmed ${r.confirmed.length}: ${r.confirmed.join(", ")}` : "No shape with a source to confirm.");
 			if (r.missing.length) console.log(`Not found or source missing: ${r.missing.join(", ")}`);
