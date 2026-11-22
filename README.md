@@ -259,19 +259,27 @@ data:
   pii: { leaves: [stripe] }     # tagged fields may leave the system only to these
 ```
 
-An entry point open to anyone that reaches `@pii` or `@secret` data, a tagged field sent where the policy does not allow, a link that goes around an `only:`, and a credential on browser or mobile code (`client: true`) are errors. A credential the code reads from the environment and the model does not list is a warning. `armature surface` lists the entry points, the data leaving the system and the secrets; `armature surface <change>` shows what one change adds. The `armature-threat` skill walks a change through them before approval, and `armature-review` reviews a pull request against the model. `auth:` is a declaration the code index cannot see enforced; the security requirement's test is the proof.
+An entry point open to anyone that reaches `@pii` or `@secret` data, a tagged field sent where the policy does not allow, a link that goes around an `only:`, and a credential on browser or mobile code (`client: true`) are errors. A credential the code reads from the environment and the model does not list is a warning. `armature surface` lists the entry points, routes the code serves that the model does not declare, the data leaving the system and the secrets; `armature surface <change>` shows what one change adds. The `armature-threat` skill walks a change through them before approval, and `armature-review` reviews a pull request against the model. `auth:` is a declaration the code index cannot see enforced; the security requirement's test is the proof.
 
 **A large model.** Warnings never fail a check by themselves. To stop a model from getting worse without clearing hundreds of findings first:
+
+```bash
+armature check --since origin/main --fail-on wrong   # in CI: only what this branch adds, and fail on wrong ones
+```
+
+It runs the same check on the base branch and leaves out what was already there. The generated workflow does this on pull requests. Where the base branch cannot be checked out, a committed baseline does the same job:
 
 ```bash
 armature check --update-baseline             # once; commit armature/baseline.json
 ```
 
 ```bash
-armature check --new --fail-on wrong         # in CI: only findings that are not in the baseline, and fail on wrong ones
+armature check --new --fail-on wrong
 ```
 
-A finding the team has looked at and keeps goes under `accept:` in `armature/system.yaml`, with a reason. An entry that matches nothing any more is reported.
+A finding the team has looked at and keeps goes under `accept:` in `armature/system.yaml`, with a reason. An entry that matches nothing any more is reported, and `armature check --prune-accepts` removes it.
+
+**What a test cannot reach.** A requirement counts as verified only with a passing test tied to it (`tests:`, `match:`, or `[req node:id]` in a test title); one that names none is reported as `untested-requirement`. For a node made of configuration, which the index does not read (`unread-node`), a person can read the files and run `armature confirm <node:requirement>`. It holds until the requirement's text or one of those files changes.
 
 The model places every file in the repo (nodes, `armature/tech.yaml`, the document library, or an ignore entry with a reason), reads docker-compose files to tie containers to nodes (`deploy:`), and keeps dead code on the map as grey `unused` nodes. See SPEC.md section 6.5.
 

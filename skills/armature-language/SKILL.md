@@ -33,6 +33,7 @@ This is how the repo plans, builds and documents. New work starts as a change in
 | `armature activity [--days n]` | See where commits landed, per node and by Conventional Commits type |
 | `armature todos [--kind debt]` | List tasks, tech debt and bugs noted on nodes, most urgent first |
 | `armature confirm [Shape...]` | Record that a shape's fields match its source right now |
+| `armature confirm <node:requirement>` | A person records that they read the node's files and the requirement holds, where no test can reach. Do not run it yourself |
 
 The same commands exist as MCP tools on the `armature` server.
 
@@ -50,6 +51,7 @@ armature/
   tech.yaml            the technologies the system is made of
   shapes.lock.json     written by "armature confirm"; never edit by hand
   approvals.lock.json  written by "armature approve"; never edit by hand
+  confirmed.lock.json  written by "armature confirm <node:requirement>"; never edit by hand
   baseline.json        written by "armature check --update-baseline"
 ```
 

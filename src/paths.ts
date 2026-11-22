@@ -56,3 +56,23 @@ export function readApprovals(root: string): Record<string, Approval> {
     return {};
   }
 }
+
+/** Requirements a person read against the code and found true. Written by "armature confirm <node:requirement>"; never edited by hand. */
+export const CONFIRMED_FILE = 'confirmed.lock.json';
+
+export interface Confirmation {
+  by: string;
+  at: string;
+  /** Hash of the requirement's text and of every file its node owned when it was read. */
+  hash: string;
+}
+
+/** The confirmations recorded for a repo, by requirement ref. */
+export function readConfirmations(root: string): Record<string, Confirmation> {
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(root, MODEL_DIR, CONFIRMED_FILE), 'utf8'));
+    return data && typeof data === 'object' ? data : {};
+  } catch {
+    return {};
+  }
+}

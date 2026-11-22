@@ -2,13 +2,14 @@ import { surfaceText } from './security.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { compile, confirmShapes, findRoot } from './compile.js';
+import { compile, confirmRequirements, confirmShapes, findRoot } from './compile.js';
+import { git } from './repo.js';
 import { MODEL_DIR } from './paths.js';
 import { ownerOf } from './render.js';
 import { watchSources } from './watch.js';
 import { activity, docsText, formatProblems, impact, islands, orient, pathText, show, status, techText, todos, traceText, where } from './render.js';
 import { approveChange } from './approve.js';
-import { newSince, readBaseline, writeBaseline } from './baseline.js';
+import { newSince, newSinceRun, problemsAt, pruneAccepts, readBaseline, writeBaseline } from './baseline.js';
 import { diffModel, diffText } from './diff.js';
 import { rename } from './rename.js';
 import { exportHtml, serve } from './server.js';
@@ -60,12 +61,20 @@ Code graph
 Checking
   armature islands [node]           Dead code: files no entry point reaches, by node
   armature tech [id]               Technologies from armature/tech.yaml and who uses them
-  armature check [--json] [--annotate] [--only errors|wrong|incomplete] [--new] [--fail-on wrong|warnings]
+  armature check [--json] [--annotate] [--only errors|wrong|incomplete] [--since git-ref] [--new] [--fail-on wrong|warnings]
                                 Errors, then warnings where the model is wrong, then where it is incomplete.
-                                Exits 1 on errors. --annotate adds GitHub Actions annotations.
-                                --new shows only warnings that are not in the baseline; --fail-on makes
-                                warnings of that kind exit 1 too. --update-baseline records today's warnings
+                                Exits 1 on errors. Builds the code index first (--no-index skips that).
+                                --annotate adds GitHub Actions annotations.
+                                --since shows only warnings the same check did not give at that commit
+                                (a pull request: --since origin/main); --new does the same against a
+                                committed baseline, which --update-baseline writes. --fail-on makes
+                                warnings of that kind exit 1 too.
+                                --prune-accepts removes accept entries that match no warning any more
   armature confirm [Shape...]      Record shape sources as read, so later edits flag them stale
+  armature confirm <node:requirement> [--by name]
+                                Record that a person read the node's files and found the requirement true,
+                                for what no test can reach (configuration). It holds until the text or
+                                one of those files changes. A person runs this
 
 Changing the model
   armature approve <change> [--by name]   Approve a change and record who approved which elements. A person runs this
@@ -94,7 +103,7 @@ function parse(argv: string[]): { cmd: string; args: string[]; flags: Record<str
   const [cmd = 'help', ...rest] = argv;
   const args: string[] = [];
   const flags: Record<string, string | boolean> = {};
-  const valued = new Set(['root', 'depth', 'port', 'kind', 'days', 'budget', 'files', 'node', 'limit', 'n', 'skip', 'marketplace', 'ref', 'only', 'fail-on', 'by']);
+  const valued = new Set(['root', 'depth', 'port', 'kind', 'days', 'budget', 'files', 'node', 'limit', 'n', 'skip', 'marketplace', 'ref', 'only', 'fail-on', 'by', 'since']);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a.startsWith('--')) {
@@ -334,7 +343,18 @@ async function main(): Promise<void> {
       console.log(todos(compile(root), typeof flags.kind === 'string' ? flags.kind : undefined));
       return;
     case 'check': {
-      const g = compile(root);
+      // The same check everywhere: with no index, everything read from the code (drift, imports, dead
+      // code) is silently left out, and a fresh CI checkout would pass what a laptop reports.
+      let indexed = true;
+      if (!flags['no-index']) await buildCodeIndex(root).catch(() => (indexed = false));
+      let g = compile(root);
+      if (flags['prune-accepts']) {
+        const n = pruneAccepts(root, g.system.idleAccepts);
+        console.log(n ? `Removed ${n} accept entr${n === 1 ? 'y' : 'ies'} that matched no warning from ${MODEL_DIR}/system.yaml.` : 'Every accept entry still matches a warning.');
+        if (!g.code) console.log('There is no code index, so entries for warnings that come from the code were left alone.');
+        if (!n) return;
+        g = compile(root);
+      }
       const only = typeof flags.only === 'string' ? flags.only : null;
       if (only && only !== 'wrong' && only !== 'incomplete' && only !== 'errors') return fail('--only takes errors, wrong or incomplete.');
       const failOn = typeof flags['fail-on'] === 'string' ? flags['fail-on'] : null;
@@ -353,11 +373,27 @@ async function main(): Promise<void> {
         pool = newSince(g.problems, base);
         known = g.problems.length - pool.length;
       }
+      // With --since, the baseline is the same check run on another commit: nothing to commit or keep up to date.
+      const since = typeof flags.since === 'string' ? flags.since : null;
+      if (flags.since === true || since === '') return fail('--since takes a commit, branch or tag: armature check --since origin/main');
+      let sinceNote = '';
+      if (since) {
+        const then = await problemsAt(root, since);
+        if (typeof then === 'string') return fail(then);
+        if (then === null) sinceNote = `${since} has no model, so everything here is new.`;
+        else {
+          pool = newSinceRun(pool, then);
+          const hidden = g.problems.length - known - pool.length;
+          sinceNote = `Compared with ${since}: ${hidden} warning${hidden === 1 ? '' : 's'} that ${hidden === 1 ? 'was' : 'were'} already there ${hidden === 1 ? 'is' : 'are'} not shown.`;
+        }
+      }
       const shown = only ? pool.filter((p) => (only === 'errors' ? p.level === 'error' : p.level === 'warning' && p.group === only)) : pool;
       if (flags.json) console.log(JSON.stringify(shown, null, 2));
       else {
         console.log(formatProblems(shown, g.accepted));
         if (known) console.log(`${known} warning${known === 1 ? '' : 's'} already in the baseline ${known === 1 ? 'is' : 'are'} not shown.`);
+        if (sinceNote) console.log(sinceNote);
+        if (!indexed || !g.code) console.log('No code index: nothing read from the code (drift, imports, dead code) was checked.');
       }
       if (flags.annotate) {
         // GitHub Actions workflow commands: each problem shows on the pull request at its file.
@@ -373,6 +409,20 @@ async function main(): Promise<void> {
       return;
     }
     case 'confirm': {
+      // node:requirement is a requirement a person read against the code; anything else is a shape.
+      const reqRefs = args.filter((a) => a.includes(':'));
+      if (reqRefs.length) {
+        if (reqRefs.length !== args.length) return fail('Confirm requirements (node:requirement) and shapes in separate commands.');
+        await buildCodeIndex(root).catch(() => undefined);
+        const by = typeof flags.by === 'string' && flags.by.trim() ? flags.by.trim() : git(root, ['config', 'user.name'])?.trim() || process.env.USER || '';
+        if (!by) return fail('Say who read it: armature confirm <node:requirement> --by <name>');
+        const r = confirmRequirements(root, reqRefs, by);
+        if (r.confirmed.length) console.log(`Confirmed by ${by}: ${r.confirmed.join(', ')}. ${r.confirmed.length === 1 ? 'It counts' : 'They count'} as verified until the text or a file of the node changes. Commit ${MODEL_DIR}/confirmed.lock.json.`);
+        if (r.failing.length) console.log(`Not confirmed, a test fails: ${r.failing.join(', ')}. Fix the code or the test first.`);
+        if (r.missing.length) console.log(`No such requirement: ${r.missing.join(', ')}`);
+        if (!r.confirmed.length) process.exit(1);
+        return;
+      }
       const r = confirmShapes(root, args);
       console.log(r.confirmed.length ? `Confirmed ${r.confirmed.length}: ${r.confirmed.join(', ')}` : 'No shape with a source to confirm.');
       if (r.missing.length) console.log(`Not found or source missing: ${r.missing.join(', ')}`);

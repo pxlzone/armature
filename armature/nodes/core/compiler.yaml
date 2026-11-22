@@ -20,6 +20,7 @@ tests:
   - test/security.test.ts
   - test/security-holes.test.ts
   - test/activity.test.ts
+  - test/blind-spots.test.ts
 
 accepts:
   - id: compile
@@ -74,6 +75,9 @@ requirements:
     kind: security
     text: An entry point open to anyone that reaches sensitive data, tagged data sent where its policy does not allow, and a secret on a client are errors.
     tests: [test/security.test.ts, test/security-holes.test.ts]
+  - id: blind-spots-are-said
+    text: A requirement that names no test, a node whose files the index cannot read and a route the model leaves out of the surface are each reported, so a passing check does not hide what it did not look at.
+    tests: test/blind-spots.test.ts
   - id: documents-are-tied
     text: A document that names something missing from the model is reported.
     tests: test/docs.test.ts

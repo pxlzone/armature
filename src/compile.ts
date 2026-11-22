@@ -18,7 +18,8 @@ import { sameName, schemaFor } from './schemas.js';
 import { collectDocs, type DocResolver } from './docs.js';
 import { DEFAULT_COMPOSE, looseDockerCommands, readCompose } from './deploy.js';
 import { reach } from './reach.js';
-import { cleanDocsSetting, hasModel, MODEL_DIR, readApprovals } from './paths.js';
+import { cleanDocsSetting, CONFIRMED_FILE, hasModel, MODEL_DIR, readApprovals, readConfirmations } from './paths.js';
+import crypto from 'node:crypto';
 import { findNode, nodeProblem, resolveRef, type RefIndex } from './refs.js';
 import { isSecretName, securityFindings, type SecurityView } from './security.js';
 
@@ -39,7 +40,14 @@ export interface CompileOptions {
   /** Read recent commits for the activity view. Off by default: it costs one git log. */
   activity?: boolean;
   days?: number;
+  /** Requirements (node:id) to compute `filesHash` for, beside the ones already confirmed. */
+  hashRequirements?: string[];
 }
+
+/** Warnings that only a code index can raise: without one, an accept entry for them is not idle, only unseen. */
+const NEEDS_INDEX = new Set(['runtime-drift', 'undeclared-import', 'not-in-code', 'dead-code', 'unused-reachable', 'shape-fields', 'undeclared-secret', 'unread-node']);
+/** The same for warnings that need a test report. */
+const NEEDS_REPORT = new Set(['no-test-match', 'outdated-report', 'report']);
 
 /**
  * Warnings that say a change went past its approval. What the planning gate cannot stop before the
@@ -133,8 +141,8 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
   const err = (code: string, message: string, ref?: string, file?: string): void => {
     problems.push({ level: 'error', code, message, ref, file });
   };
-  const warn = (code: string, message: string, ref?: string, file?: string): void => {
-    problems.push({ level: 'warning', code, message, ref, file, group: warningGroup(code) });
+  const warn = (code: string, message: string, ref?: string, file?: string, items?: string[]): void => {
+    problems.push({ level: 'warning', code, message, ref, file, group: warningGroup(code), ...(items?.length ? { items } : {}) });
   };
   const mdir = MODEL_DIR;
   const archAbs = path.join(root, mdir);
@@ -919,6 +927,35 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     else if (p?.fresh) q.state = 'verified';
     else if (p?.old) q.outdated = true;
   }
+  // A requirement no test can reach (configuration, say) may be confirmed by a person who read the
+  // files. It holds until the text or any file of the node changes; a failing test still wins.
+  const filesHashOf = (q: Requirement): string => {
+    const h = crypto.createHash('sha256').update(q.text);
+    const list = [...filesOf].filter(([nid]) => isInside(nid, q.node)).flatMap(([, l]) => l).sort();
+    for (const f of list) {
+      h.update(`\0${f}\0`);
+      try {
+        h.update(fs.readFileSync(path.join(root, f)));
+      } catch {
+        /* removed since the file list was read */
+      }
+    }
+    return h.digest('hex').slice(0, 32);
+  };
+  const confirmations = readConfirmations(root);
+  for (const q of reqs.values()) {
+    const c = confirmations[q.ref];
+    if (!c && !opts.hashRequirements?.includes(q.ref)) continue;
+    q.filesHash = filesHashOf(q);
+    if (!c) continue;
+    if (c.hash !== q.filesHash) {
+      warn('stale-confirmation', `Requirement "${q.ref}" was confirmed by ${c.by || 'a person'} on ${c.at}, and its text or the files of "${q.node}" changed since. Read them again, then run "armature confirm ${q.ref}".`, q.ref, nodes.get(q.node)!.source);
+      continue;
+    }
+    q.confirmed = { by: c.by, at: c.at };
+    q.evidence.push(`read by ${c.by || 'a person'} on ${c.at}: confirmed against the files, not by a test`);
+    if (q.state === 'unverified' && !q.outdated) q.state = 'verified';
+  }
   // A failure is remembered. With a report to read, the memory is brought up to date; with none,
   // what failed last time still fails, so removing the report does not turn it into "nothing to check".
   const failedFile = path.join(archAbs, '.cache', FAILED_FILE);
@@ -1153,7 +1190,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     for (const d of codeDeps) if (d.kind === 'undeclared') undeclared.set(d.from, [...(undeclared.get(d.from) ?? []), d]);
     for (const [id, deps] of undeclared) {
       const listed = deps.slice(0, 4).map((d) => `${d.to} (${d.count})`).join(', ');
-      warn('undeclared-import', `"${id}" imports code from ${listed}${deps.length > 4 ? ', …' : ''} with no link declared. Declare the link, move the shared code to a library node, or fix the code globs.`, id, nodes.get(id)!.source);
+      warn('undeclared-import', `"${id}" imports code from ${listed}${deps.length > 4 ? ', …' : ''} with no link declared. Declare the link, move the shared code to a library node, or fix the code globs.`, id, nodes.get(id)!.source, deps.map((d) => d.to));
     }
     // Tests that import a node's code: directly, or through an index file that re-exports it.
     const importers = new Map<string, string[]>();
@@ -1183,12 +1220,21 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       if (n.files === 0 || n.kind === 'store' || n.unused) continue;
       detectors.push({ node: n.id, files: n.files, indexed: indexedBy.get(n.id) ?? 0, kinds: [...(rt.kinds.get(n.id) ?? [])].sort() });
     }
+    for (const d of detectors) {
+      const n = nodes.get(d.node)!;
+      if (d.indexed > 0 || n.children.length > 0) continue;
+      const links = edges.filter((e) => e.owner === n.id).length;
+      const open_ = n.requirements.filter((q) => q.state !== 'verified');
+      const parts = [links ? `${links} link${links === 1 ? '' : 's'}` : '', n.interfaces.length ? `${n.interfaces.length} interface${n.interfaces.length === 1 ? '' : 's'}` : '', open_.length ? `${open_.length} requirement${open_.length === 1 ? '' : 's'}` : ''].filter(Boolean);
+      if (!parts.length) continue;
+      warn('unread-node', `"${n.id}" owns ${d.files} file${d.files === 1 ? '' : 's'} and none is in a language armature reads, so its ${parts.join(', ')} ${parts.length === 1 && /^1 /.test(parts[0]) ? 'is' : 'are'} not checked against them.${open_.length ? ` Prove each requirement with a test, or have a person read the files and run "armature confirm ${open_[0].ref}".` : ''}`, n.id, n.source);
+    }
     for (const r of rt.reports) nodes.get(r.node)!.runtime = r;
     codeDeps.push(...rt.deps);
     for (const r of rt.reports) {
       if (r.undeclared.length === 0) continue;
       const items = r.undeclared.slice(0, 5).map((u) => `${u.kind} ${u.what}${u.op ? ` (${u.op})` : ''}`).join(', ');
-      warn('runtime-drift', `"${r.node}" does ${r.undeclared.length} thing${r.undeclared.length === 1 ? '' : 's'} at run time the model does not declare: ${items}${r.undeclared.length > 5 ? ', …' : ''}. See "armature drift ${r.node}".`, r.node, nodes.get(r.node)!.source);
+      warn('runtime-drift', `"${r.node}" does ${r.undeclared.length} thing${r.undeclared.length === 1 ? '' : 's'} at run time the model does not declare: ${items}${r.undeclared.length > 5 ? ', …' : ''}. See "armature drift ${r.node}".`, r.node, nodes.get(r.node)!.source, r.undeclared.map((u) => `${u.kind} ${u.what}${u.op ? ` (${u.op})` : ''}`));
     }
     codeSummary = { files: Object.keys(cidx.files).length, symbols: symbolCount, builtAt: cidx.builtAt };
 
@@ -1207,7 +1253,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     for (const n of nodes.values()) {
       if (n.dead.length && !unusedHere(n.id)) {
         const lines = n.dead.reduce((a, d) => a + d.lines, 0);
-        warn('dead-code', `"${n.id}": ${n.dead.length} file${n.dead.length === 1 ? '' : 's'} (${lines} lines) that no entry point reaches: ${n.dead.slice(0, 4).map((d) => d.path).join(', ')}${n.dead.length > 4 ? ', …' : ''}. See "armature islands ${n.id}".`, n.id, n.source);
+        warn('dead-code', `"${n.id}": ${n.dead.length} file${n.dead.length === 1 ? '' : 's'} (${lines} lines) that no entry point reaches: ${n.dead.slice(0, 4).map((d) => d.path).join(', ')}${n.dead.length > 4 ? ', …' : ''}. See "armature islands ${n.id}".`, n.id, n.source, n.dead.map((d) => d.path));
       }
       if (n.unused) {
         const live = [...owner].filter(([f, id]) => isInside(id, n.id) && r.reachable.has(f)).map(([f]) => f);
@@ -1262,7 +1308,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     if (n.files === 0) return ['planned', 'No file matches its code globs.'];
     if (open(n.change)) return ['building', `Files exist, and change "${n.change}" is not done.`];
     const active = n.requirements.filter((q) => !open(q.change));
-    if (active.length > 0 && active.every((q) => q.state === 'verified')) return ['verified', `All ${active.length} requirement${active.length === 1 ? ' has' : 's have'} a passing test.`];
+    if (active.length > 0 && active.every((q) => q.state === 'verified')) return ['verified', active.some((q) => q.confirmed) ? `All ${active.length} requirement${active.length === 1 ? ' is' : 's are'} verified, by a passing test or by a person who read the code.` : `All ${active.length} requirement${active.length === 1 ? ' has' : 's have'} a passing test.`];
     if (active.length === 0) return ['built', 'Files exist. No requirement declared yet.'];
     const missing = active.filter((q) => q.state !== 'verified').length;
     return ['built', `Files exist. ${missing} of ${active.length} requirement${active.length === 1 ? '' : 's'} not verified.`];
@@ -1425,6 +1471,48 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
   for (const q of reqs.values()) join((c) => c.requirements, q.ref, `requirement ${q.ref}`, q);
   for (const sh of shapes.values()) join((c) => c.shapes, sh.id, `shape ${sh.id}`, sh);
   for (const f of flows) join((c) => c.flows, f.id, `flow ${f.id}`, f);
+  // ---- requirements that name no test ------------------------------------------
+  // "Unverified" has two meanings: the tests have not run here, or no test is tied to the requirement
+  // at all. The second never mends itself, so it is said out loud, with the tests that are already there.
+  const named = new Set<string>();
+  {
+    for (const q of reqs.values()) if (q.tests.length || q.match.length || proof.has(q.ref) || q.confirmed) named.add(q.ref);
+    const loose = [...reqs.values()].filter((q) => !named.has(q.ref));
+    if (loose.length) {
+      // Tags in test titles count with no report to read them from: look for them in the source.
+      // Only in test files: a plan that quotes a tag proves nothing.
+      const found = repo.hasGit ? git(root, ['grep', '--untracked', '-o', '-I', '-E', '\\[req [^] ]+\\]']) : null;
+      let text = (found ?? '').split('\n').filter((l) => TEST_FILE.test(l.slice(0, l.indexOf(':')))).join('\n');
+      if (found === null) {
+        for (const f of repo.files.filter((x) => TEST_FILE.test(x))) {
+          try {
+            text += fs.readFileSync(path.join(root, f), 'utf8');
+          } catch {
+            /* unreadable */
+          }
+        }
+      }
+      for (const m of text.matchAll(/\[req ([^\]\s]+)\]/g)) {
+        const [nref, slug] = m[1].split(':');
+        const nid = reqs.has(m[1]) ? null : resolveNode(nref);
+        named.add(nid ? `${nid}:${slug}` : m[1]);
+      }
+    }
+    const byNode = new Map<string, Requirement[]>();
+    for (const q of loose) {
+      const n = nodes.get(q.node)!;
+      if (named.has(q.ref) || n.files === 0 || n.unused || changes.get(q.change ?? '')?.state === 'dropped') continue;
+      byNode.set(q.node, [...(byNode.get(q.node) ?? []), q]);
+    }
+    for (const [id, list] of byNode) {
+      const n = nodes.get(id)!;
+      const tm = testMatch.get(id);
+      const tests = n.testedBy.length ? n.testedBy : tm ? repo.files.filter(tm) : [];
+      const hint = tests.length ? ` Test files that already exercise this node: ${tests.slice(0, 5).join(', ')}${tests.length > 5 ? `, … (${tests.length} in all)` : ''}.` : '';
+      warn('untested-requirement', `"${id}": ${list.length} requirement${list.length === 1 ? ' names' : 's name'} no test, so ${list.length === 1 ? 'it stays' : 'they stay'} unverified whatever the tests do: ${list.slice(0, 6).map((q) => q.id).join(', ')}${list.length > 6 ? ', …' : ''}. Give each "tests:" or "match:", or tag a test title "[req ${list[0].ref}]".${hint}`, id, n.source, list.map((q) => q.id));
+    }
+  }
+
   const approvals = readApprovals(root);
   for (const c of changes.values()) {
     c.elements.sort();
@@ -1468,6 +1556,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       for (const q of rq) {
         if (q.state === 'verified') continue;
         if (q.state === 'failing' || (cases.length > 0 && !q.outdated)) err('not-done', `Change "${c.id}" is marked done, but requirement "${q.ref}" is not verified.`, c.id);
+        else if (!named.has(q.ref)) warn('done-untested', `Change "${c.id}" is marked done, but requirement "${q.ref}" names no test, so no test report can verify it. Give it "tests:" or "match:", or tag a test title "[req ${q.ref}]".`, q.ref, nodes.get(q.node)!.source);
         else unproven++;
       }
       if (unproven) {
@@ -1559,6 +1648,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
 
   // ---- accepted warnings: looked at by the team and kept, each with a reason ------------
   let accepted = 0;
+  const idleAccepts: number[] = [];
   const accepts = toArr<any>(sys.accept).filter((a) => a && typeof a === 'object' && typeof a.code === 'string');
   if (accepts.length) {
     const used = new Set<number>();
@@ -1577,8 +1667,12 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     problems.length = 0;
     problems.push(...kept);
     const describe = (a: any): string => [a.code, a.ref, a.file, a.match ? `"${a.match}"` : ''].filter(Boolean).join(' ');
-    const idle = accepts.filter((a, i) => !used.has(i) && !NEVER_ACCEPTED.has(a.code));
-    if (idle.length) warn('stale-accept', `${idle.length} accept entr${idle.length === 1 ? 'y matches' : 'ies match'} no warning any more: ${idle.slice(0, 5).map(describe).join(', ')}${idle.length > 5 ? ', …' : ''}. Remove ${idle.length === 1 ? 'it' : 'them'}.`, undefined, `${mdir}/system.yaml`);
+    // An entry for a warning this run could not raise (no code index, no test report) is unseen, not idle.
+    const blind = (code: string): boolean => (!codeIdx && NEEDS_INDEX.has(code)) || (cases.length === 0 && NEEDS_REPORT.has(code));
+    const idle = accepts.filter((a, i) => !used.has(i) && !NEVER_ACCEPTED.has(a.code) && !blind(a.code));
+    const all = toArr<any>(sys.accept);
+    idleAccepts.push(...idle.map((a) => all.indexOf(a)));
+    if (idle.length) warn('stale-accept', `${idle.length} accept entr${idle.length === 1 ? 'y matches' : 'ies match'} no warning any more: ${idle.slice(0, 5).map(describe).join(', ')}${idle.length > 5 ? ', …' : ''}. "armature check --prune-accepts" removes ${idle.length === 1 ? 'it' : 'them'}.`, undefined, `${mdir}/system.yaml`);
     const bare = accepts.filter((a) => !String(a.why ?? '').trim());
     if (bare.length) warn('accept-reason', `${bare.length} accept entr${bare.length === 1 ? 'y gives' : 'ies give'} no reason: ${bare.slice(0, 5).map(describe).join(', ')}${bare.length > 5 ? ', …' : ''}.`, undefined, `${mdir}/system.yaml`);
   }
@@ -1602,6 +1696,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       data: dataPolicy,
       ignore: ignoreEntries.map((x) => (x.why ? x : { path: x.path })),
       accepts: accepts.map((a) => ({ code: a.code, ...(a.ref ? { ref: String(a.ref) } : {}), ...(a.file ? { file: String(a.file) } : {}), ...(a.match ? { match: String(a.match) } : {}), ...(a.why ? { why: String(a.why) } : {}) })),
+      idleAccepts,
       gate: sys.gate !== 'off',
     },
     nodes: order,
@@ -1663,4 +1758,29 @@ export function confirmShapes(root: string, only: string[]): { confirmed: string
   const sorted = Object.fromEntries(Object.entries(lock).sort(([a], [b]) => a.localeCompare(b)));
   fs.writeFileSync(lockPath, `${JSON.stringify(sorted, null, 2)}\n`);
   return { confirmed, missing };
+}
+
+/**
+ * Records that a person read the files of a requirement's node and found the requirement true.
+ * It counts as verified until the requirement's text or any of those files changes.
+ */
+export function confirmRequirements(root: string, refs: string[], by: string): { confirmed: string[]; missing: string[]; failing: string[] } {
+  const graph = compile(root, { hashRequirements: refs });
+  const all = new Map(graph.nodes.flatMap((n) => n.requirements).map((q) => [q.ref, q]));
+  const file = path.join(root, MODEL_DIR, CONFIRMED_FILE);
+  const lock = readConfirmations(root);
+  const out = { confirmed: [] as string[], missing: [] as string[], failing: [] as string[] };
+  for (const ref of refs) {
+    const q = all.get(ref);
+    if (!q?.filesHash) out.missing.push(ref);
+    // A test that fails says the opposite; reading does not overrule it.
+    else if (q.state === 'failing') out.failing.push(ref);
+    else {
+      lock[ref] = { by, at: new Date().toISOString().slice(0, 10), hash: q.filesHash };
+      out.confirmed.push(ref);
+    }
+  }
+  for (const ref of Object.keys(lock)) if (!all.has(ref)) delete lock[ref];
+  if (out.confirmed.length) fs.writeFileSync(file, `${JSON.stringify(Object.fromEntries(Object.entries(lock).sort(([a], [b]) => a.localeCompare(b))), null, 2)}\n`);
+  return out;
 }
