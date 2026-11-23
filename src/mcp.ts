@@ -13,7 +13,7 @@ import { hotspotsText } from './context.js';
 import { diffModel, diffText } from './diff.js';
 import { MODEL_DIR } from './paths.js';
 import { git } from './repo.js';
-import { activity, docsText, formatProblems, impact, islands, orient, pathText, show, status, techText, todos, traceText, where } from './render.js';
+import { activity, docsText, formatProblems, impact, islands, orient, pathText, show, status, tagsText, techText, todos, traceText, where } from './render.js';
 import type { Graph } from './types.js';
 
 // An agent asks several things in a row, and each answer needs the compiled model. Compiling reads
@@ -195,6 +195,15 @@ export async function runMcp(rootFlag?: string): Promise<void> {
       inputSchema: { id: z.string().optional() },
     },
     async ({ id }) => run((root) => techText(compile(root), id))(),
+  );
+
+  server.registerTool(
+    'tags',
+    {
+      description: 'The free labels nodes carry (such as legacy, critical, public) with the nodes under each, or the nodes that carry one tag.',
+      inputSchema: { tag: z.string().optional() },
+    },
+    async ({ tag }) => run((root) => tagsText(compile(root), tag))(),
   );
 
   server.registerTool(

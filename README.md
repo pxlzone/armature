@@ -205,6 +205,7 @@ Going deeper:
 | `armature hotspots [node]` | Files that change most and are largest |
 | `armature islands [node]` | Dead code: files no entry point (script, container command, route, test) reaches |
 | `armature tech [id]` | The technologies in `armature/tech.yaml`, or who uses one |
+| `armature tags [tag]` | The tags nodes carry (`tags: [legacy, critical]`), or the nodes that carry one |
 | `armature shapes --sync` | Rewrite shape fields from Drizzle, Zod, Pydantic or SQL |
 | `armature summarize --yes` | One-line file summaries by a model (costs money) |
 | `armature index --watch` | Keep the index fresh while you work |

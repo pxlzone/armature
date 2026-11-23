@@ -79,7 +79,8 @@ kind: worker            # actor app service worker job agent store queue externa
 role: records every payment         # five words or fewer; shown under the name
 name: Ledger            # optional display name
 description: One or two sentences.
-tech: [node, tsx]
+tech: [node, tsx]       # what it is built with; each id is listed in tech.yaml
+tags: [legacy, critical]   # optional free labels in lowercase; not inherited, nothing is checked against them
 hub: true               # at most one per view; drawn as the wide card
 code: [src/lib/ledger/**]          # globs that bind the node to files
 docs: [docs/ledger-plan.md]   # optional: documents about this node, paths or globs

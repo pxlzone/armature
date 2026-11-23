@@ -7,6 +7,7 @@ import { approveChange } from './approve.js';
 import { compile } from './compile.js';
 import { changeSecurity } from './security.js';
 import { MODEL_DIR } from './paths.js';
+import { git } from './repo.js';
 import { readDoc } from './docs.js';
 import { buildCodeIndex } from './code.js';
 import { watchSources } from './watch.js';
@@ -27,10 +28,28 @@ function embed(html: string, graph: Graph | null, token?: string): string {
   return html.replace('</head>', `<script>window.__ARMATURE_GRAPH__=${data};${key}</script></head>`);
 }
 
-/** Adds, to each change that waits for approval, what it does to security: the person reads it before they approve. */
-function forReview(graph: Graph): Graph {
+/** When a change was proposed: the first commit that has its file, or the file's own date while git does not know it. */
+export function proposedAt(root: string, id: string): string | undefined {
+  for (const ext of ['yaml', 'yml']) {
+    const rel = `${MODEL_DIR}/changes/${id}.${ext}`;
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(path.join(root, rel));
+    } catch {
+      continue;
+    }
+    const first = git(root, ['log', '--diff-filter=A', '--follow', '--format=%aI', '--', rel])?.trim().split('\n').pop();
+    if (first) return first;
+    return (stat.birthtimeMs > 0 ? stat.birthtime : stat.mtime).toISOString();
+  }
+  return undefined;
+}
+
+/** Adds, to each change that waits for approval, when it was proposed and what it does to security: the person reads both before they approve. */
+function forReview(graph: Graph, root: string): Graph {
   for (const c of graph.changes) {
     if (!awaitingApproval(c)) continue;
+    c.proposedAt = proposedAt(root, c.id);
     const sec = changeSecurity(graph, c.id);
     c.security = { lines: sec.lines, errors: sec.errors.map((e) => `${e.code}: ${e.message}`) };
   }
@@ -66,7 +85,7 @@ export function approveFromPage(root: string, token: string, req: Pick<http.Inco
 }
 
 export function exportHtml(root: string, out: string, github: boolean): string {
-  const graph = forReview(compile(root, { github, activity: true }));
+  const graph = forReview(compile(root, { github, activity: true }), root);
   graph.root = path.basename(root);
   // A static file has no server to ask, so the document texts travel inside it (up to 12 MB).
   graph.docTexts = {};
@@ -91,7 +110,7 @@ export function serve(root: string, port: number, github: boolean): Promise<stri
     const url = (req.url ?? '/').split('?')[0];
     if (url === '/graph.json') {
       try {
-        const graph = forReview(compile(root, { github, activity: true }));
+        const graph = forReview(compile(root, { github, activity: true }), root);
         res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
         res.end(JSON.stringify(graph));
       } catch (e: any) {

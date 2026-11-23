@@ -128,6 +128,7 @@ id: billing
 kind: worker
 role: charges cards, issues refunds        # five words or fewer, shown under the name
 tech: [node, tsx]
+tags: [critical, pci]                      # free labels: whatever the team wants to mark
 hub: true                                  # drawn as the wide card; one per view
 code:  [src/billing/**, src/lib/payments/**]
 scopes: [billing, payments]                # Conventional Commits scopes that mean this node
@@ -190,6 +191,7 @@ todos:
 Notes:
 
 - `code` globs bind the node to files. This one field connects rules, tests, coverage and PRs to the diagram.
+- `tags:` are free labels in lowercase (`legacy`, `critical`, `public`). `tech:` says what a node is built with and must be listed in `tech.yaml`; a tag is listed nowhere and means what the team says it means. A tag marks the node it is written on and is not inherited. Nothing is checked against it. `armature tags [tag]` lists them, or the nodes that carry one.
 - `to:` may name just a node (`to: fraud`) while a design is still coarse. The checker warns, it does not fail.
 - A store uses `holds:` instead of `accepts:`; each entry is a table or collection with a shape.
 - `via` is an open list with known icons: `http`, `grpc`, `ws`, `webhook`, `mcp`, `sql`, `bolt`, `redis`, `pgmq`, `temporal`, `kafka`, `cron`, `cli`, `sdk`, `smtp`, `imap`, `in-process`.
@@ -503,6 +505,7 @@ Dead files in a live node are a `dead-code` warning (incomplete). Dead code the 
 | Node | Rounded icon tile. Name in uppercase monospace. Role line beneath |
 | Hub node | Wide card with the text inside. One per view |
 | Kind | Icon. `tech` can swap in a brand icon (Postgres, Redis, Temporal) |
+| Technology and tags | The node's `tech:` as small chips under the role line, by the names `tech.yaml` gives them, then its `tags:` in the same row, rounded and written `#legacy`; "+N" when they do not fit. An open group names both in its title bar. The panel lists each technology with its category, and its version and note on hover, and the tags beside them |
 | Group | Colour, up to six hues. Red and amber are reserved for status |
 | Status | Border style, as in section 6 |
 | Link | Thin right-angle line, arrow pointing the way the data moves |
@@ -524,7 +527,7 @@ Dead files in a live node are a `dead-code` warning (incomplete). Dead code the 
 7. **Lines by zoom.** Zoomed out (below about 60%), links are merged for presentation: two-way links between a pair of nodes become one line with a head at each end, lines share trunks, the layout tightens, and labels show only on what is highlighted. Zoomed in (100% and above), every link is drawn on its own with its data label. The node under the cursor stays in place when the drawing switches. A control forces either mode. A selected flow is always drawn with separate lines.
 8. **Nested containers.** Each open group is a container with a solid title bar in its colour. Nesting levels alternate between a tinted body and a near-white one, and inner borders are darker and slightly raised, so a container never blends into the one around it, even when they share a colour. When zoomed out, titles are drawn larger than their bar, up to 2.4 times, and the right side names the parents ("in Shipping › Label printer").
 9. **Readable tiles.** Below about 70% zoom, tiles are drawn larger than their layout slot, up to 1.7 times, so names stay legible.
-10. **Detail by zoom.** Below 50% the role lines, status tags and edge labels are hidden; names and status borders remain.
+10. **Detail by zoom.** Below 50% the role lines, technology chips, status tags and edge labels are hidden; names and status borders remain.
 
 ### 7.1.1 Planned versus built
 
@@ -563,6 +566,7 @@ One diagram, switchable overlays.
 | **Data** | Pick a shape or a field; every interface, link and store it touches lights up |
 | **Tests** | Coverage ring and pass or fail per node; requirement list on click |
 | **Work** | Pick a change; its elements light up. A list of next tasks, tech debt and bugs, filterable by kind and sorted by priority. Todo, debt and PR counts on nodes |
+| **To approve** | Every change that waits for a person, each with the date it was proposed (the first commit of its file, or the file's date before it is committed) and, when it was approved before, when and by whom. What approving covers, what it does to security, and the Approve button |
 | **Docs** | The whole document library, grouped by folder and searchable, with each document's kind and filters for plans and documents not yet in the model. Picking a document opens it and lights up the nodes it is about; tiles show how many documents are about them |
 | **Activity** | Commits and pull requests per node over the window, by Conventional Commits type. Busier tiles are darker; filter by type |
 | **Code** | Replaces data links with what the code imports, node to node. Undeclared dependencies are red and dashed; the panel lists them with the importing files |
@@ -644,6 +648,7 @@ The MCP server gives the read-only answers (not `approve`, `rename`, `confirm` o
 | `armature check [--only g] [--since ref] [--new] [--fail-on g] [--update-baseline] [--prune-accepts]` | Errors and warnings from section 8. Builds the code index first, so the result is the same on a laptop and in CI |
 | `armature islands [node]` | Dead code by node |
 | `armature tech [id]` | Technologies, or who uses one |
+| `armature tags [tag]` | The tags nodes carry, or the nodes that carry one |
 | `armature status` | Counts per status, per change |
 | `armature todos [--kind debt]` | Tasks, tech debt and bugs noted on nodes, most urgent first |
 | `armature activity [--days n] [--github]` | Commits and pull requests per node, by Conventional Commits type |

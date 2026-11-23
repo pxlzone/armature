@@ -157,3 +157,31 @@ describe('answers for agents', () => {
     expect(i).toContain('link api -> db#orders');
   });
 });
+
+describe('node tags', () => {
+  it('reads free labels from a node, lists them, and refuses one that is not a slug', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { compile } = await import('../src/compile.js');
+    const { show, tagsText } = await import('../src/render.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'armature-tags-'));
+    const write = (rel: string, body: string): void => {
+      fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+      fs.writeFileSync(path.join(root, rel), body);
+    };
+    write('armature/system.yaml', 'name: Shop\nheadline: Sells things.\n');
+    write('armature/nodes/api.yaml', 'kind: service\nrole: order API\ntags: [critical, legacy, critical]\n');
+    write('armature/nodes/mail.yaml', 'kind: worker\nrole: sends receipts\ntags: legacy\n');
+    const g = compile(root);
+    expect(g.problems.filter((p) => p.level === 'error')).toEqual([]);
+    expect(g.nodes.find((n) => n.id === 'api')?.tags).toEqual(['critical', 'legacy']);
+    expect(tagsText(g)).toBe('critical (1): api\nlegacy (2): api, mail');
+    expect(tagsText(g, '#legacy')).toContain('mail (worker): sends receipts');
+    expect(tagsText(g, 'nope')).toContain('Tags in use: critical, legacy');
+    expect(show(g, 'api')).toContain('tags: critical, legacy');
+
+    write('armature/nodes/mail.yaml', 'kind: worker\nrole: sends receipts\ntags: [Not A Slug]\n');
+    expect(compile(root).problems.some((p) => p.level === 'error' && p.file?.endsWith('mail.yaml'))).toBe(true);
+  });
+});
