@@ -7,6 +7,7 @@ import { buildCodeIndex } from '../src/code.js';
 import { compile } from '../src/compile.js';
 import { readDoc } from '../src/docs.js';
 import { readCodeIndex } from '../src/code.js';
+import { contextText } from '../src/context.js';
 import { bashGate, writeGate } from '../src/gate.js';
 import { status } from '../src/render.js';
 import { rename } from '../src/rename.js';
@@ -266,5 +267,18 @@ describe('imports the dead-code check follows', () => {
     write('src/main.js', "import { b } from '@/components/button';\nimport { a } from 'src/pkg/a';\nimport { d } from './dir/';\n");
     await buildCodeIndex(root);
     expect(importsOf('src/main.js')).toEqual(['src/components/button.js', 'src/pkg/a.js', 'src/dir/index.js']);
+  });
+});
+
+describe('the context pack', () => {
+  it('lists the test named after the task first, and does not repeat rules', async () => {
+    write('armature/nodes/core.yaml', lines('kind: library', 'role: core', 'code: [src/**]', 'rules:', '  - Keep it small.'));
+    write('src/islands.ts', 'export function islands(): number {\n  return 1;\n}\n');
+    write('src/other.ts', "import { islands } from './islands';\nexport const o = islands();\n");
+    for (const t of ['aaa', 'bbb', 'ccc', 'ddd', 'eee', 'fff', 'islands']) write(`test/${t}.test.ts`, "import { islands } from '../src/islands';\nislands();\n");
+    await buildCodeIndex(root);
+    const text = contextText(compile(root), readCodeIndex(root), root, 'add a json flag to islands', { budget: 5000 });
+    expect(text.split('## Tests to run\n')[1]?.split('\n')[0]).toBe('- test/islands.test.ts');
+    expect(text.split('Keep it small.').length - 1).toBe(1);
   });
 });

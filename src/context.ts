@@ -436,9 +436,10 @@ export function contextPack(g: Graph, idx: CodeIndex, root: string, task: string
   // 4. Render within the budget.
   const out: string[] = [];
   const used = (): number => out.reduce((n, l) => n + l.length + 1, 0);
+  let limit = budget;
   const push = (...lines: string[]): boolean => {
     const size = lines.reduce((n, l) => n + l.length + 1, 0);
-    if (used() + size > budget) return false;
+    if (used() + size > limit) return false;
     out.push(...lines);
     return true;
   };
@@ -452,11 +453,10 @@ export function contextPack(g: Graph, idx: CodeIndex, root: string, task: string
     const overlaps = (text: string): boolean => words(text).some((w) => qs.has(w));
     for (const n of shown) {
       const block = [`- ${n.id} (${n.kind}): ${n.role}${n.status !== 'built' ? ` [${n.status}]` : ''}`];
-      const own = n.rules.filter((r) => r.from === n.id);
-      for (const r of [...own.filter((r) => overlaps(r.text)), ...own.filter((r) => !overlaps(r.text))].slice(0, 2)) block.push(`  rule: ${r.text}`);
       const plans = g.changes.filter((c) => c.state !== 'done' && c.state !== 'dropped' && (c.nodes.includes(n.id) || c.interfaces.some((i) => i.startsWith(`${n.id}#`))) && overlaps(`${c.title} ${c.why ?? ''}`));
       for (const c of plans.slice(0, 2)) block.push(`  plan: ${c.title} [${c.state}]${c.doc ? ` (${c.doc})` : ''}`);
-      for (const r of n.requirements.filter((r) => overlaps(r.text)).slice(0, 2)) block.push(`  must hold: ${r.text}`);
+      // Rules and security requirements are printed under "Must hold" below; repeating them here cost tokens.
+      for (const r of n.requirements.filter((r) => r.kind !== 'security' && overlaps(r.text)).slice(0, 2)) block.push(`  must hold: ${r.text}`);
       if (lines.concat(block).reduce((k, l) => k + l.length + 1, 0) > cap) break;
       lines.push(...block);
     }
@@ -476,6 +476,8 @@ export function contextPack(g: Graph, idx: CodeIndex, root: string, task: string
     for (const s of shapeList) push(`- ${s.id}${s.source ? ` (${s.source})` : ''}: ${s.fields.slice(0, 12).map((f) => `${f.name}: ${f.type}`).join(', ')}${s.fields.length > 12 ? ', …' : ''}`);
   }
   push('', '## Files, most relevant first (signatures only)');
+  // Files would fill the whole budget and leave no room for which tests to run.
+  limit = budget - 600;
   let listed = 0;
   const qset = new Set(q);
   for (const r of files) {
@@ -490,6 +492,7 @@ export function contextPack(g: Graph, idx: CodeIndex, root: string, task: string
     listed++;
     if (listed >= 25) break;
   }
+  limit = budget;
   const topFiles = files.filter((f) => !idx.files[f.path]?.test).slice(0, Math.max(3, listed)).map((f) => f.path);
   if (hist) {
     const partners = new Map<string, number>();
@@ -499,7 +502,11 @@ export function contextPack(g: Graph, idx: CodeIndex, root: string, task: string
       for (const [p, s] of [...partners].sort((a, b) => b[1] - a[1]).slice(0, 4)) push(`- ${p} (${Math.round(s * 100)}% of the time)`);
     }
   }
-  const tests = testsForFiles(idx, topFiles.slice(0, 8)).slice(0, 6);
+  // Tests named after the task come first, then those of the most relevant files. Alphabetical order cut the obvious one.
+  const named = Object.values(idx.files).filter((f) => f.test && words(path.basename(f.path)).some((w) => qset.has(w) && !/^(?:tests?|specs?|[cm]?[jt]sx?|py)$/.test(w))).map((f) => f.path);
+  const byFile: string[] = [];
+  for (const f of topFiles.slice(0, 8)) for (const t of testsForFiles(idx, [f])) if (!byFile.includes(t)) byFile.push(t);
+  const tests = [...new Set([...named, ...byFile])].slice(0, 6);
   if (tests.length) push('', '## Tests to run', ...tests.map((t) => `- ${t}`));
   const docs = new Set<string>();
   const replaced = new Set(g.docs.filter((d) => d.supersededBy).map((d) => d.path));

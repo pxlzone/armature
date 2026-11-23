@@ -158,19 +158,9 @@ function orientText(g: Graph, compact: boolean): string {
   out.push('- Only a person approves a change. Do not write code for a change that is still proposed, and do not create source files that no node owns.');
   out.push(`- Documents are Markdown with a header (kind, about, change) and [[references]] to nodes, node#interfaces, Shapes, flows and changes. New ones go under ${g.system.docs}/. The armature-docs skill has the format.`);
   out.push('');
+  // The MCP tools and the skills describe every command, so the digest names only the three that set the order of work.
   out.push('## Digging deeper');
-  out.push('- `armature show <ref>` for a node, node#interface, Shape, flow or change. Add `--depth 2` to include children.');
-  out.push('- `armature where <file>` for the node that owns a file, with its rules.');
-  out.push('- `armature impact <ref>` for what depends on something before you change it.');
-  if (g.code) {
-    out.push(`- \`armature map <node>\` for a node's files, most central first, with exported signatures (${g.code.files} files and ${g.code.symbols} symbols are indexed). Use it to pick what to read.`);
-    out.push('- `armature context "<task>"` first: the nodes, rules, data, ranked files and tests for that task, within a budget.');
-    out.push('- `armature docs <ref>` for the plans and written documents about a node, shape, flow or change.');
-    out.push('- `armature callers <symbol>` before changing a signature; `armature tests <file|node|symbol>` for what to run; `armature search "<words>"` to find code by topic.');
-    out.push('- `armature symbol <name>` for where something is defined and who imports it. `armature deps <node>` for what a node\'s code imports.');
-  }
-  out.push('- `armature islands [node]` for dead code; `armature tech [id]` for the technologies and who uses them.');
-  out.push(`- \`armature check\` after editing anything under ${g.system.dir}/.`);
+  out.push(`- ${g.code ? '`armature context "<task>"` first, ' : ''}\`armature impact <ref>\` before you change something, and \`armature check\` after editing anything under ${g.system.dir}/. \`armature help\` lists the rest.`);
   return out.join('\n');
 }
 
