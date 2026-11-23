@@ -21,6 +21,7 @@ tests:
   - test/security-holes.test.ts
   - test/activity.test.ts
   - test/blind-spots.test.ts
+  - test/review-fixes.test.ts
 
 accepts:
   - id: compile
@@ -63,6 +64,9 @@ requirements:
     text: A passing test counts only while its report is newer than the code it tested.
     tests: test/sound.test.ts
     match: counts a pass only while the report is newer
+  - id: no-false-green
+    text: A parent's own failing or untested requirement, a failure a partial run did not retest, and a route the code does not serve never show as green.
+    tests: test/review-fixes.test.ts
   - id: claims-are-checked
     text: An interface the model declares and the code does not register is reported, and one the index cannot read is unchecked, not fine.
     tests: test/sound.test.ts

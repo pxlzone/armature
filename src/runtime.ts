@@ -21,8 +21,10 @@ function pathEndsWith(full: string, tail: string): boolean {
   const a = segs(full);
   const b = segs(tail);
   if (b.length === 0 || b.length > a.length) return false;
+  // A tail of parameters alone ("/:id" on a mounted router) would match every route, so it needs a fixed segment.
+  if (b.length < a.length && b.every((s) => s === ':')) return false;
   const off = a.length - b.length;
-  return b.every((s, i) => s === ':' || a[off + i] === ':' || s === a[off + i]);
+  return b.every((s, i) => s === a[off + i]);
 }
 
 /** True when a route registered in code (`op` and `path`) is the route an interface declares. */

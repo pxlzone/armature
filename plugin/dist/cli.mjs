@@ -231,7 +231,7 @@ function securityFindings(v) {
 	const changesOfNode = (id) => [...new Set([nodes.get(id), ...ancestors(id)].flatMap(tagsOfNode))];
 	const shapes = new Map(v.shapes.map((s) => [s.id, s]));
 	const changesOfFields = (t) => [...t.values()].flat().flatMap((field) => tagsOf(shapes.get(field.split(".")[0]) ?? {}));
-	const add = (level, code, message, ref, file, changes) => {
+	const add = (level, code, message, ref, file, changes, items) => {
 		out.push({
 			level,
 			code,
@@ -239,7 +239,8 @@ function securityFindings(v) {
 			ref,
 			file,
 			changes: [...new Set(changes)],
-			...level === "warning" ? { group: "incomplete" } : {}
+			...level === "warning" ? { group: "incomplete" } : {},
+			...items ? { items } : {}
 		});
 	};
 	const entries = entryPoints(v);
@@ -295,7 +296,7 @@ function securityFindings(v) {
 		const undeclared = [...new Set(n.env.filter((r) => isSecretName(r.name) && !declared.has(r.name)).map((r) => r.name))];
 		if (undeclared.length) {
 			const where = n.env.find((r) => r.name === undeclared[0]);
-			add("warning", "undeclared-secret", `"${n.id}" reads ${undeclared.slice(0, 6).join(", ")}${undeclared.length > 6 ? ", …" : ""} from the environment (${where.file}:${where.line}), which ${undeclared.length === 1 ? "looks like a credential" : "look like credentials"} the model does not list. Add ${undeclared.length === 1 ? "it" : "them"} to the node's "secrets:".`, n.id, n.source, changesOfNode(n.id));
+			add("warning", "undeclared-secret", `"${n.id}" reads ${undeclared.slice(0, 6).join(", ")}${undeclared.length > 6 ? ", …" : ""} from the environment (${where.file}:${where.line}), which ${undeclared.length === 1 ? "looks like a credential" : "look like credentials"} the model does not list. Add ${undeclared.length === 1 ? "it" : "them"} to the node's "secrets:".`, n.id, n.source, changesOfNode(n.id), undeclared);
 		}
 	}
 	for (const c of v.changes) {
@@ -19586,7 +19587,11 @@ var SKIP_DIRS = /* @__PURE__ */ new Set([
 ]);
 function git$1(root, args) {
 	try {
-		return execFileSync("git", args, {
+		return execFileSync("git", [
+			"-c",
+			"core.quotePath=false",
+			...args
+		], {
 			cwd: root,
 			encoding: "utf8",
 			stdio: [
@@ -21042,8 +21047,9 @@ function pathEndsWith(full, tail) {
 	const a = segs(full);
 	const b = segs(tail);
 	if (b.length === 0 || b.length > a.length) return false;
+	if (b.length < a.length && b.every((s) => s === ":")) return false;
 	const off = a.length - b.length;
-	return b.every((s, i) => s === ":" || a[off + i] === ":" || s === a[off + i]);
+	return b.every((s, i) => s === a[off + i]);
 }
 /** True when a route registered in code (`op` and `path`) is the route an interface declares. */
 function sameRoute(declared, op, path) {
@@ -21294,7 +21300,11 @@ function analyzeRuntime(idx, nodes, edges, ifaces, owner, ancestors, planned = (
 var MAX_COMMITS = 2e3;
 function git(root, args) {
 	try {
-		return execFileSync("git", args, {
+		return execFileSync("git", [
+			"-c",
+			"core.quotePath=false",
+			...args
+		], {
 			cwd: root,
 			encoding: "utf8",
 			stdio: [
@@ -21735,7 +21745,9 @@ function readDoc(root, file) {
 	const abs = path.resolve(root, file);
 	if (!abs.startsWith(path.resolve(root) + path.sep)) return null;
 	try {
-		return fs.readFileSync(abs, "utf8");
+		const real = fs.realpathSync(abs);
+		if (!real.startsWith(fs.realpathSync(root) + path.sep)) return null;
+		return fs.readFileSync(real, "utf8");
 	} catch {
 		return null;
 	}
@@ -22695,7 +22707,7 @@ function compile$1(root, opts = {}) {
 				retire: a.retire,
 				status: "built",
 				evidence: "unchecked",
-				...a.auth !== void 0 ? { auth: String(a.auth) } : {},
+				...a.auth !== void 0 ? { auth: /^none$/i.test(String(a.auth).trim()) ? "none" : String(a.auth) } : {},
 				...onlyOf(a.only, ref)
 			});
 		}
@@ -23199,8 +23211,15 @@ function compile$1(root, opts = {}) {
 		if (q.state === "unverified" && !q.outdated) q.state = "verified";
 	}
 	const failedFile = path.join(archAbs, ".cache", FAILED_FILE);
-	if (cases.length > 0) rememberFailures(failedFile, [...reqs.values()].filter((q) => q.state === "failing").map((q) => q.ref));
-	else for (const ref of readFailures(failedFile)) {
+	if (cases.length > 0) {
+		for (const ref of readFailures(failedFile)) {
+			const q = reqs.get(ref);
+			if (!q || proof.has(q.ref)) continue;
+			q.state = "failing";
+			q.evidence.push("failed: in an earlier test run, and the latest report has none of its tests. Run them again.");
+		}
+		rememberFailures(failedFile, [...reqs.values()].filter((q) => q.state === "failing").map((q) => q.ref));
+	} else for (const ref of readFailures(failedFile)) {
 		const q = reqs.get(ref);
 		if (!q) continue;
 		q.state = "failing";
@@ -23620,13 +23639,16 @@ function compile$1(root, opts = {}) {
 		const kids = n.children.map((c) => nodes.get(c));
 		const has = (s) => kids.some((k) => k.status === s);
 		const all = (s) => kids.every((k) => k.status === s);
-		const own = n.code.length > 0 ? n.status : null;
+		const ownActive = n.requirements.filter((q) => !open(q.change));
+		const ownFailing = n.requirements.some((q) => q.state === "failing") || (n.testSummary?.failed ?? 0) > 0;
+		const own = n.code.length > 0 ? n.status : ownFailing ? "failing" : null;
+		const ownVerified = n.code.length > 0 ? own === "verified" || own === "built" && ownActive.length === 0 : ownActive.every((q) => q.state === "verified");
 		if (n.retire) [n.status, n.statusWhy] = ["retiring", `Marked for retirement by change "${n.retire}".`];
-		else if (has("failing") || own === "failing") [n.status, n.statusWhy] = ["failing", "A node inside is failing."];
+		else if (has("failing") || own === "failing") [n.status, n.statusWhy] = ["failing", has("failing") ? "A node inside is failing." : "Its own requirement or linked test is failing."];
 		else if (has("stale") || own === "stale") [n.status, n.statusWhy] = ["stale", "A node inside is stale."];
 		else if (all("planned") && (own === null || own === "planned")) [n.status, n.statusWhy] = ["planned", "Everything inside is planned."];
 		else if (has("planned") || has("building") || own === "building") [n.status, n.statusWhy] = ["building", "Some nodes inside are planned or being built."];
-		else if (all("verified")) [n.status, n.statusWhy] = ["verified", "Everything inside is verified."];
+		else if (all("verified") && ownVerified) [n.status, n.statusWhy] = ["verified", "Everything inside is verified."];
 		else [n.status, n.statusWhy] = ["built", "Everything inside is built."];
 		let found = 0;
 		let hit = 0;
@@ -23948,7 +23970,7 @@ function compile$1(root, opts = {}) {
 		system: { data: dataPolicy }
 	};
 	for (const f of securityFindings(securityView)) if (f.level === "error") err(f.code, f.message, f.ref, f.file);
-	else warn(f.code, f.message, f.ref, f.file);
+	else warn(f.code, f.message, f.ref, f.file, f.items);
 	let accepted = 0;
 	const idleAccepts = [];
 	const accepts = toArr(sys.accept).filter((a) => a && typeof a === "object" && typeof a.code === "string");
@@ -25938,6 +25960,11 @@ function serve(root, port, github) {
 	const clients = /* @__PURE__ */ new Set();
 	const token = randomBytes(24).toString("hex");
 	const server = http.createServer((req, res) => {
+		if (!/^(?:localhost|127\.0\.0\.1|\[::1\]):\d+$/.test(req.headers.host ?? "")) {
+			res.writeHead(403);
+			res.end();
+			return;
+		}
 		const url = (req.url ?? "/").split("?")[0];
 		if (url === "/graph.json") {
 			try {
@@ -27498,10 +27525,7 @@ async function hook(name, rootFlag) {
 				if (mode === "plan") {
 					if (once(root, "plan-sessions", sid)) out.push(planModeNote(MODEL_DIR, newPlanPath(docsDir(root), MODEL_DIR)));
 					else if (was !== "plan") out.push(planReminder(MODEL_DIR));
-				} else if (PLANNING_WORDS.test(prompt)) {
-					if (once(root, "planning-sessions", sid)) out.push(planningNote(MODEL_DIR, newPlanPath(docsDir(root), MODEL_DIR)));
-					else out.push(planReminder(MODEL_DIR));
-				}
+				} else if (PLANNING_WORDS.test(prompt) && once(root, "planning-sessions", sid)) out.push(planningNote(MODEL_DIR, newPlanPath(docsDir(root), MODEL_DIR)));
 			}
 			if (out.length) process.stdout.write(`${out.join("\n\n")}\n`);
 			return;
@@ -27511,7 +27535,14 @@ async function hook(name, rootFlag) {
 			dropPendingApproval(root);
 			if (!verdict) return;
 			if (verdict.approves) {
-				const sec = changeSecurity(compile$1(root), verdict.approves);
+				let sec;
+				try {
+					sec = changeSecurity(compile$1(root), verdict.approves);
+				} catch (e) {
+					notePendingApproval(root, verdict.approves, callKey(input.tool_input));
+					decide("ask", `${verdict.reason}\nSecurity: not checked, the model does not compile (${String(e?.message ?? e)}). Run "armature check" before you say yes.`);
+					return;
+				}
 				if (sec.errors.length) {
 					decide("deny", `Change "${verdict.approves}" cannot be put up for approval while it has security errors. Fix them in the model first:\n${sec.errors.map((e) => `- ${e.code}: ${e.message}`).join("\n")}`);
 					return;
@@ -44115,10 +44146,13 @@ async function main() {
 		case "orient":
 			console.log(orient(compile$1(root)));
 			return;
-		case "show":
+		case "show": {
 			if (!args[0]) return fail("Usage: armature show <ref>");
-			console.log(show(compile$1(root), args[0], Number(flags.depth) || 1));
+			const text = show(compile$1(root), args[0], Number(flags.depth) || 1);
+			if (text.startsWith("Nothing named")) return refuse(text);
+			console.log(text);
 			return;
+		}
 		case "where": {
 			if (!args[0]) return fail("Usage: armature where <file>");
 			const fromCwd = path.resolve(args[0]);
@@ -44151,18 +44185,26 @@ async function main() {
 			if (typeof d === "string") process.exit(2);
 			return;
 		}
-		case "approve":
+		case "approve": {
 			if (!args[0]) return fail("Usage: armature approve <change> [--by name]");
-			console.log(approveChange(root, args[0], typeof flags.by === "string" ? flags.by : void 0));
+			const sec = changeSecurity(compile$1(root), args[0]);
+			if (sec.errors.length) return refuse(`Change "${args[0]}" cannot be approved while it has security errors:\n${sec.errors.map((e) => `- ${e.code}: ${e.message}`).join("\n")}`);
+			const msg = approveChange(root, args[0], typeof flags.by === "string" ? flags.by : void 0);
+			if (!msg.startsWith("Approved change")) return refuse(msg);
+			console.log(msg);
 			return;
-		case "rename":
+		}
+		case "rename": {
 			if (!args[1]) return fail("Usage: armature rename <ref> <new name>");
-			console.log(rename(root, args[0], args[1]));
+			const msg = rename(root, args[0], args[1]);
+			if (!msg.startsWith("Renamed ")) return refuse(msg);
+			console.log(msg);
 			if (fs.existsSync(path.join(root, ".claude", "rules"))) {
 				const r = syncRules(root);
 				if (r.written || r.removed) console.log(`Rule files: ${r.written} written, ${r.removed} removed.`);
 			}
 			return;
+		}
 		case "status":
 			console.log(status(compile$1(root, { github: flags.github === true })));
 			return;
@@ -44424,6 +44466,11 @@ async function main() {
 		}
 		default: fail(`Unknown command "${cmd}".\n\n${HELP}`);
 	}
+}
+/** The command ran and said no: exit 1, so scripts and CI do not read a refusal as success. */
+function refuse(msg) {
+	console.error(msg);
+	process.exitCode = 1;
 }
 function fail(msg) {
 	console.error(msg);

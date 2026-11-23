@@ -10,7 +10,8 @@ const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', '.t
 
 export function git(root: string, args: string[]): string | null {
   try {
-    return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+    // Without quotePath=false git prints non-ASCII paths quoted and escaped, and they match no file.
+    return execFileSync('git', ['-c', 'core.quotePath=false', ...args], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
   } catch {
     return null;
   }

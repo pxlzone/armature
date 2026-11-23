@@ -236,8 +236,8 @@ export function securityFindings(v: SecurityView): Finding[] {
   // A change that adds a tagged field to a shape changes what every link and entry point that carries the shape lets out.
   const shapes = new Map(v.shapes.map((s) => [s.id, s]));
   const changesOfFields = (t: Tagged): string[] => [...t.values()].flat().flatMap((field) => tagsOf(shapes.get(field.split('.')[0]) ?? {}));
-  const add = (level: Problem['level'], code: string, message: string, ref: string | undefined, file: string | undefined, changes: string[]): void => {
-    out.push({ level, code, message, ref, file, changes: [...new Set(changes)], ...(level === 'warning' ? { group: 'incomplete' as const } : {}) });
+  const add = (level: Problem['level'], code: string, message: string, ref: string | undefined, file: string | undefined, changes: string[], items?: string[]): void => {
+    out.push({ level, code, message, ref, file, changes: [...new Set(changes)], ...(level === 'warning' ? { group: 'incomplete' as const } : {}), ...(items ? { items } : {}) });
   };
 
   // Entry points: who may call, and what is behind them.
@@ -301,7 +301,7 @@ export function securityFindings(v: SecurityView): Finding[] {
     const undeclared = [...new Set(n.env.filter((r) => isSecretName(r.name) && !declared.has(r.name)).map((r) => r.name))];
     if (undeclared.length) {
       const where = n.env.find((r) => r.name === undeclared[0])!;
-      add('warning', 'undeclared-secret', `"${n.id}" reads ${undeclared.slice(0, 6).join(', ')}${undeclared.length > 6 ? ', …' : ''} from the environment (${where.file}:${where.line}), which ${undeclared.length === 1 ? 'looks like a credential' : 'look like credentials'} the model does not list. Add ${undeclared.length === 1 ? 'it' : 'them'} to the node's "secrets:".`, n.id, n.source, changesOfNode(n.id));
+      add('warning', 'undeclared-secret', `"${n.id}" reads ${undeclared.slice(0, 6).join(', ')}${undeclared.length > 6 ? ', …' : ''} from the environment (${where.file}:${where.line}), which ${undeclared.length === 1 ? 'looks like a credential' : 'look like credentials'} the model does not list. Add ${undeclared.length === 1 ? 'it' : 'them'} to the node's "secrets:".`, n.id, n.source, changesOfNode(n.id), undeclared);
     }
   }
 
