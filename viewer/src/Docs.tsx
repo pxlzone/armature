@@ -255,10 +255,13 @@ export function Reader({ graph, path, onClose, openDoc, goTo, openRef }: { graph
   }, [onClose]);
   const html = useMemo(() => {
     if (text === null) return '';
-    const out = md.parse(text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '')) as string;
+    let out = md.parse(text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '')) as string;
+    // The header already shows the title, so a first heading that repeats it is left out.
+    const h1 = /^\s*<h1[^>]*>([\s\S]*?)<\/h1>\s*/.exec(out);
+    if (h1 && doc && h1[1].replace(/<[^>]+>/g, '').trim().toLowerCase() === doc.title.trim().toLowerCase()) out = out.slice(h1[0].length);
     // A reference that names nothing in the model is shown as broken, not as a dead link.
     return out.replace(/<a class="ref" href="model:([^"]*)"/g, (m, ref: string) => (resolveRef(graph, ref.replace(/&amp;/g, '&')) ? m : `<a class="ref broken" title="Not in the model" href="model:${ref}"`));
-  }, [text, graph]);
+  }, [text, graph, doc]);
   const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
   const onClick = (e: React.MouseEvent): void => {
     const a = (e.target as HTMLElement).closest('a');
@@ -314,16 +317,21 @@ export function Reader({ graph, path, onClose, openDoc, goTo, openRef }: { graph
           {doc.broken.length > 0 && <span className="chip warn" title="Named in the document, not in the model">{doc.broken.length} broken: {doc.broken.slice(0, 3).join(', ')}{doc.broken.length > 3 ? ', …' : ''}</span>}
         </div>
       )}
-      {doc && doc.outline.length > 3 && (
-        <nav className="reader-outline" aria-label="Sections">
-          {doc.outline.map((h) => <a key={h} href={`#${slug(h)}`} onClick={(e) => { e.preventDefault(); body.current?.querySelector(`#${CSS.escape(slug(h))}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }}>{h}</a>)}
-        </nav>
-      )}
-      <div className="reader-body md" ref={body} onClick={onClick}>
-        {err && <p className="small" style={{ color: 'var(--red)' }}>{err}</p>}
-        {text === null && !err && <p className="muted">Loading…</p>}
-        {/* The HTML comes from marked with raw HTML escaped. */}
-        <div dangerouslySetInnerHTML={{ __html: html }} />
+      <div className="reader-scroll" ref={body} onClick={onClick}>
+        <div className="reader-grid">
+          {doc && doc.outline.length > 1 && (
+            <nav className="reader-outline" aria-label="Sections">
+              <div className="reader-outline-head">On this page</div>
+              {doc.outline.map((h) => <a key={h} href={`#${slug(h)}`} onClick={(e) => { e.preventDefault(); body.current?.querySelector(`#${CSS.escape(slug(h))}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }}>{h}</a>)}
+            </nav>
+          )}
+          <article className="reader-body md">
+            {err && <p className="small" style={{ color: 'var(--red)' }}>{err}</p>}
+            {text === null && !err && <p className="muted">Loading…</p>}
+            {/* The HTML comes from marked with raw HTML escaped. */}
+            <div dangerouslySetInnerHTML={{ __html: html }} />
+          </article>
+        </div>
       </div>
     </div>
   );
