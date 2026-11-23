@@ -9,6 +9,8 @@ export const HUB_H = 64;
 export const HEADER = 44;
 const LABEL_W = 150;
 const LABEL_H = 44;
+/** Extra label height for a tile that lists its technologies or tags. */
+const TECH_H = 16;
 
 export interface VNode {
   id: string;
@@ -227,7 +229,7 @@ export async function buildView(g: Graph, ix: Index, o: ViewOptions): Promise<Vi
       id: v.id,
       width: v.w,
       height: v.h,
-      labels: v.hub ? [] : [{ id: `${v.id}__label`, text: v.node.name, width: LABEL_W, height: LABEL_H }],
+      labels: v.hub ? [] : [{ id: `${v.id}__label`, text: v.node.name, width: LABEL_W, height: LABEL_H + (v.node.tech.length || v.node.tags.length ? TECH_H : 0) }],
       layoutOptions: { 'elk.nodeLabels.placement': 'OUTSIDE V_BOTTOM H_CENTER' },
     };
   };

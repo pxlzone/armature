@@ -300,6 +300,19 @@
         "tech": {
           "$ref": "#/$defs/strings"
         },
+        "tags": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/slug"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/slug"
+              }
+            }
+          ]
+        },
         "hub": {
           "type": "boolean"
         },

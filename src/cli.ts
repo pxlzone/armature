@@ -7,7 +7,7 @@ import { git } from './repo.js';
 import { MODEL_DIR } from './paths.js';
 import { ownerOf } from './render.js';
 import { watchSources } from './watch.js';
-import { activity, docsText, formatProblems, impact, islands, orient, pathText, show, status, techText, todos, traceText, where } from './render.js';
+import { activity, docsText, formatProblems, impact, islands, orient, pathText, show, status, tagsText, techText, todos, traceText, where } from './render.js';
 import { approveChange } from './approve.js';
 import { newSince, newSinceRun, problemsAt, pruneAccepts, readBaseline, writeBaseline } from './baseline.js';
 import { diffModel, diffText } from './diff.js';
@@ -61,6 +61,7 @@ Code graph
 Checking
   armature islands [node]           Dead code: files no entry point reaches, by node
   armature tech [id]               Technologies from armature/tech.yaml and who uses them
+  armature tags [tag]              Tags that nodes carry, or the nodes that carry one
   armature check [--json] [--annotate] [--only errors|wrong|incomplete] [--since git-ref] [--new] [--fail-on wrong|warnings]
                                 Errors, then warnings where the model is wrong, then where it is incomplete.
                                 Exits 1 on errors. Builds the code index first (--no-index skips that).
@@ -338,6 +339,9 @@ async function main(): Promise<void> {
       return;
     case 'tech':
       console.log(techText(compile(root), args[0]));
+      return;
+    case 'tags':
+      console.log(tagsText(compile(root), args[0]));
       return;
     case 'todos':
       console.log(todos(compile(root), typeof flags.kind === 'string' ? flags.kind : undefined));

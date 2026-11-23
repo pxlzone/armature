@@ -262,6 +262,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       children: [],
       depth: r.id.split('.').length - 1,
       tech: toArr<string>(d.tech),
+      tags: [...new Set(toArr<unknown>(d.tags).filter((t): t is string => typeof t === 'string'))],
       hub: d.hub === true,
       color: d.color,
       image: d.image,

@@ -57,3 +57,25 @@ describe('approving from the viewer', () => {
     expect(bashGate(root, 'curl -s http://localhost:4747/graph.json')).toBeNull();
   });
 });
+
+describe('when a plan was proposed', () => {
+  it('is the first commit of the change file, or the file date before it is committed', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const { proposedAt } = await import('../src/server.js');
+    const root = repo();
+    // Not in git yet: the file's own date.
+    const fresh = proposedAt(root, 'mail');
+    expect(Math.abs(Date.parse(fresh ?? '') - Date.now())).toBeLessThan(60_000);
+    const run = (...args: string[]): void => {
+      execFileSync('git', args, { cwd: root, stdio: 'ignore', env: { ...process.env, GIT_AUTHOR_DATE: '2026-03-04T10:00:00Z', GIT_COMMITTER_DATE: '2026-03-04T10:00:00Z' } });
+    };
+    run('init', '-q');
+    run('add', '.');
+    run('-c', 'user.name=T', '-c', 'user.email=t@example.com', 'commit', '-q', '-m', 'plan');
+    // A later edit does not move the date.
+    fs.appendFileSync(path.join(root, 'armature/changes/mail.yaml'), 'why: People ask for receipts.\n');
+    execFileSync('git', ['-c', 'user.name=T', '-c', 'user.email=t@example.com', 'commit', '-q', '-am', 'why'], { cwd: root, stdio: 'ignore' });
+    expect(Date.parse(proposedAt(root, 'mail') ?? '')).toBe(Date.parse('2026-03-04T10:00:00Z'));
+    expect(proposedAt(root, 'nothing')).toBeUndefined();
+  });
+});

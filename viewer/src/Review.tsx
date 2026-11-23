@@ -24,6 +24,16 @@ export function pendingChanges(graph: Graph): Change[] {
 
 const SHOWN = 8;
 
+/** A date as a person reads it, with how long ago it was: "21 Nov 2026 · 2 days ago". Empty when the text is no date. */
+export function dated(iso: string | undefined, now = Date.now()): string {
+  const t = iso ? Date.parse(iso) : NaN;
+  if (Number.isNaN(t)) return '';
+  const day = new Date(t).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  const days = Math.floor((now - t) / 86_400_000);
+  const ago = days < 1 ? 'today' : days === 1 ? 'yesterday' : days < 60 ? `${days} days ago` : days < 730 ? `${Math.round(days / 30.4)} months ago` : `${Math.round(days / 365)} years ago`;
+  return `${day} · ${ago}`;
+}
+
 function ReviewCard({ c, on, pick, onRead, approve, onDone, broken }: { c: Change; on: boolean; pick: () => void; onRead?: () => void; approve: ApproveFn | null; onDone: (text: string) => void; broken: number }) {
   const wait = awaitingApproval(c) ?? 'proposed';
   const [all, setAll] = useState(false);
@@ -42,6 +52,8 @@ function ReviewCard({ c, on, pick, onRead, approve, onDone, broken }: { c: Chang
         ? `The model has ${broken} error${broken === 1 ? '' : 's'}. They are fixed first (open the checks).`
         : null;
   const command = `armature approve ${c.id}`;
+  const proposed = dated(c.proposedAt);
+  const approved = dated(c.approval?.at);
 
   const run = (): void => {
     if (!approve) return;
@@ -64,6 +76,12 @@ function ReviewCard({ c, on, pick, onRead, approve, onDone, broken }: { c: Chang
     <section className={`review${on ? ' on' : ''}`} aria-label={`${c.title}: ${WAIT_LABEL[wait]}`}>
       <div className="t">{c.title}</div>
       <div className="s"><span className="pill need">{WAIT_LABEL[wait]}</span> <span className="mono">{c.id}</span></div>
+      {(proposed || approved) && (
+        <p className="small when">
+          {proposed && <span>Proposed <time dateTime={c.proposedAt}>{proposed}</time></span>}
+          {approved && <span>Approved <time dateTime={c.approval?.at}>{approved}</time>{c.approval?.by ? ` by ${c.approval.by}` : ''}</span>}
+        </p>
+      )}
       <p className="small muted">{WAIT_WHY[wait]}</p>
       {c.why && <p className="small">{c.why}</p>}
       {c.doneWhen.length > 0 && <p className="small">Done when: {c.doneWhen.join(' ')}</p>}

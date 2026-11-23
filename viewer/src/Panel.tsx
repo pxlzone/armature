@@ -621,14 +621,23 @@ function NodePanel(p: Props & { n: GNode; shapes: Map<string, Shape> }) {
       <p><Pill kind={n.status} /> <span className="small muted">{n.statusWhy}</span></p>
       {n.unused && <p className="unused-note">Unused: dead code kept for reference. Nothing reaches it, so it takes part in no flow. Do not build on it.</p>}
       <p>{n.description ?? n.role}</p>
+      {(n.tech.length > 0 || n.tags.length > 0) && (
+        <div className="techlist" aria-label="Built with, and tags">
+          {n.tech.map((id) => {
+            const t = graph.tech.find((x) => x.id === id);
+            return <span key={id} className="pill" title={t ? [t.category, t.version && `version ${t.version}`, t.note].filter(Boolean).join(' · ') : 'Not listed in tech.yaml'}>{t?.name ?? id}{t && <span className="muted"> {t.category}</span>}</span>;
+          })}
+          {n.tags.map((t) => <span key={`#${t}`} className="pill tag" title="A tag on this node">#{t}</span>)}
+        </div>
+      )}
       <div className="btnrow">
         {n.children.length > 0 && <button className="btn primary" onClick={() => p.toggle(n.id)}>{p.expanded.has(n.id) ? 'Collapse' : `Expand here (${n.children.length} inside)`}</button>}
         {n.children.length > 0 && <button className="btn" onClick={() => p.open(n.id)}>Open as its own view</button>}
         {onScreen?.ghost && <button className="btn" onClick={() => p.goTo(n.id)}>Go to its view</button>}
       </div>
       <DocsBlock graph={graph} ix={ix} id={n.id} openDoc={p.openDoc} />
-      {(n.code.length > 0 || n.tech.length > 0 || n.image) && <h3>Code</h3>}
-      {n.tech.length > 0 && <p className="small">Tech: {n.tech.map((id) => graph.tech.find((t) => t.id === id)?.name ?? id).join(', ')}{n.image ? ` · image ${n.image}` : ''}</p>}
+      {(n.code.length > 0 || n.image) && <h3>Code</h3>}
+      {n.image && <p className="small">Image {n.image}</p>}
       {n.deployment.length > 0 && (
         <>
           <h3>Runs as</h3>

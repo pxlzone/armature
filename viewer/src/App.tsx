@@ -481,6 +481,9 @@ export function App() {
   if (!graph || !ix) return <div className="empty">Loading the model…</div>;
 
   const shapes = new Map(graph.shapes.map((s) => [s.id, s]));
+  const techName = new Map(graph.tech.map((t) => [t.id, t.name]));
+  // What a node is built with, then the labels the team gave it.
+  const techOf = (n: GNode): string[] => [...n.tech.map((id) => techName.get(id) ?? id), ...n.tags.map((t) => `#${t}`)];
   const focusNode = focus ? ix.nodes.get(focus) ?? null : null;
   const crumbs: GNode[] = [];
   for (let n = focusNode; n; n = n.parent ? ix.nodes.get(n.parent) ?? null : null) crumbs.unshift(n);
@@ -699,7 +702,7 @@ export function App() {
             </g>
             {hb < 1.25 && v.w > 380 && (
               <text className="c-role" x={v.w - 44} y={HEADER / 2 + 1} dominantBaseline="central" textAnchor="end">
-                {clip(`${parents.length ? `in ${parents.join(' › ')} · ` : ''}${n.role}`, Math.max(0, Math.floor((v.w - 60 - Math.min(n.name.length, room) * 8.6 - 90) / 6.2)))}
+                {clip(`${parents.length ? `in ${parents.join(' › ')} · ` : ''}${n.role}${techOf(n).length ? ` · ${techOf(n).join(', ')}` : ''}`, Math.max(0, Math.floor((v.w - 60 - Math.min(n.name.length, room) * 8.6 - 90) / 6.2)))}
               </text>
             )}
             <g className="collapse" onClick={(e) => { e.stopPropagation(); toggle(v.id, false); }} transform={`translate(${v.w - 26} ${HEADER / 2}) scale(${Math.min(hb, 1.6)})`}>
@@ -740,6 +743,7 @@ export function App() {
     const h = v.hub ? HUB_H : TILE;
     const badge = badgeFor(n);
     const roleLines = wrap(n.role, 22, 2);
+    const tech = techOf(n);
     const op = (st === 'retiring' ? 0.45 : 1) * (on ? 1 : DIM) * (v.ghost && !strong && !selected ? 0.6 : 1);
     const stacked = n.children.length > 0;
     // Zoomed out, tiles are drawn larger than their layout slot so they stay readable.
@@ -748,7 +752,7 @@ export function App() {
       <g key={v.id} className={`vn${hot ? ' hot' : ''}`} style={{ transform: `translate(${v.x}px, ${v.y}px)` }} opacity={op} {...nodeEvents(v)}>
         <g className="enter">
         <g className="boost" style={{ transform: `translate(${w / 2}px, ${h / 2}px) scale(${boost}) translate(${-w / 2}px, ${-h / 2}px)` }}>
-          <title>{`${n.id}: ${n.statusWhy}${stacked ? ' Double-click to expand.' : ''}`}</title>
+          <title>{`${n.id}: ${n.statusWhy}${n.tech.length ? ` Built with ${tech.slice(0, n.tech.length).join(', ')}.` : ''}${n.tags.length ? ` Tagged ${n.tags.join(', ')}.` : ''}${stacked ? ' Double-click to expand.' : ''}`}</title>
           {stacked && <rect x={6} y={6} width={w} height={h} rx={14} fill="var(--tile)" stroke={stroke} strokeWidth={1} strokeDasharray={dash} opacity={0.7} />}
           <rect className="tile" width={w} height={h} rx={14} fill={fill} stroke={stroke} strokeWidth={sw} strokeDasharray={dash} />
           {v.hub ? (
@@ -756,6 +760,7 @@ export function App() {
               <Icon x={16} y={(h - 28) / 2} width={28} height={28} color={color} stroke={1.6} opacity={planned ? 0.55 : 1} />
               <text className="n-name" x={56} y={h / 2 - 9} dominantBaseline="central">{clip(n.name, 22)}</text>
               <text className="n-role" x={56} y={h / 2 + 10} dominantBaseline="central" style={{ fill: color }}>{clip(n.role, 28)}</text>
+              <TechChips names={tech} x={w - 12} y={h} room={76} align="end" />
             </>
           ) : (
             <>
@@ -764,6 +769,7 @@ export function App() {
               {roleLines.map((l, i) => (
                 <text key={i} className="n-role" x={TILE / 2} y={TILE + 32 + i * 13} textAnchor="middle" style={{ fill: planned ? 'var(--ink-3)' : color }}>{l}</text>
               ))}
+              <TechChips names={tech} x={TILE / 2} y={TILE + 36 + roleLines.length * 13} room={150} align="middle" />
             </>
           )}
           {waiting && <Tag x={w / 2} y={h} text="to approve" warn />}
@@ -1005,6 +1011,41 @@ function Tag({ x, y, text, accent, warn }: { x: number; y: number; text: string;
     <g transform={`translate(${x} ${y})`} className={warn ? 'tagchip warn' : accent ? 'tagchip accent' : 'tagchip'}>
       <rect x={-w / 2} y={-7} width={w} height={14} rx={7} />
       <text textAnchor="middle" dominantBaseline="central" y={0.5}>{text}</text>
+    </g>
+  );
+}
+
+/** The technologies and tags (written #tag) of a node as a row of small chips: as many as fit in `room`, then "+N" for the rest. */
+function TechChips({ names, x, y, room, align }: { names: string[]; x: number; y: number; room: number; align: 'middle' | 'end' }) {
+  if (!names.length) return null;
+  const width = (t: string): number => t.length * 5 + 10;
+  const GAP = 3;
+  const shown: string[] = [];
+  let used = 0;
+  for (let i = 0; i < names.length; i++) {
+    const rest = names.length - i - 1;
+    const need = width(names[i]) + (shown.length ? GAP : 0) + (rest ? GAP + width(`+${rest}`) : 0);
+    if (used + need > room && shown.length) break;
+    used += width(names[i]) + (shown.length ? GAP : 0);
+    shown.push(clip(names[i], Math.floor((room - 10) / 5)));
+  }
+  const more = names.length - shown.length;
+  const chips = more ? [...shown, `+${more}`] : shown;
+  const total = chips.reduce((a, t) => a + width(t), 0) + GAP * (chips.length - 1);
+  let at = align === 'middle' ? x - total / 2 : x - total;
+  return (
+    <g className="techchips">
+      {chips.map((t, i) => {
+        const w = width(t);
+        const left = at;
+        at += w + GAP;
+        return (
+          <g key={i} transform={`translate(${left} ${y})`} className={t.startsWith('#') ? 'techchip tag' : 'techchip'}>
+            <rect y={-6.5} width={w} height={13} rx={t.startsWith('#') ? 6.5 : 3.5} />
+            <text x={w / 2} y={0.5} textAnchor="middle" dominantBaseline="central">{t}</text>
+          </g>
+        );
+      })}
     </g>
   );
 }

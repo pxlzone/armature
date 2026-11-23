@@ -245,6 +245,8 @@ export interface GNode {
   children: string[];
   depth: number;
   tech: string[];
+  /** Free labels a team gives the node (legacy, critical, public). Its own only: nothing is inherited. */
+  tags: string[];
   hub: boolean;
   color?: string;
   image?: string;
@@ -489,6 +491,8 @@ export interface Change {
   progress: { total: number; built: number; reqTotal: number; reqVerified: number };
   /** What the change does to security, for the person reviewing it. Set by the viewer server and the export, on changes that wait for approval. */
   security?: { lines: string[]; errors: string[] };
+  /** When the plan was proposed: the first commit of its file, or the file's own date while it is not committed. Set where `security` is. */
+  proposedAt?: string;
 }
 
 /** Why a change waits for a person: never approved, altered since it was approved, or approved with no record of it. Null when it does not wait. */

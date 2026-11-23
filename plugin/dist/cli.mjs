@@ -22405,6 +22405,7 @@ function compile$1(root, opts = {}) {
 			children: [],
 			depth: r.id.split(".").length - 1,
 			tech: toArr(d.tech),
+			tags: [...new Set(toArr(d.tags).filter((t) => typeof t === "string"))],
 			hub: d.hub === true,
 			color: d.color,
 			image: d.image,
@@ -24337,6 +24338,19 @@ function techText(g, id) {
 	for (const [c, list] of cats) out.push(`${c}: ${list.map((t) => `${t.name}${t.usedBy.length ? ` (${t.usedBy.length})` : ""}`).join(", ")}`);
 	return out.join("\n");
 }
+/** The tags nodes carry, each with how many nodes, or the nodes that carry one tag. */
+function tagsText(g, tag) {
+	const by = /* @__PURE__ */ new Map();
+	for (const n of g.nodes) for (const t of n.tags) by.set(t, [...by.get(t) ?? [], n]);
+	if (!by.size) return "No node carries a tag yet. Add \"tags: [legacy, critical]\" to a node file to label it.";
+	if (tag) {
+		const want = tag.replace(/^#/, "");
+		const list = by.get(want);
+		if (!list) return `No node is tagged "${want}". Tags in use: ${[...by.keys()].sort().join(", ")}.`;
+		return [`${want}: ${list.length} node${list.length === 1 ? "" : "s"}`, ...list.map((n) => `  ${n.id} (${n.kind}): ${n.role}`)].join("\n");
+	}
+	return [...by].sort(([a], [b]) => a.localeCompare(b)).map(([t, list]) => `${t} (${list.length}): ${list.map((n) => n.id).join(", ")}`).join("\n");
+}
 function nodeCard(g, n, depth) {
 	const ix = index(g);
 	const out = [];
@@ -24344,6 +24358,7 @@ function nodeCard(g, n, depth) {
 	out.push(`  status: ${n.statusWhy}`);
 	if (n.description) out.push(`  about: ${n.description}`);
 	if (n.tech.length) out.push(`  tech: ${n.tech.join(", ")}`);
+	if (n.tags.length) out.push(`  tags: ${n.tags.join(", ")}`);
 	if (n.code.length) out.push(`  code: ${n.code.join(", ")} (${n.files} files)`);
 	if (n.tests.length) out.push(`  tests: ${n.tests.join(", ")} (${n.testFiles} files)`);
 	if (n.testSummary) out.push(`  last test run: ${n.testSummary.passed} passed, ${n.testSummary.failed} failed, ${n.testSummary.skipped} skipped`);
@@ -25826,10 +25841,33 @@ function embed(html, graph, token) {
 	const key = token ? `window.__ARMATURE_APPROVE__=${JSON.stringify(token)};` : "";
 	return html.replace("</head>", `<script>window.__ARMATURE_GRAPH__=${data};${key}<\/script></head>`);
 }
-/** Adds, to each change that waits for approval, what it does to security: the person reads it before they approve. */
-function forReview(graph) {
+/** When a change was proposed: the first commit that has its file, or the file's own date while git does not know it. */
+function proposedAt(root, id) {
+	for (const ext of ["yaml", "yml"]) {
+		const rel = `${MODEL_DIR}/changes/${id}.${ext}`;
+		let stat;
+		try {
+			stat = fs.statSync(path.join(root, rel));
+		} catch {
+			continue;
+		}
+		const first = git$1(root, [
+			"log",
+			"--diff-filter=A",
+			"--follow",
+			"--format=%aI",
+			"--",
+			rel
+		])?.trim().split("\n").pop();
+		if (first) return first;
+		return (stat.birthtimeMs > 0 ? stat.birthtime : stat.mtime).toISOString();
+	}
+}
+/** Adds, to each change that waits for approval, when it was proposed and what it does to security: the person reads both before they approve. */
+function forReview(graph, root) {
 	for (const c of graph.changes) {
 		if (!awaitingApproval(c)) continue;
+		c.proposedAt = proposedAt(root, c.id);
 		const sec = changeSecurity(graph, c.id);
 		c.security = {
 			lines: sec.lines,
@@ -25880,7 +25918,7 @@ function exportHtml(root, out, github) {
 	const graph = forReview(compile$1(root, {
 		github,
 		activity: true
-	}));
+	}), root);
 	graph.root = path.basename(root);
 	graph.docTexts = {};
 	let total = 0;
@@ -25906,7 +25944,7 @@ function serve(root, port, github) {
 				const graph = forReview(compile$1(root, {
 					github,
 					activity: true
-				}));
+				}), root);
 				res.writeHead(200, {
 					"content-type": "application/json",
 					"cache-control": "no-store"
@@ -43830,6 +43868,10 @@ async function runMcp(rootFlag) {
 		description: "Technologies the system is made of (frameworks, databases, runtimes, AI SDKs, tools) from armature/tech.yaml, or one technology with the nodes that use it.",
 		inputSchema: { id: string().optional() }
 	}, async ({ id }) => run((root) => techText(compile(root), id))());
+	server.registerTool("tags", {
+		description: "The free labels nodes carry (such as legacy, critical, public) with the nodes under each, or the nodes that carry one tag.",
+		inputSchema: { tag: string().optional() }
+	}, async ({ tag }) => run((root) => tagsText(compile(root), tag))());
 	server.registerTool("activity", {
 		description: "Recent commits per node of the architecture model, grouped by Conventional Commits type, busiest nodes first. Shows where work is happening. days sets the window (default 90).",
 		inputSchema: { days: number().int().min(1).max(730).optional() }
@@ -43949,6 +43991,7 @@ Code graph
 Checking
   armature islands [node]           Dead code: files no entry point reaches, by node
   armature tech [id]               Technologies from armature/tech.yaml and who uses them
+  armature tags [tag]              Tags that nodes carry, or the nodes that carry one
   armature check [--json] [--annotate] [--only errors|wrong|incomplete] [--since git-ref] [--new] [--fail-on wrong|warnings]
                                 Errors, then warnings where the model is wrong, then where it is incomplete.
                                 Exits 1 on errors. Builds the code index first (--no-index skips that).
@@ -44251,6 +44294,9 @@ async function main() {
 			return;
 		case "tech":
 			console.log(techText(compile$1(root), args[0]));
+			return;
+		case "tags":
+			console.log(tagsText(compile$1(root), args[0]));
 			return;
 		case "todos":
 			console.log(todos(compile$1(root), typeof flags.kind === "string" ? flags.kind : void 0));
