@@ -185,7 +185,7 @@ export async function runMcp(rootFlag?: string): Promise<void> {
       description: 'Dead code: code files that no entry point (package script, container command, route, test, Temporal workflowsPath) reaches, by node. Do not build on these files.',
       inputSchema: { node: z.string().optional() },
     },
-    async ({ node }) => run((root) => islands(compile(root), node))(),
+    async ({ node }) => withIndex((root) => islands(compile(root), node))(),
   );
 
   server.registerTool(

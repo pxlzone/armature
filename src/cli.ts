@@ -346,6 +346,8 @@ async function main(): Promise<void> {
       console.log(activity(compile(root, { activity: true, github: flags.github === true, days: Number(flags.days) || undefined })));
       return;
     case 'islands':
+      // Reachability comes from the index: with none, or an old one, every file would look reached or dead.
+      await buildCodeIndex(root);
       console.log(islands(compile(root), args[0]));
       return;
     case 'tech':

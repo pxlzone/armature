@@ -249,7 +249,8 @@ function isTestPath(root: string, rel: string): boolean {
 export function writeGate(root: string, input: WriteInput): GateDecision | null {
   const target = targetOf(input);
   if (!target) return null;
-  const abs = path.resolve(root, target);
+  root = onDisk(root);
+  const abs = onDisk(path.resolve(root, target));
   const rel = path.relative(root, abs).replace(/\\/g, '/');
   if (!rel || rel.startsWith('..')) return null;
 
@@ -260,7 +261,7 @@ export function writeGate(root: string, input: WriteInput): GateDecision | null 
   const blind = after === null && !writtenText(input).trim();
 
   // Moving the approval record away removes it as surely as editing it.
-  const from = typeof input.source === 'string' ? path.relative(root, path.resolve(root, input.source)).replace(/\\/g, '/') : '';
+  const from = typeof input.source === 'string' ? path.relative(root, onDisk(path.resolve(root, input.source))).replace(/\\/g, '/') : '';
   if (from === `${mdir}/${APPROVALS_FILE}`) {
     return { decision: 'ask', reason: `This moves ${from}, the record of what a person approved. Allow it only to remove that record.` };
   }
@@ -635,9 +636,29 @@ const unquote = (w: string): string => w.replace(/^(['"])(.*)\1$/, '$2');
 
 /** A path as the shell reads it from `dir`: "~" is the home folder, not a folder here. Null for another user's home. */
 function shellPath(dir: string, w: string): string | null {
-  if (w === '~' || w.startsWith('~/')) return path.join(os.homedir(), w.slice(1));
+  if (w === '~' || w.startsWith('~/')) return onDisk(path.join(os.homedir(), w.slice(1)));
   if (w.startsWith('~')) return null;
-  return path.resolve(dir, w);
+  return onDisk(path.resolve(dir, w));
+}
+
+/**
+ * A path as the disk knows it: symlinks resolved and, on a disk that ignores case, the real case of
+ * every part that exists. Without this, "ARMATURE/changes/x.yaml" or a symlinked folder is a
+ * different string from the model file it writes, and every check below compares strings.
+ */
+export function onDisk(p: string): string {
+  let head = path.resolve(p);
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync.native(head), ...tail.reverse());
+    } catch {
+      const up = path.dirname(head);
+      if (up === head) return path.resolve(p);
+      tail.push(path.basename(head));
+      head = up;
+    }
+  }
 }
 
 /**
@@ -665,7 +686,8 @@ export function shellTargets(command: string, cwd: string): string[] {
   const text = command.replace(/<<-?\s*(['"]?)(\w+)\1([^\n]*)\n[\s\S]*?\n[ \t]*\2[ \t]*(?=\n|$)/g, '$3');
   const out: string[] = [];
   let dir = cwd;
-  for (const part of text.split(/&&|\|\||;|\n|\|/)) {
+  // ">|" is a redirect, not a pipe.
+  for (const part of text.split(/&&|\|\||;|\n|(?<!>)\|/)) {
     const words = shellWords(part.trim());
     if (!words.length) continue;
     const bare = words.map(unquote);
@@ -681,7 +703,7 @@ export function shellTargets(command: string, cwd: string): string[] {
     for (let i = 0; i < words.length; i++) {
       const w = words[i];
       if (/^['"]/.test(w)) continue;
-      const m = w.match(/^\d?>>?(.*)$/);
+      const m = w.match(/^(?:\d|&)?>[>|]?(.*)$/);
       if (m && !m[1].startsWith('&')) add(m[1] ? unquote(m[1]) : bare[i + 1]);
     }
     const cmd = bare[0] === 'git' && bare[1] === 'mv' ? 'mv' : bare[0] === 'sudo' ? bare[1] : bare[0];
@@ -749,6 +771,8 @@ export function shellRemovals(command: string, cwd: string): { deleted: string[]
  */
 export function bashGate(root: string, command: string, cwd: string = root): GateDecision | null {
   if (!command || !command.trim()) return null;
+  root = onDisk(root);
+  cwd = onDisk(cwd);
   const mdir = MODEL_DIR;
   // A question for the person is kept until the whole command is read: something it does further on
   // may be refused outright, and an answer to the question must not carry that through.
@@ -769,7 +793,7 @@ export function bashGate(root: string, command: string, cwd: string = root): Gat
     ask('This calls the viewer to approve a change. Allow it only if you reviewed the plan and want it built.');
   }
   const writes =
-    /(?:^|[^<>&|\d-])>{1,2}(?!&)|\b(?:sed|perl)\b[^|;&\n]*\s(?:-[A-Za-z]*i|--in-place)|\btee\b|\b(?:mv|cp|rm|truncate|dd|install|sponge)\b|\byq\b[^|;&\n]*\s(?:-i|--inplace)|\bawk\b[^|;&\n]*\s-i\s*inplace|\b(?:python3?|node|ruby|deno|bun|tsx)\b/.test(command);
+    /(?:^|[^<>|\d-])>{1,2}(?!&)|\b(?:sed|perl)\b[^|;&\n]*\s(?:-[A-Za-z]*i|--in-place)|\btee\b|\b(?:mv|cp|rm|ln|truncate|dd|install|sponge)\b|\byq\b[^|;&\n]*\s(?:-i|--inplace)|\bawk\b[^|;&\n]*\s-i\s*inplace|\b(?:python3?|node|ruby|deno|bun|tsx)\b/.test(command);
   // The files the command names, wherever it stands: "changes/mail.yaml" from inside the model folder is the same file.
   const named = writes ? shellPaths(command, cwd).map((p) => path.relative(root, p).replace(/\\/g, '/')) : [];
   const isRecord = (rel: string): boolean => {

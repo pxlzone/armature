@@ -148,7 +148,7 @@ Rules of thumb:
 
 Security:
 
-- An **entry point** is an interface of a server-side node that an actor, an outside system or a `client: true` node links to. Each needs `auth:`. `auth: none` on one that reaches sensitive data is an error; with auth, it needs a requirement of `kind: security` covering it.
+- An **entry point** is an interface of a server-side node that an actor, an outside system or a `client: true` node links to. Each needs `auth:`. `auth: none` (also `public` or `anonymous`) on one that reaches sensitive data is an error; with auth, it needs a requirement of `kind: security` covering it.
 - **Sensitive data** is a shape field tagged `@pii`, `@secret`, or a tag `data:` in `system.yaml` names. `data: { pii: { leaves: [mailer] } }` says which outside systems may receive it; sending it anywhere else is a `data-leak` error. `@secret` may leave nowhere unless listed.
 - `secrets:` lists the credentials a node reads from the environment. A credential the code reads and the model does not list is `undeclared-secret`; one on a client node is an error.
 - Never weaken these to make a check pass. Removing a guard asks the person, and `armature diff` shows it to the reviewer. That covers a new name on an `only:` list, another `auth:` scheme, a tag taken off a field, `protect: false` inside a protected node, and any edit that leaves a protected node's file unowned.

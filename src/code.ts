@@ -779,7 +779,7 @@ function stripJsonComments(text: string): string {
 
 function makeResolver(root: string, files: Set<string>): Resolver {
   const tryFile = (p: string): string | null => {
-    const clean = path.posix.normalize(p).replace(/^\.\//, '');
+    const clean = path.posix.normalize(p).replace(/^\.\//, '').replace(/\/+$/, '');
     if (files.has(clean)) return clean;
     const noExt = clean.replace(/\.(js|jsx|mjs|cjs)$/, '');
     for (const base of [clean, noExt]) {
@@ -802,13 +802,16 @@ function makeResolver(root: string, files: Set<string>): Resolver {
   // tsconfig path aliases, nearest config wins.
   const aliases: Array<{ dir: string; base: string; paths: Array<[string, string[]]> }> = [];
   for (const f of files) {
-    if (!/(^|\/)tsconfig(\.[\w-]+)?\.json$/.test(f) || SKIP.test(f)) continue;
+    if (!/(^|\/)[tj]sconfig(\.[\w-]+)?\.json$/.test(f) || SKIP.test(f)) continue;
     try {
       const cfg = JSON.parse(stripJsonComments(fs.readFileSync(path.join(root, f), 'utf8')));
       const co = cfg.compilerOptions ?? {};
-      if (!co.paths) continue;
+      // baseUrl alone also makes "pkg/a" a path under it.
+      if (!co.paths && !co.baseUrl) continue;
       const dir = path.posix.dirname(f) === '.' ? '' : path.posix.dirname(f);
-      aliases.push({ dir, base: path.posix.join(dir, co.baseUrl ?? '.'), paths: Object.entries(co.paths) as Array<[string, string[]]> });
+      const paths = Object.entries(co.paths ?? {}) as Array<[string, string[]]>;
+      if (co.baseUrl) paths.push(['*', ['*']]);
+      aliases.push({ dir, base: path.posix.join(dir, co.baseUrl ?? '.'), paths });
     } catch {
       /* unreadable tsconfig */
     }
@@ -953,7 +956,13 @@ export async function buildCodeIndex(root: string): Promise<IndexResult> {
       mtime: st.mtimeMs,
       size: st.size,
       test: TEST_FILE.test(f),
-      imports: entry.imports.map((i) => ({ ...i, ...resolve(f, i.spec, lang === 'sql' ? 'typescript' : lang) })),
+      imports: entry.imports.flatMap((i) => {
+        const own = { ...i, ...resolve(f, i.spec, lang === 'sql' ? 'typescript' : lang) };
+        if (lang !== 'python') return [own];
+        // "from pkg import mod" loads pkg/mod.py as well as pkg/__init__.py, or mod.py would look like dead code.
+        const subs = i.names.filter((n) => n !== '*').map((n) => resolve(f, i.spec.endsWith('.') ? `${i.spec}${n}` : `${i.spec}.${n}`, 'python').file);
+        return [own, ...[...new Set(subs)].filter((x): x is string => !!x && x !== own.file).map((file) => ({ spec: i.spec, names: [], line: i.line, file }))];
+      }),
     };
   }
   const index: CodeIndex = { version: 3, extractor: EXTRACTOR, builtAt: new Date().toISOString(), files };
