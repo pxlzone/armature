@@ -1,5 +1,5 @@
 import {
-  IconAddressBook, IconBolt, IconBrandLinkedin, IconBrowser, IconClock, IconCloud, IconCreditCard, IconDatabase, IconFileText,
+  IconAddressBook, IconBolt, IconFileCode, IconFiles, IconBrandLinkedin, IconBrowser, IconClock, IconCloud, IconCreditCard, IconDatabase, IconFileText,
   IconFolders, IconGraph, IconLock, IconMail, IconPackage, IconRobot, IconSearch, IconServer2, IconSettingsAutomation,
   IconServerCog, IconSparkles, IconStack2, IconTerminal2, IconUser, IconWorldWww, type Icon,
 } from '@tabler/icons-react';
@@ -37,6 +37,7 @@ const HINTS: Array<[RegExp, Icon]> = [
 ];
 
 export function iconOf(n: GNode): Icon {
+  if (n.file) return n.file.more ? IconFiles : IconFileCode;
   if (n.kind === 'actor' || n.kind === 'store' || n.kind === 'group' || n.kind === 'library') return BY_KIND[n.kind];
   const text = `${n.id} ${n.name} ${n.tech.join(' ')}`.toLowerCase();
   for (const [re, icon] of HINTS) if (re.test(text)) return icon;

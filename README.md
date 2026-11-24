@@ -23,7 +23,7 @@ requirements:
 
 What you get:
 
-- **A diagram.** `armature view` draws the model as a zoomable map: planned work dashed, flows you can play step by step, and lenses for data, tests, documents, activity and code.
+- **A diagram.** `armature view` draws the model as a zoomable map, down to the files: a part with code opens like a group and shows its files and the imports between them. Also: planned work dashed, flows you can play step by step, and lenses for data, tests, documents, activity and code.
 - **Context for agents.** A digest of the system at the start of every session, `armature context "<task>"` for the parts, files, rules and tests a task touches, and an MCP server with the same answers.
 - **A planning gate.** New work starts as a change in the model. Claude Code hooks send back plans and new files that go around it, approving a change stays with a person, and the approval records what was approved.
 - **Checks.** `armature check`, locally and in CI, says where the model and the code disagree, in both directions: tables, routes and imports the model does not declare, interfaces the model declares and the code does not have, stale data shapes, files no part owns or two parts claim, boundaries that are crossed, dead code, and documents that name something that no longer exists. Where it could not look, it says so.
@@ -368,6 +368,23 @@ lists commits and pull requests per node for the last 90 days, grouped by [Conve
 
 The viewer's Activity lens shows the same data on the map. Commits come from `git log`; pull requests need `--github`, the `gh` CLI and a git remote.
 
+## Watch an agent work
+
+While `armature view` is open, the map shows what Claude Code sessions in the repo are doing:
+
+- **On the map.** The part a session is in has a pulsing ring. Every part it has edited is filled, has a heavy outline, and lists the edited files under it with the lines added and removed since the last commit. A part inside a closed group marks the group.
+- **Files on the map.** Open a part (the + on its tile, or zoom into it) to see its files as blocks inside it, with a line for each import between them. A part shows up to 14 files, code before tests, and one block stands for the rest. Files an agent edited are always shown, filled, with their lines added and removed.
+- **What changed.** Click an edited file on the map, or an "Edited" step, to see its diff against the last commit. It updates as the agent keeps editing. Only files a session edited can be opened this way.
+- **In the card at the top right.** What the agent is doing now (reading, editing, or running a command), the file, the first words of the task, the change it is building with how much of it is built, and the parts it has touched. Click a part to go to it. "Keep the working part in view" moves the map as the agent moves.
+
+The hooks write each step to `armature/.cache/live.jsonl`: file paths, the first 140 characters of a prompt, and the name of a command (`npm test`), never the command itself. The file stays on your machine and is trimmed as it grows. A session that has said nothing for 15 minutes counts as stopped, and leaves the map after 30.
+
+**It opens by itself.** The first time a session is about to edit a file, the hook starts a viewer for the repo if none runs and checks whether the session view is open. If it is not, the edit is sent back to the agent once, with the address: in the Claude desktop app the agent opens it in the browser pane and repeats the edit. An agent with no browser tool goes on, and its next edit opens the view in your default browser. This happens once per session, never holds an edit back when the viewer does not answer, and is off in CI and with `ARMATURE_NO_OPEN=1`.
+
+**The session view.** Add `?view=session` to the viewer's address (or click "Open the session view" in the card) for a view made for a narrow pane beside the chat: one line saying what the agent is doing, the map zoomed in on the part it is in and following it, with everything the agent has not touched dimmed, with the parts it edits opened into their files, and underneath the task, the change being built, the parts touched and the latest steps with their times. When the agent stops, the map shows every file it edited.
+
+To watch from inside the Claude Code desktop app, open `http://localhost:4747/?view=session` in its browser pane, or add `armature view` to `.claude/launch.json` and ask Claude to open the preview. A saved copy (`armature export`) has no live data.
+
 ## Develop
 
 ```bash
@@ -400,6 +417,7 @@ To release a new version, change the code, bump `version` in `package.json`, run
 | `src/summarize.ts` | Model-written file summaries |
 | `src/codeview.ts` | Text answers from the code index: map, symbol, deps |
 | `src/agent.ts` | Claude Code hooks, rule files, install |
+| `src/live.ts` | The log of what agent sessions are doing, for the viewer |
 | `src/mcp.ts` | MCP server |
 | `src/server.ts` | Viewer server and static export |
 | `viewer/` | The diagram (React, ELK layout) |

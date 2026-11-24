@@ -31,7 +31,7 @@ describe('team install', () => {
     const local = path.join(root, '.claude', 'settings.local.json');
     expect(fs.readFileSync(local, 'utf8')).toContain('armature.mjs');
     // Every hook is wired, including both on PreToolUse, and a second install changes nothing.
-    const all = ['hook post-edit', 'hook pre-bash', 'hook pre-plan', 'hook pre-write', 'hook prompt', 'hook session-start', 'hook stop'];
+    const all = ['hook note', 'hook post-edit', 'hook pre-bash', 'hook pre-plan', 'hook pre-write', 'hook prompt', 'hook session-start', 'hook stop'];
     const hooksOf = (): string[] => (fs.readFileSync(local, 'utf8').match(/hook [a-z-]+/g) ?? []).sort();
     expect(hooksOf()).toEqual(all);
     install(root);

@@ -42,6 +42,8 @@ export interface CompileOptions {
   days?: number;
   /** Requirements (node:id) to compute `filesHash` for, beside the ones already confirmed. */
   hashRequirements?: string[];
+  /** List each node's files in the graph, for the viewer. */
+  files?: boolean;
 }
 
 /** Warnings that only a code index can raise: without one, an accept entry for them is not idle, only unseen. */
@@ -1704,6 +1706,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
 
   const order = [...nodes.values()].sort((a, b) => a.id.localeCompare(b.id));
   return {
+    ...(opts.files ? { files: Object.fromEntries([...filesOf].map(([id, list]) => [id, [...list].sort().map((path) => ({ path }))])) } : {}),
     version: 1,
     generatedAt: new Date().toISOString(),
     root,

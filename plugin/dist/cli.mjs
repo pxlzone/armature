@@ -70,7 +70,7 @@ var PUBLIC_ENV = /^(NEXT_PUBLIC_|VITE_|PUBLIC_|REACT_APP_|EXPO_PUBLIC_|NUXT_PUBL
 var BUILD_CONFIG = /(^|\/)(vite|vitest|webpack|rollup|rspack|esbuild|tsup|next|nuxt|svelte|astro|remix|gatsby|vue|craco|metro|babel|postcss|tailwind|jest|playwright|cypress|karma|eslint|prettier|drizzle|codegen)\.config\.[cm]?[jt]sx?$|(^|\/)(gulpfile|gruntfile)\.[cm]?[jt]s$/i;
 /** Tags that mark sensitive data even when system.yaml has no `data:` policy for them. */
 var DEFAULT_SENSITIVE = ["pii", "secret"];
-var inside$1 = (id, anc) => id === anc || id.startsWith(`${anc}.`);
+var inside$2 = (id, anc) => id === anc || id.startsWith(`${anc}.`);
 /** Where data goes when it leaves: outside systems, and code on the user's device for secrets. */
 var OUTSIDE = /* @__PURE__ */ new Set(["external"]);
 /** Each tag and the policy for it. `secret` never leaves unless system.yaml lists where it may go. */
@@ -161,7 +161,7 @@ var targetOf$1 = (e) => e.verb === "reads" ? e.from : e.to;
 * a node around that one). A link to a node says nothing about which interface it uses, so it may be
 * any of them.
 */
-var aimsAt = (e, i) => e.iface ? e.iface === i.ref : inside$1(i.node, targetOf$1(e));
+var aimsAt = (e, i) => e.iface ? e.iface === i.ref : inside$2(i.node, targetOf$1(e));
 /** A call or a message that arrives at an interface. */
 var arrivesAt = (e, i) => (e.verb === "calls" || e.verb === "sends") && aimsAt(e, i);
 /**
@@ -177,9 +177,9 @@ function reachFrom(v, start, tags, nodes, ifaces, depth = 4) {
 	for (let d = 0; d < depth && ring.length; d++) {
 		const next = [];
 		for (const id of ring) for (const e of v.edges) {
-			if (!inside$1(e.owner, id) && !(d === 0 && inside$1(id, e.owner))) continue;
+			if (!inside$2(e.owner, id) && !(d === 0 && inside$2(id, e.owner))) continue;
 			merge$1(out, tags([...e.shapes, ...e.returns]));
-			const held = e.iface ? [ifaces.get(e.iface)] : v.nodes.filter((n) => inside$1(n.id, targetOf$1(e))).flatMap((n) => n.interfaces);
+			const held = e.iface ? [ifaces.get(e.iface)] : v.nodes.filter((n) => inside$2(n.id, targetOf$1(e))).flatMap((n) => n.interfaces);
 			for (const h of held) if (h?.holds) merge$1(out, tags(h.takes));
 			const other = e.owner === e.from ? e.to : e.from;
 			const o = nodes.get(other);
@@ -203,7 +203,7 @@ function dataExits(v) {
 		const outside = OUTSIDE.has(n.kind);
 		const t = new Map([...tags(shapes)].filter(([k]) => policy[k] && (outside || k === "secret" && isClient(n))));
 		if (!t.size) return;
-		const denied = [...t.keys()].filter((k) => !policy[k].leaves.some((l) => inside$1(to, l)));
+		const denied = [...t.keys()].filter((k) => !policy[k].leaves.some((l) => inside$2(to, l)));
 		out.push({
 			edge,
 			to,
@@ -273,7 +273,7 @@ function securityFindings(v) {
 		if (!i.only?.length) continue;
 		for (const e of v.edges) {
 			if (e.owner === n.id || !aimsAt(e, i)) continue;
-			if (!(i.holds ? e.verb === "writes" : e.verb === "calls" || e.verb === "sends") || i.only.some((o) => inside$1(e.owner, o))) continue;
+			if (!(i.holds ? e.verb === "writes" : e.verb === "calls" || e.verb === "sends") || i.only.some((o) => inside$2(e.owner, o))) continue;
 			if (!e.iface) coarse.set(e, [...coarse.get(e) ?? [], i]);
 			else add("error", "not-allowed", `${e.owner} ${e.verb} "${i.ref}", which only ${i.only.join(", ")} may ${i.holds ? "write" : "use"}. Go through one of them, or change "only:" if this one should be allowed.`, e.ref ?? e.owner, nodes.get(e.owner)?.source, [...tagsOf(e), ...changesOfNode(e.owner)]);
 		}
@@ -319,7 +319,7 @@ function changeSecurity(v, id) {
 		errors: []
 	};
 	const inChange = (x) => x.change === id || x.modify === id;
-	const nodeIn = (nid) => c.nodes.includes(nid) || v.nodes.some((n) => inChange(n) && inside$1(nid, n.id));
+	const nodeIn = (nid) => c.nodes.includes(nid) || v.nodes.some((n) => inChange(n) && inside$2(nid, n.id));
 	const shapeIn = (t) => [...t.values()].flat().some((field) => c.shapes.includes(field.split(".")[0]));
 	const entries = entryPoints(v).filter((ep) => inChange(ep.iface) || nodeIn(ep.node.id) || shapeIn(ep.reaches) || v.edges.some((e) => arrivesAt(e, ep.iface) && inChange(e) && ep.callers.includes(e.owner)));
 	if (entries.length) {
@@ -403,7 +403,7 @@ function surfaceText(v, change) {
 		const { lines, errors } = changeSecurity(v, change);
 		out.push(`Security surface of change ${change} (${c.state}):`);
 		out.push(...lines.length ? lines : ["  It adds no entry point, sends no sensitive data out of the system and holds no secret."]);
-		const mine = (n) => c.nodes.some((id) => inside$1(n.id, id)) || v.nodes.some((x) => (x.change === change || x.modify === change) && inside$1(n.id, x.id));
+		const mine = (n) => c.nodes.some((id) => inside$2(n.id, id)) || v.nodes.some((x) => (x.change === change || x.modify === change) && inside$2(n.id, x.id));
 		out.push(...unlistedRoutes(v, mine, new Set(entryPoints(v).map((ep) => ep.iface.ref))));
 		if (!v.nodes.some((n) => n.runtime)) out.push("No node has been compared with its code (no code index, or nothing it recognises), so routes that exist only in the code are not listed.");
 		if (errors.length) out.push("Errors:", ...errors.map((e) => `  ${e.code}: ${e.message}`));
@@ -458,7 +458,7 @@ function weakenedBetween(was, is) {
 	for (const [ref, names] of was.only) {
 		const now = is.only.get(ref);
 		if (!now?.length) out.push(`no longer: only ${ref}: ${names.join(", ")}`);
-		else for (const o of now) if (!names.some((w) => inside$1(o, w))) out.push(`now allowed: ${o} may use ${ref}`);
+		else for (const o of now) if (!names.some((w) => inside$2(o, w))) out.push(`now allowed: ${o} may use ${ref}`);
 	}
 	for (const x of is.allowances) if (!was.allowances.has(x)) out.push(`now allowed: ${x}`);
 	for (const [ref, now] of is.auth) if (now === "none" && !was.auth.has(ref)) out.push(`now allowed: auth none ${ref}`);
@@ -19952,7 +19952,7 @@ var TS_EXT = [
 	".cjs"
 ];
 var SKIP$2 = /(^|\/)(node_modules|dist|build|\.next|\.turbo|coverage|vendor|__pycache__|\.venv)\//;
-var MAX_BYTES = 409600;
+var MAX_BYTES$1 = 409600;
 function indexPath(root) {
 	return path.join(root, MODEL_DIR, ".cache", "code-index.json");
 }
@@ -20919,7 +20919,7 @@ async function buildCodeIndex(root) {
 		} catch {
 			continue;
 		}
-		if (st.size > MAX_BYTES) continue;
+		if (st.size > MAX_BYTES$1) continue;
 		const lang = LANG_OF[path.extname(f)];
 		const prev = old?.files[f];
 		let entry;
@@ -24022,6 +24022,7 @@ function compile$1(root, opts = {}) {
 	}
 	const order = [...nodes.values()].sort((a, b) => a.id.localeCompare(b.id));
 	return {
+		...opts.files ? { files: Object.fromEntries([...filesOf].map(([id, list]) => [id, [...list].sort().map((path) => ({ path }))])) } : {},
 		version: 1,
 		generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
 		root,
@@ -25900,6 +25901,47 @@ function openingAllowed(env = process.env) {
 		"yes"
 	].includes(String(env.ARMATURE_NO_OPEN ?? "").toLowerCase());
 }
+/** The session view of one session: the page made for a pane beside the agent. */
+function sessionUrl(base, session) {
+	return `${base.replace(/\/$/, "")}/?view=session${session ? `&session=${encodeURIComponent(session)}` : ""}`;
+}
+/** The address of the viewer for this repo, started when none runs. Null when none could be started. */
+function ensureViewer(root) {
+	return (readRunning(root) ?? startViewer(root))?.url ?? null;
+}
+/** How many pages show the session view right now. Null when the viewer does not answer in time. */
+async function watchers(base) {
+	try {
+		const n = (await (await fetch(`${base.replace(/\/$/, "")}/watchers`, { signal: AbortSignal.timeout(800) })).json()).session;
+		return typeof n === "number" ? n : null;
+	} catch {
+		return null;
+	}
+}
+/**
+* The person watches a session on the diagram, so the progress view is open before the session's
+* first edit. `first` is true on that edit: with no view open, the edit is sent back once with the
+* address to open. On a later edit, if the agent could not open it, the hook opens it in the
+* default browser, once (`fallback`). Returns the reason to send the edit back, or null to let it through.
+*/
+async function progressGate(root, session, first, fallback, deps = {
+	allowed: openingAllowed,
+	viewer: ensureViewer,
+	watchers,
+	open: openBrowser
+}) {
+	if (!session || !deps.allowed()) return null;
+	if (!first && !fallback()) return null;
+	const base = deps.viewer(root);
+	if (!base) return null;
+	if (await deps.watchers(base) !== 0) return null;
+	const url = sessionUrl(base, session);
+	if (!first) {
+		deps.open(url);
+		return null;
+	}
+	return `Armature shows the person what this session does on the diagram, so the progress view is opened before the first edit: ${url}\n- In the Claude desktop app: open that address in the browser pane (the preview_start tool with "url"), and leave it open.\n- With no browser tool: say so in one line and go on. The next edit opens it in the person's default browser.\nThen make this edit again. This is asked once per session.`;
+}
 function changeUrl(base, change) {
 	return `${base.replace(/\/$/, "")}/?lens=work&change=${encodeURIComponent(change)}`;
 }
@@ -25968,6 +26010,222 @@ function showChange(root, change) {
 	}
 	return url;
 }
+// src/live.ts
+var LIVE_FILE = "live.jsonl";
+var MAX_BYTES = 262144;
+/** A session that has been silent this long is no longer shown. */
+var SHOWN_FOR = 18e5;
+/** A turn with no step for this long is taken to have ended without saying so. */
+var STALLED_AFTER = 9e5;
+/** Steps older than this are not counted. */
+var COUNTED_FOR = 432e5;
+var liveFile = (root) => path.join(root, MODEL_DIR, ".cache", LIVE_FILE);
+var clip = (text, max) => {
+	const one = text.replace(/\s+/g, " ").trim();
+	return one.length > max ? `${one.slice(0, max - 1)}…` : one;
+};
+/** The program a command runs and its first argument: "npm test", "git status". Enough to say what is running, and no more. */
+function commandName(command) {
+	const words = command.trim().split(/\s+/).filter((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
+	const safe = (w) => w && /^[\w./:@-]{1,40}$/.test(w) ? w : "";
+	return [safe(words[0]?.split("/").pop()), words[1]?.startsWith("-") ? "" : safe(words[1])].filter(Boolean).join(" ");
+}
+/** Records one step of a session. Never throws: a log that cannot be written must not stop a hook. */
+function noteLive(root, session, kind, more = {}) {
+	const s = typeof session === "string" ? session : "";
+	if (!s) return;
+	try {
+		const file = liveFile(root);
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		const ev = {
+			t: Date.now(),
+			s,
+			k: kind
+		};
+		if (more.file) ev.file = more.file;
+		if (more.text) ev.text = clip(more.text, 140);
+		let size = 0;
+		try {
+			size = fs.statSync(file).size;
+		} catch {}
+		if (size > MAX_BYTES) {
+			const lines = fs.readFileSync(file, "utf8").split("\n").filter(Boolean);
+			fs.writeFileSync(file, `${lines.slice(Math.floor(lines.length / 2)).join("\n")}\n`);
+		}
+		fs.appendFileSync(file, `${JSON.stringify(ev)}\n`);
+	} catch {}
+}
+function readEvents(root) {
+	let text;
+	try {
+		text = fs.readFileSync(liveFile(root), "utf8");
+	} catch {
+		return [];
+	}
+	const out = [];
+	for (const line of text.split("\n")) {
+		if (!line) continue;
+		try {
+			const e = JSON.parse(line);
+			if (typeof e.t === "number" && typeof e.s === "string" && typeof e.k === "string") out.push(e);
+		} catch {}
+	}
+	return out;
+}
+var inside$1 = (id, anc) => id === anc || id.startsWith(`${anc}.`);
+/** The sessions seen lately, the busiest first, with the parts of the model they touched. */
+function readLive(root, g, now = Date.now(), opts = {}) {
+	const bySession = /* @__PURE__ */ new Map();
+	for (const e of readEvents(root)) {
+		if (now - e.t > COUNTED_FOR) continue;
+		bySession.set(e.s, [...bySession.get(e.s) ?? [], e]);
+	}
+	const sessions = [];
+	for (const [id, events] of bySession) {
+		events.sort((a, b) => a.t - b.t);
+		const last = events[events.length - 1];
+		if (now - last.t > SHOWN_FOR) continue;
+		const nodes = /* @__PURE__ */ new Map();
+		const steps = [];
+		let prompt;
+		for (const e of events) {
+			const at = new Date(e.t).toISOString();
+			const step = {
+				at,
+				kind: e.k
+			};
+			if (e.text) step.text = e.text;
+			if (e.k === "prompt") prompt = e.text;
+			if (e.file) {
+				const rel = path.relative(root, path.resolve(root, e.file)).replace(/\\/g, "/");
+				if (rel.startsWith("..") || path.isAbsolute(rel) || rel.startsWith(`armature/.cache/`)) continue;
+				step.file = rel;
+				const owner = ownerOf(g, rel);
+				if (owner) {
+					step.node = owner.id;
+					const n = nodes.get(owner.id) ?? {
+						id: owner.id,
+						edits: 0,
+						reads: 0,
+						files: [],
+						lastAt: at,
+						seq: 0
+					};
+					if (e.k === "edited") n.edits++;
+					else if (e.k === "read") n.reads++;
+					let f = n.files.find((x) => x.path === rel);
+					if (!f) n.files.push(f = {
+						path: rel,
+						edits: 0
+					});
+					if (e.k === "edited") f.edits++;
+					n.lastAt = at;
+					n.seq = steps.length;
+					nodes.set(owner.id, n);
+				}
+			}
+			steps.push(step);
+		}
+		const touched = [...nodes.values()].sort((a, b) => Number(b.edits > 0) - Number(a.edits > 0) || b.seq - a.seq);
+		const edited = touched.filter((n) => n.edits > 0).map((n) => n.id);
+		const working = last.k !== "stop" && now - last.t < STALLED_AFTER;
+		const current = [...steps].reverse().find((s) => s.file || s.kind === "run");
+		sessions.push({
+			id,
+			startedAt: new Date(events[0].t).toISOString(),
+			lastAt: new Date(last.t).toISOString(),
+			working,
+			prompt,
+			now: current,
+			part: [...steps].reverse().find((s) => s.node)?.node,
+			nodes: touched.map(({ seq: _seq, ...n }) => ({
+				...n,
+				files: [...n.files].reverse().sort((a, b) => Number(b.edits > 0) - Number(a.edits > 0)).slice(0, 12)
+			})),
+			changes: g.changes.filter((c) => c.state !== "done" && c.state !== "dropped" && c.nodes.some((x) => edited.some((y) => inside$1(x, y) || inside$1(y, x)))).map((c) => c.id),
+			steps: steps.slice(-24).reverse()
+		});
+	}
+	sessions.sort((a, b) => Number(b.working) - Number(a.working) || b.lastAt.localeCompare(a.lastAt));
+	if (opts.changes) {
+		const edited = sessions.flatMap((s) => s.nodes.flatMap((n) => n.files.filter((f) => f.edits > 0)));
+		const sizes = fileChanges(root, [...new Set(edited.map((f) => f.path))]);
+		for (const f of edited) Object.assign(f, sizes.get(f.path));
+	}
+	return {
+		at: new Date(now).toISOString(),
+		sessions
+	};
+}
+var MAX_DIFF = 409600;
+/** Lines added and removed in each file since the last commit. A file git does not track counts as all new. */
+function fileChanges(root, files) {
+	const out = /* @__PURE__ */ new Map();
+	if (!files.length) return out;
+	for (const line of (git$1(root, [
+		"diff",
+		"--numstat",
+		"HEAD",
+		"--",
+		...files
+	]) ?? "").split("\n")) {
+		const m = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(line);
+		if (m) out.set(m[3], {
+			added: Number(m[1]) || 0,
+			removed: Number(m[2]) || 0
+		});
+	}
+	for (const f of (git$1(root, [
+		"ls-files",
+		"--others",
+		"--exclude-standard",
+		"--",
+		...files
+	]) ?? "").split("\n").filter(Boolean)) {
+		let lines = 0;
+		try {
+			const text = fs.readFileSync(path.join(root, f), "utf8");
+			lines = text ? text.replace(/\n$/, "").split("\n").length : 0;
+		} catch {}
+		out.set(f, {
+			added: lines,
+			removed: 0,
+			fresh: true
+		});
+	}
+	return out;
+}
+/**
+* What changed in one file since the last commit, as a unified diff. Only for a file a session shown
+* in `live` edited: the page asks by path, and this must not read any file it is asked for.
+* Null when the file is not one of those.
+*/
+function fileDiff(root, live, file) {
+	if (!live.sessions.some((s) => s.nodes.some((n) => n.files.some((f) => f.path === file && f.edits > 0)))) return null;
+	const cut = (text) => text.length > MAX_DIFF ? `${text.slice(0, MAX_DIFF)}\n… the rest is left out: the change is larger than ${MAX_DIFF / 1024} KB.\n` : text;
+	if (!!git$1(root, [
+		"ls-files",
+		"--others",
+		"--exclude-standard",
+		"--",
+		file
+	])?.trim()) {
+		let text;
+		try {
+			text = fs.readFileSync(path.join(root, file), "utf8");
+		} catch {
+			return "";
+		}
+		const lines = text.replace(/\n$/, "").split("\n");
+		return cut(`@@ -0,0 +1,${lines.length} @@ new file\n${lines.map((l) => `+${l}`).join("\n")}\n`);
+	}
+	return cut(git$1(root, [
+		"diff",
+		"HEAD",
+		"--",
+		file
+	]) ?? "");
+}
 // src/server.ts
 function viewerHtml() {
 	const file = new URL("../viewer/dist/index.html", import.meta.url);
@@ -26000,6 +26258,21 @@ function proposedAt(root, id) {
 		if (first) return first;
 		return (stat.birthtimeMs > 0 ? stat.birthtime : stat.mtime).toISOString();
 	}
+}
+/** What the code index knows about each listed file: its size, its symbols, and the files of this repo it imports. */
+function fileDetails(graph, root) {
+	const idx = readCodeIndex(root);
+	if (!graph.files || !idx) return graph;
+	for (const list of Object.values(graph.files)) for (const f of list) {
+		const c = idx.files[f.path];
+		if (!c) continue;
+		f.lines = c.lines;
+		f.symbols = c.symbols.length;
+		if (c.test) f.test = true;
+		const imports = [...new Set(c.imports.map((i) => i.file).filter((x) => !!x && x !== f.path))];
+		if (imports.length) f.imports = imports;
+	}
+	return graph;
 }
 /** Adds, to each change that waits for approval, when it was proposed and what it does to security: the person reads both before they approve. */
 function forReview(graph, root) {
@@ -26053,10 +26326,11 @@ function approveFromPage(root, token, req, body) {
 	};
 }
 function exportHtml(root, out, github) {
-	const graph = forReview(compile$1(root, {
+	const graph = fileDetails(forReview(compile$1(root, {
 		github,
-		activity: true
-	}), root);
+		activity: true,
+		files: true
+	}), root), root);
 	graph.root = path.basename(root);
 	graph.docTexts = {};
 	let total = 0;
@@ -26074,8 +26348,10 @@ function exportHtml(root, out, github) {
 function serve(root, port, github, opts = {}) {
 	viewerHtml();
 	const clients = /* @__PURE__ */ new Set();
+	const watching = /* @__PURE__ */ new Set();
 	const token = randomBytes(24).toString("hex");
 	let lastSeen = Date.now();
+	let owners = null;
 	const server = http.createServer((req, res) => {
 		lastSeen = Date.now();
 		if (!/^(?:localhost|127\.0\.0\.1|\[::1\]):\d+$/.test(req.headers.host ?? "")) {
@@ -26086,10 +26362,11 @@ function serve(root, port, github, opts = {}) {
 		const url = (req.url ?? "/").split("?")[0];
 		if (url === "/graph.json") {
 			try {
-				const graph = forReview(compile$1(root, {
+				const graph = fileDetails(forReview(compile$1(root, {
 					github,
-					activity: true
-				}), root);
+					activity: true,
+					files: true
+				}), root), root);
 				res.writeHead(200, {
 					"content-type": "application/json",
 					"cache-control": "no-store"
@@ -26099,6 +26376,48 @@ function serve(root, port, github, opts = {}) {
 				res.writeHead(500, { "content-type": "application/json" });
 				res.end(JSON.stringify({ error: String(e?.message ?? e) }));
 			}
+			return;
+		}
+		if (url === "/live.json") {
+			let body;
+			try {
+				owners ??= compile$1(root);
+				body = JSON.stringify(readLive(root, owners, Date.now(), { changes: true }));
+			} catch {
+				body = JSON.stringify({
+					at: (/* @__PURE__ */ new Date()).toISOString(),
+					sessions: []
+				});
+			}
+			res.writeHead(200, {
+				"content-type": "application/json",
+				"cache-control": "no-store"
+			});
+			res.end(body);
+			return;
+		}
+		if (url === "/watchers") {
+			res.writeHead(200, {
+				"content-type": "application/json",
+				"cache-control": "no-store"
+			});
+			res.end(JSON.stringify({ session: watching.size }));
+			return;
+		}
+		if (url === "/diff") {
+			const file = new URL(req.url ?? "/", "http://x").searchParams.get("path") ?? "";
+			let text = null;
+			try {
+				owners ??= compile$1(root);
+				text = fileDiff(root, readLive(root, owners), file);
+			} catch {
+				text = null;
+			}
+			res.writeHead(text === null ? 404 : 200, {
+				"content-type": "text/plain; charset=utf-8",
+				"cache-control": "no-store"
+			});
+			res.end(text ?? "Not found");
 			return;
 		}
 		if (url === "/approve") {
@@ -26151,8 +26470,10 @@ function serve(root, port, github, opts = {}) {
 			});
 			res.write("retry: 1000\n\n");
 			clients.add(res);
+			if (new URL(req.url ?? "/", "http://x").searchParams.get("view") === "session") watching.add(res);
 			req.on("close", () => {
 				clients.delete(res);
+				watching.delete(res);
 				lastSeen = Date.now();
 			});
 			return;
@@ -26170,10 +26491,19 @@ function serve(root, port, github, opts = {}) {
 	});
 	let timer = null;
 	const notify = () => {
+		owners = null;
 		if (timer) clearTimeout(timer);
 		timer = setTimeout(() => {
 			for (const c of clients) c.write("data: changed\n\n");
 		}, 150);
+	};
+	let liveTimer = null;
+	const notifyLive = () => {
+		if (liveTimer) return;
+		liveTimer = setTimeout(() => {
+			liveTimer = null;
+			for (const c of clients) c.write("data: live\n\n");
+		}, 120);
 	};
 	watchSources(root, () => buildCodeIndex(root).then((r) => {
 		if (r.parsed) notify();
@@ -26183,6 +26513,7 @@ function serve(root, port, github, opts = {}) {
 		fs.watch(archAbs, { recursive: true }, (_event, file) => {
 			if (file && String(file).replace(/\\/g, "/").startsWith(".cache")) {
 				if (String(file).includes("reports")) notify();
+				else if (String(file).endsWith("live.jsonl")) notifyLive();
 				return;
 			}
 			notify();
@@ -27703,8 +28034,10 @@ async function hook(name, rootFlag) {
 	const input = parseJson(await readStdin());
 	const root = findRoot(rootFlag ?? input.cwd ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd());
 	if (!root) return;
+	const live = (kind, more) => noteLive(root, input.session_id, kind, more);
 	try {
 		if (name === "session-start") {
+			live("start");
 			await buildCodeIndex(root).catch(() => void 0);
 			const out = [orient(compile$1(root))];
 			if (input.source === "compact" || input.source === "clear") {
@@ -27720,6 +28053,7 @@ async function hook(name, rootFlag) {
 		}
 		if (name === "prompt") {
 			const prompt = String(input.prompt ?? "").trim();
+			if (prompt) live("prompt", { text: prompt });
 			if (prompt.length < 12 || prompt.startsWith("/")) return;
 			const sid = String(input.session_id ?? "");
 			const out = [];
@@ -27742,7 +28076,13 @@ async function hook(name, rootFlag) {
 		if (name === "pre-write") {
 			const verdict = writeGate(root, input.tool_input ?? {});
 			dropPendingApproval(root);
-			if (!verdict) return;
+			if (verdict?.decision !== "deny") live("editing", { file: targetOf(input.tool_input) });
+			if (!verdict) {
+				const sid = String(input.session_id ?? "");
+				const open = await progressGate(root, sid, once(root, "progress-sessions", sid), () => once(root, "progress-opened", sid));
+				if (open) decide("deny", open);
+				return;
+			}
 			if (verdict.approves) {
 				let sec;
 				try {
@@ -27767,7 +28107,12 @@ async function hook(name, rootFlag) {
 		}
 		if (name === "pre-bash") {
 			const verdict = bashGate(root, String(input.tool_input?.command ?? ""), typeof input.cwd === "string" ? input.cwd : root);
+			if (verdict?.decision !== "deny") live("run", { text: commandName(String(input.tool_input?.command ?? "")) });
 			if (verdict) decide(verdict.decision, verdict.reason);
+			return;
+		}
+		if (name === "note") {
+			live("read", { file: targetOf(input.tool_input) });
 			return;
 		}
 		if (name === "pre-plan") {
@@ -27786,6 +28131,7 @@ async function hook(name, rootFlag) {
 		if (name === "post-edit") {
 			const file = targetOf(input.tool_input) ?? "";
 			if (!file) return;
+			live("edited", { file });
 			const rel = path.relative(root, path.resolve(root, file)).replace(/\\/g, "/");
 			if (rel.startsWith("..") || rel.startsWith(`armature/.cache/`)) return;
 			const inArch = rel.startsWith(`${MODEL_DIR}/`);
@@ -27819,6 +28165,7 @@ async function hook(name, rootFlag) {
 			return;
 		}
 		if (name === "stop") {
+			live("stop");
 			dropPendingApproval(root);
 			if (input.stop_hook_active) return;
 			const changed = changedFiles(root);
@@ -27890,6 +28237,11 @@ function mergeHooks(settingsPath) {
 			cmd("post-edit")
 		],
 		[
+			"PostToolUse",
+			"Read",
+			cmd("note")
+		],
+		[
 			"Stop",
 			void 0,
 			cmd("stop")
@@ -27948,7 +28300,7 @@ function copyDir(from, to) {
 function install(root) {
 	const out = [];
 	const hooksChanged = mergeHooks(path.join(root, ".claude", "settings.local.json"));
-	out.push(`${hooksChanged ? "Added" : "Kept"} hooks in .claude/settings.local.json (session start, prompts, before writes and before a plan is presented, after edits to ${MODEL_DIR}/ and to documents, on stop).`);
+	out.push(`${hooksChanged ? "Added" : "Kept"} hooks in .claude/settings.local.json (session start, prompts, before writes and before a plan is presented, after edits to ${MODEL_DIR}/ and to documents, after reads, on stop).`);
 	const mcpPath = path.join(root, ".mcp.json");
 	const mcpTracked = !!git$1(root, [
 		"ls-files",

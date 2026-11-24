@@ -9,7 +9,8 @@ code:
   - src/diff.ts
   - src/summarize.ts
   - src/eval.ts
-tests: [test/deep.test.ts, test/tools.test.ts, test/sound.test.ts]
+  - src/live.ts
+tests: [test/deep.test.ts, test/tools.test.ts, test/sound.test.ts, test/live.test.ts]
 
 accepts:
   - id: text
@@ -18,8 +19,14 @@ accepts:
     gives: Answer
     note: orient, show, impact, path, trace, drift, context and the rest. Each takes a compiled graph and returns plain text.
 
-reads: [project.cache#summaries]
-writes: [project.cache#summaries]
+  - id: live
+    via: in-process
+    takes: Graph
+    gives: Live
+    note: noteLive writes one step of an agent session to the log; readLive turns the log into sessions, the parts they touched and the files they edited, with each file's size against the last commit; fileDiff gives what changed in one of those files.
+
+reads: [project.cache#summaries, project.cache#live]
+writes: [project.cache#summaries, project.cache#live]
 calls:
   - to: core.compiler#compile
     note: diff compiles the model at a git ref beside the one in the working tree.
@@ -32,6 +39,16 @@ rules:
   - When an answer rests on something that was not checked, say so in the answer.
 
 requirements:
+  - id: diff-only-of-edited-files
+    kind: security
+    text: The diff of a file is given only for a file an agent session shown in the viewer edited, never for a path the page merely asks for.
+    tests: test/live.test.ts
+    match: shows the diff of a file a session edited, and of no other file
+  - id: live-names-no-command
+    kind: security
+    text: The log of agent sessions holds the name of a command and never the command, which can carry a secret.
+    tests: test/live.test.ts
+    match: one line per step, with the name of a command and never the command
   - id: diff-lists-model-changes
     text: The diff against a git ref lists what was added, changed and removed, in the model's own terms.
     tests: test/tools.test.ts

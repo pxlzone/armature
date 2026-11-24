@@ -13,6 +13,8 @@ accepts:
 calls:
   - to: viewer.server#graph
   - to: viewer.server#doc
+  - to: viewer.server#live
+  - to: viewer.server#diff
   - to: viewer.server#approve
 
 rules:

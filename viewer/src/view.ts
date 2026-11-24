@@ -71,6 +71,57 @@ export interface ViewOptions {
   bundle?: boolean;
   /** Draw these edges instead of the model's data links (the Code lens passes import dependencies). */
   edges?: Edge[];
+  /** Imports between file blocks, drawn beside whatever else is drawn, where both files are on the map. */
+  fileEdges?: Edge[];
+}
+
+/** The id of the block drawn for one file of a node. It sits under the node's id, so it opens and closes with it. */
+export function fileId(node: string, path: string): string {
+  return `${node}.§${path.replace(/\./g, '‧')}`;
+}
+
+/**
+ * The graph with each node's files as blocks inside it, so a node with code opens the way a group
+ * does and shows what it is made of. Files a session edited (`first`) are always drawn; of the rest,
+ * up to `cap` per node, code before tests, and one block stands for the others. Also returns the
+ * imports between the files drawn, as links.
+ */
+export function withFiles(g: Graph, first: Set<string>, cap: number): { graph: Graph; edges: Edge[] } {
+  if (!g.files) return { graph: g, edges: [] };
+  const nodes: GNode[] = [];
+  const idOf = new Map<string, string>();
+  const drawn: Array<{ id: string; imports: string[] }> = [];
+  for (const n of g.nodes) {
+    const all = g.files[n.id] ?? [];
+    if (n.children.length > 0 || all.length === 0) {
+      nodes.push(n);
+      continue;
+    }
+    const rank = (f: { path: string; test?: boolean }): number => (first.has(f.path) ? 0 : f.test ? 2 : 1);
+    const sorted = [...all].sort((a, b) => rank(a) - rank(b) || a.path.localeCompare(b.path));
+    const keep = Math.max(cap, sorted.filter((f) => first.has(f.path)).length);
+    // One block for "1 more" would take the room of the file itself.
+    const shown = sorted.length - keep === 1 ? sorted : sorted.slice(0, keep);
+    const base = { ...n, parent: n.id, children: [], depth: n.depth + 1, hub: false, tech: [], tags: [], interfaces: [], requirements: [], todos: [], prs: [], docs: [], rules: [], ownRules: 0, status: 'built' as const, unused: false, change: undefined, modify: undefined, retire: undefined, activity: null, description: undefined, image: undefined, color: n.color };
+    const kids: GNode[] = shown.map((f) => {
+      const id = fileId(n.id, f.path);
+      idOf.set(f.path, id);
+      drawn.push({ id, imports: f.imports ?? [] });
+      const size = f.lines === undefined ? '' : `${f.lines} line${f.lines === 1 ? '' : 's'}`;
+      return { ...base, id, name: f.path.split('/').pop() ?? f.path, role: [f.test ? 'test' : '', size].filter(Boolean).join(', '), statusWhy: f.path, file: f };
+    });
+    const rest = sorted.length - shown.length;
+    if (rest > 0) kids.push({ ...base, id: `${n.id}.§more`, name: `${rest} more files`, role: 'not drawn one by one', statusWhy: `${rest} more files of ${n.id}`, file: { path: '', more: rest } });
+    nodes.push({ ...n, children: kids.map((k) => k.id) }, ...kids);
+  }
+  const edges: Edge[] = [];
+  for (const d of drawn) {
+    for (const path of d.imports) {
+      const to = idOf.get(path);
+      if (to) edges.push({ id: `file:${d.id}>${to}`, from: d.id, to, owner: d.id, verb: 'calls', async: false, shapes: [], returns: [], status: 'built', evidence: 'seen', code: { count: 1, kind: 'declared', via: 'import' } });
+    }
+  }
+  return { graph: { ...g, nodes }, edges };
 }
 
 export function indexGraph(g: Graph): Index {
@@ -159,10 +210,12 @@ export function visibleGraph(g: Graph, ix: Index, o: ViewOptions): { nodes: Map<
   for (const n of g.nodes) if (n.parent === focus) addTree(n, null, 0);
 
   const merged = new Map<string, VEdge>();
-  for (const e of o.edges ?? g.edges) {
+  for (const e of [...(o.edges ?? g.edges), ...(o.fileEdges ?? [])]) {
     if (o.hidePlanned && e.status === 'planned') continue;
     const a = visibleFor(ix, e.from, focus, expanded);
     const b = visibleFor(ix, e.to, focus, expanded);
+    // An import between two files is drawn only between the files themselves: lifted to their nodes it would look like a link of the model.
+    if (e.id.startsWith('file:') && (a !== e.from || b !== e.to)) continue;
     if (!a || !b || a === b) continue;
     const aIn = focus === null || isInside(a, focus);
     const bIn = focus === null || isInside(b, focus);

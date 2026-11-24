@@ -73,7 +73,10 @@ write('hooks/hooks.json', {
       { matcher: 'Bash', hooks: hook('pre-bash') },
       { matcher: 'ExitPlanMode', hooks: hook('pre-plan') },
     ],
-    PostToolUse: [{ matcher: WRITE_TOOLS, hooks: hook('post-edit') }],
+    PostToolUse: [
+      { matcher: WRITE_TOOLS, hooks: hook('post-edit') },
+      { matcher: 'Read', hooks: hook('note') },
+    ],
     Stop: [{ hooks: hook('stop') }],
   },
 });

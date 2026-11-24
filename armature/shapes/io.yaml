@@ -35,3 +35,8 @@ MarkdownText:
   note: One document of the repo, as written.
   fields:
     text: string
+
+DiffText:
+  note: What one file holds that the last commit does not, as a unified diff.
+  fields:
+    text: string

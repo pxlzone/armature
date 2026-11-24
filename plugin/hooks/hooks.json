@@ -58,6 +58,15 @@
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/armature.mjs\" hook post-edit"
           }
         ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/armature.mjs\" hook note"
+          }
+        ]
       }
     ],
     "Stop": [

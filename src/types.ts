@@ -235,7 +235,20 @@ export interface DocInfo {
   loose: boolean;
 }
 
+/** One file of a node, as the viewer draws it inside the node. */
+export interface GFile {
+  path: string;
+  lines?: number;
+  /** Top-level symbols the code index found. */
+  symbols?: number;
+  test?: boolean;
+  /** Files of this repo it imports. */
+  imports?: string[];
+}
+
 export interface GNode {
+  /** Set by the viewer on the blocks it draws for a node's files. `more` stands for that many files not drawn one by one. */
+  file?: GFile & { more?: number };
   id: string;
   name: string;
   kind: NodeKind;
@@ -630,6 +643,8 @@ export interface Graph {
   dead: Array<{ path: string; lines: number; node: string | null }>;
   /** Document texts, present only in a static export. */
   docTexts?: Record<string, string>;
+  /** The files of each node that has code, for the viewer to draw inside it. Present when asked for. */
+  files?: Record<string, GFile[]>;
   activity: {
     days: number;
     commits: number;
@@ -645,3 +660,51 @@ export interface Graph {
 export const STATUS_ORDER: Status[] = [
   'retiring', 'failing', 'stale', 'planned', 'building', 'verified', 'built',
 ];
+
+// What agent sessions are doing right now: read from the hooks' log by src/live.ts, drawn by the viewer.
+export type LiveKind = 'start' | 'prompt' | 'read' | 'editing' | 'edited' | 'run' | 'stop';
+
+export interface LiveStep {
+  at: string;
+  kind: LiveKind;
+  /** The part that owns the file, when one does. */
+  node?: string;
+  file?: string;
+  text?: string;
+}
+
+/** A file a session read or edited. The line counts are what git sees against the last commit, when asked for. */
+export interface LiveFile {
+  path: string;
+  edits: number;
+  /** Lines added and removed since the last commit. Absent when git was not asked, or says nothing about the file. */
+  added?: number;
+  removed?: number;
+  /** A file git does not track yet: every line of it is new. */
+  fresh?: boolean;
+}
+
+export interface LiveSession {
+  id: string;
+  startedAt: string;
+  lastAt: string;
+  /** A turn is open and something happened lately. */
+  working: boolean;
+  /** The first words of the latest prompt. */
+  prompt?: string;
+  /** The latest step that names a file or a command. */
+  now?: LiveStep;
+  /** The part the session was last in. It stays while a command runs. */
+  part?: string;
+  /** Parts the session read or edited: the edited ones first, then the latest touched. */
+  nodes: Array<{ id: string; edits: number; reads: number; files: LiveFile[]; lastAt: string }>;
+  /** Changes not done yet that plan a part this session edited. */
+  changes: string[];
+  /** The latest steps, newest first. */
+  steps: LiveStep[];
+}
+
+export interface Live {
+  at: string;
+  sessions: LiveSession[];
+}

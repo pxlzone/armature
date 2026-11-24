@@ -16,3 +16,7 @@ GateDecision:
 
 PullRequest:
   source: src/repo.ts#PrInfo
+
+# What agent sessions are doing right now, for the viewer.
+Live:
+  source: src/types.ts#Live
