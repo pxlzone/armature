@@ -13,6 +13,7 @@ import { formatProblems, orient, ownerOf } from './render.js';
 import { isDocPath } from './docs.js';
 import { bashGate, gateOn, PLANNING_WORDS, planGate, planModeNote, planningNote, planReminder, targetOf, writeGate } from './gate.js';
 import { changeSecurity } from './security.js';
+import { showChange } from './viewer-open.js';
 import { callKey, dropPendingApproval, notePendingApproval, settleApproval } from './approve.js';
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -252,6 +253,9 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
         // Kept short: the permission prompt is a small window and cuts the rest off.
         const more = sec.lines.length - 5;
         verdict.reason += `\n${sec.lines.length ? `Security:\n${sec.lines.slice(0, 5).join('\n')}${more > 0 ? `\n  and ${more} more: "armature approve" prints all` : ''}` : 'Security: no new entry point, no sensitive data sent out, no secret.'}`;
+        // The prompt is plain text; the diagram of the change opens beside it, and its address goes first so it is never cut off.
+        const graph = showChange(root, verdict.approves);
+        if (graph) verdict.reason = `Diagram of the change: ${graph}\n${verdict.reason}`;
         // If the person says yes, this edit goes through and the approval is recorded after it.
         notePendingApproval(root, verdict.approves, callKey(input.tool_input));
       }

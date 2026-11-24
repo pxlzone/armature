@@ -1,4 +1,5 @@
 // Local viewer server with live reload, and the single-file static export.
+import { noteViewer } from './viewer-open.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -102,11 +103,13 @@ export function exportHtml(root: string, out: string, github: boolean): string {
   return target;
 }
 
-export function serve(root: string, port: number, github: boolean): Promise<string> {
+export function serve(root: string, port: number, github: boolean, opts: { idleMinutes?: number } = {}): Promise<string> {
   viewerHtml(); // fail early when the viewer is not built
   const clients = new Set<http.ServerResponse>();
   const token = randomBytes(24).toString('hex');
+  let lastSeen = Date.now();
   const server = http.createServer((req, res) => {
+    lastSeen = Date.now();
     // A page on another site can rebind its name to 127.0.0.1, so every route checks the Host, not only /approve.
     if (!/^(?:localhost|127\.0\.0\.1|\[::1\]):\d+$/.test(req.headers.host ?? '')) {
       res.writeHead(403);
@@ -159,7 +162,10 @@ export function serve(root: string, port: number, github: boolean): Promise<stri
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
       res.write('retry: 1000\n\n');
       clients.add(res);
-      req.on('close', () => clients.delete(res));
+      req.on('close', () => {
+        clients.delete(res);
+        lastSeen = Date.now();
+      });
       return;
     }
     if (url === '/' || url === '/index.html') {
@@ -199,7 +205,18 @@ export function serve(root: string, port: number, github: boolean): Promise<stri
         if (e.code === 'EADDRINUSE' && attempts > 0) tryListen(p + 1, attempts - 1);
         else reject(e);
       });
-      server.listen(p, '127.0.0.1', () => resolve(`http://localhost:${p}`));
+      server.listen(p, '127.0.0.1', () => {
+        const url = `http://localhost:${p}`;
+        noteViewer(root, url);
+        // A viewer started for an approval prompt goes away once nobody has had it open for a while.
+        if (opts.idleMinutes && opts.idleMinutes > 0) {
+          const idle = opts.idleMinutes * 60 * 1000;
+          setInterval(() => {
+            if (clients.size === 0 && Date.now() - lastSeen > idle) process.exit(0);
+          }, Math.min(idle, 60 * 1000)).unref();
+        }
+        resolve(url);
+      });
     };
     tryListen(port, 20);
   });
