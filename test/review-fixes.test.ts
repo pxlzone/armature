@@ -281,4 +281,16 @@ describe('the context pack', () => {
     expect(text.split('## Tests to run\n')[1]?.split('\n')[0]).toBe('- test/islands.test.ts');
     expect(text.split('Keep it small.').length - 1).toBe(1);
   });
+
+  it('ranks tests named after the task by words matched, three at most, and skips verbs like "add"', async () => {
+    write('armature/nodes/core.yaml', lines('kind: library', 'role: core', 'code: [src/**]'));
+    write('src/seller.ts', 'export const s = 1;\n');
+    for (const t of ['add-lookups', 'add-rooms', 'seller', 'seller-onboarding', 'seller-api', 'seller-x', 'seller-y']) write(`test/${t}.test.ts`, '');
+    await buildCodeIndex(root);
+    const text = contextText(compile(root), readCodeIndex(root), root, 'add a field to the seller onboarding api', { budget: 5000 });
+    const listed = (text.split('## Tests to run\n')[1] ?? '').split('\n').filter((l) => l.startsWith('- '));
+    expect(listed.slice(0, 2).sort()).toEqual(['- test/seller-api.test.ts', '- test/seller-onboarding.test.ts']);
+    expect(listed.filter((l) => l.includes('add-'))).toEqual([]);
+    expect(listed.length).toBeLessThanOrEqual(3);
+  });
 });

@@ -26551,7 +26551,8 @@ function contextPack(g, idx, root, task, opt = {}) {
 			for (const [p, s] of [...partners].sort((a, b) => b[1] - a[1]).slice(0, 4)) push(`- ${p} (${Math.round(s * 100)}% of the time)`);
 		}
 	}
-	const named = Object.values(idx.files).filter((f) => f.test && words(path.basename(f.path)).some((w) => qset.has(w) && !/^(?:tests?|specs?|[cm]?[jt]sx?|py)$/.test(w))).map((f) => f.path);
+	const hits = (f) => new Set(words(path.basename(f)).filter((w) => qset.has(w) && !/^(?:tests?|specs?|[cm]?[jt]sx?|py|add|fix|new|update|remove|make|use|get|set)$/.test(w))).size;
+	const named = Object.values(idx.files).filter((f) => f.test && hits(f.path) > 0).map((f) => f.path).sort((a, b) => hits(b) - hits(a)).slice(0, 3);
 	const byFile = [];
 	for (const f of topFiles.slice(0, 8)) for (const t of testsForFiles(idx, [f])) if (!byFile.includes(t)) byFile.push(t);
 	const tests = [.../* @__PURE__ */ new Set([...named, ...byFile])].slice(0, 6);

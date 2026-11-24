@@ -502,8 +502,10 @@ export function contextPack(g: Graph, idx: CodeIndex, root: string, task: string
       for (const [p, s] of [...partners].sort((a, b) => b[1] - a[1]).slice(0, 4)) push(`- ${p} (${Math.round(s * 100)}% of the time)`);
     }
   }
-  // Tests named after the task come first, then those of the most relevant files. Alphabetical order cut the obvious one.
-  const named = Object.values(idx.files).filter((f) => f.test && words(path.basename(f.path)).some((w) => qset.has(w) && !/^(?:tests?|specs?|[cm]?[jt]sx?|py)$/.test(w))).map((f) => f.path);
+  // Up to three tests named after the task come first, most matched words first, then those of the most
+  // relevant files. Alphabetical order cut the obvious one; unranked name matches crowded out the rest.
+  const hits = (f: string): number => new Set(words(path.basename(f)).filter((w) => qset.has(w) && !/^(?:tests?|specs?|[cm]?[jt]sx?|py|add|fix|new|update|remove|make|use|get|set)$/.test(w))).size;
+  const named = Object.values(idx.files).filter((f) => f.test && hits(f.path) > 0).map((f) => f.path).sort((a, b) => hits(b) - hits(a)).slice(0, 3);
   const byFile: string[] = [];
   for (const f of topFiles.slice(0, 8)) for (const t of testsForFiles(idx, [f])) if (!byFile.includes(t)) byFile.push(t);
   const tests = [...new Set([...named, ...byFile])].slice(0, 6);
