@@ -610,7 +610,9 @@ export function status(g: Graph): string {
   if (reqs.length) {
     out.push(`requirements: ${reqs.filter((q) => q.state === 'verified').length} verified, ${reqs.filter((q) => q.state === 'failing').length} failing, ${reqs.filter((q) => q.state === 'unverified').length} unverified`);
   }
-  out.push(`reports: ${g.system.reports.junit} JUnit, ${g.system.reports.lcov} lcov${g.system.reports.at ? ` (newest test report written ${g.system.reports.at.slice(0, 16).replace('T', ' ')} UTC; a pass counts only while the report is newer than the code)` : ''}`);
+  if (reqs.length && g.system.reports.junit === 0) {
+    out.push('reports: no JUnit test report found, so no requirement can be verified yet. Run the tests with a JUnit reporter into armature/.cache/reports/ (or set "reports:" in armature/system.yaml), then run this again.');
+  } else out.push(`reports: ${g.system.reports.junit} JUnit, ${g.system.reports.lcov} lcov${g.system.reports.at ? ` (newest test report written ${g.system.reports.at.slice(0, 16).replace('T', ' ')} UTC; a pass counts only while the report is newer than the code)` : ''}`);
   if (g.changes.length) {
     out.push('changes:');
     for (const c of g.changes) out.push(`  ${changeLine(c)}`);

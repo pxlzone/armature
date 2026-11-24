@@ -520,7 +520,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
         id: a.id, ref, node: n.id, holds: false, via: a.via, route: a.route, queue: a.queue,
         takes: shapeList(a.takes, ref, n.source), gives: shapeList(a.gives, ref, n.source),
         dlq: a.dlq, note: a.note, change: a.change, modify: a.modify, retire: a.retire, status: 'built', evidence: 'unchecked',
-        ...(a.auth !== undefined ? { auth: /^none$/i.test(String(a.auth).trim()) ? 'none' : String(a.auth) } : {}), ...onlyOf(a.only, ref),
+        ...(a.auth !== undefined ? { auth: /^(?:none|public|anonymous)$/i.test(String(a.auth).trim()) ? 'none' : String(a.auth) } : {}), ...onlyOf(a.only, ref),
       });
     }
     for (const h of toArr<any>(d.holds)) {
@@ -857,14 +857,25 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     const hit = newestMemo.get(id);
     if (hit !== undefined) return hit;
     let t = 0;
+    // Folders count too: deleting or moving a file keeps the other files' times but changes its folder's.
+    const dirs = new Set<string>();
     for (const [nid, list] of filesOf) {
       if (!isInside(nid, id)) continue;
       for (const f of list) {
+        // Not the repo root: anything created there would make every report look old.
+        if (path.dirname(f) !== '.') dirs.add(path.dirname(f));
         try {
           t = Math.max(t, fs.statSync(path.join(root, f)).mtimeMs);
         } catch {
           /* removed since the file list was read */
         }
+      }
+    }
+    for (const d of dirs) {
+      try {
+        t = Math.max(t, fs.statSync(path.join(root, d)).mtimeMs);
+      } catch {
+        /* removed since the file list was read */
       }
     }
     newestMemo.set(id, t);

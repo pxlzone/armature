@@ -249,7 +249,9 @@ function isTestPath(root: string, rel: string): boolean {
 export function writeGate(root: string, input: WriteInput): GateDecision | null {
   const target = targetOf(input);
   if (!target) return null;
-  const abs = path.resolve(root, target);
+  const abs = inRepo(root, path.resolve(root, target));
+  const written = root;
+  root = onDisk(root);
   const rel = path.relative(root, abs).replace(/\\/g, '/');
   if (!rel || rel.startsWith('..')) return null;
 
@@ -260,7 +262,7 @@ export function writeGate(root: string, input: WriteInput): GateDecision | null 
   const blind = after === null && !writtenText(input).trim();
 
   // Moving the approval record away removes it as surely as editing it.
-  const from = typeof input.source === 'string' ? path.relative(root, path.resolve(root, input.source)).replace(/\\/g, '/') : '';
+  const from = typeof input.source === 'string' ? path.relative(root, inRepo(written, path.resolve(written, input.source))).replace(/\\/g, '/') : '';
   if (from === `${mdir}/${APPROVALS_FILE}`) {
     return { decision: 'ask', reason: `This moves ${from}, the record of what a person approved. Allow it only to remove that record.` };
   }
@@ -641,6 +643,61 @@ function shellPath(dir: string, w: string): string | null {
 }
 
 /**
+ * Where a path lands in the repo, as an absolute path under the repo's real root. The real file
+ * counts when it is inside, so a symlink or other letter case cannot hide a model file. Otherwise the
+ * path as written counts, so a model file that links outside the repo is still gated.
+ */
+export function inRepo(root: string, p: string): string {
+  const realRoot = onDisk(root);
+  const real = onDisk(p);
+  if (real.startsWith(realRoot + path.sep)) return real;
+  for (const base of [path.resolve(root), realRoot]) {
+    const rel = path.relative(base, path.resolve(p));
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return path.join(realRoot, trueCase(realRoot, rel));
+  }
+  return real;
+}
+
+/** `rel` with each part that exists spelled as the disk has it, without following symlinks. */
+function trueCase(base: string, rel: string): string {
+  const parts = rel.split(path.sep);
+  let dir = base;
+  for (let i = 0; i < parts.length; i++) {
+    let names: string[];
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      break;
+    }
+    const hit = names.includes(parts[i]) ? parts[i] : names.find((n) => n.toLowerCase() === parts[i].toLowerCase());
+    if (!hit) break;
+    parts[i] = hit;
+    dir = path.join(dir, hit);
+  }
+  return parts.join(path.sep);
+}
+
+/**
+ * A path as the disk knows it: symlinks resolved and, on a disk that ignores case, the real case of
+ * every part that exists. Without this, "ARMATURE/changes/x.yaml" or a symlinked folder is a
+ * different string from the model file it writes, and every check below compares strings.
+ */
+export function onDisk(p: string): string {
+  let head = path.resolve(p);
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync.native(head), ...tail.reverse());
+    } catch {
+      const up = path.dirname(head);
+      if (up === head) return path.resolve(p);
+      tail.push(path.basename(head));
+      head = up;
+    }
+  }
+}
+
+/**
  * Every path a command names, each read from the folder the command stands in at that point
  * ("cd" is followed). Text inside quotes counts too: a script given inline names its files there.
  */
@@ -665,7 +722,8 @@ export function shellTargets(command: string, cwd: string): string[] {
   const text = command.replace(/<<-?\s*(['"]?)(\w+)\1([^\n]*)\n[\s\S]*?\n[ \t]*\2[ \t]*(?=\n|$)/g, '$3');
   const out: string[] = [];
   let dir = cwd;
-  for (const part of text.split(/&&|\|\||;|\n|\|/)) {
+  // ">|" is a redirect, not a pipe.
+  for (const part of text.split(/&&|\|\||;|\n|(?<!>)\|/)) {
     const words = shellWords(part.trim());
     if (!words.length) continue;
     const bare = words.map(unquote);
@@ -681,7 +739,7 @@ export function shellTargets(command: string, cwd: string): string[] {
     for (let i = 0; i < words.length; i++) {
       const w = words[i];
       if (/^['"]/.test(w)) continue;
-      const m = w.match(/^\d?>>?(.*)$/);
+      const m = w.match(/^(?:\d|&)?>[>|]?(.*)$/);
       if (m && !m[1].startsWith('&')) add(m[1] ? unquote(m[1]) : bare[i + 1]);
     }
     const cmd = bare[0] === 'git' && bare[1] === 'mv' ? 'mv' : bare[0] === 'sudo' ? bare[1] : bare[0];
@@ -749,6 +807,9 @@ export function shellRemovals(command: string, cwd: string): { deleted: string[]
  */
 export function bashGate(root: string, command: string, cwd: string = root): GateDecision | null {
   if (!command || !command.trim()) return null;
+  const written = root;
+  const here = (p: string): string => inRepo(written, p);
+  root = onDisk(root);
   const mdir = MODEL_DIR;
   // A question for the person is kept until the whole command is read: something it does further on
   // may be refused outright, and an answer to the question must not carry that through.
@@ -769,9 +830,9 @@ export function bashGate(root: string, command: string, cwd: string = root): Gat
     ask('This calls the viewer to approve a change. Allow it only if you reviewed the plan and want it built.');
   }
   const writes =
-    /(?:^|[^<>&|\d-])>{1,2}(?!&)|\b(?:sed|perl)\b[^|;&\n]*\s(?:-[A-Za-z]*i|--in-place)|\btee\b|\b(?:mv|cp|rm|truncate|dd|install|sponge)\b|\byq\b[^|;&\n]*\s(?:-i|--inplace)|\bawk\b[^|;&\n]*\s-i\s*inplace|\b(?:python3?|node|ruby|deno|bun|tsx)\b/.test(command);
+    /(?:^|[^<>|\d-])>{1,2}(?!&)|\b(?:sed|perl)\b[^|;&\n]*\s(?:-[A-Za-z]*i|--in-place)|\btee\b|\b(?:mv|cp|rm|ln|truncate|dd|install|sponge)\b|\byq\b[^|;&\n]*\s(?:-i|--inplace)|\bawk\b[^|;&\n]*\s-i\s*inplace|\b(?:python3?|node|ruby|deno|bun|tsx)\b/.test(command);
   // The files the command names, wherever it stands: "changes/mail.yaml" from inside the model folder is the same file.
-  const named = writes ? shellPaths(command, cwd).map((p) => path.relative(root, p).replace(/\\/g, '/')) : [];
+  const named = writes ? shellPaths(command, cwd).map((p) => path.relative(root, here(p)).replace(/\\/g, '/')) : [];
   const isRecord = (rel: string): boolean => {
     if (rel === `${mdir}/${APPROVALS_FILE}` || rel === `${mdir}/${CONFIRMED_FILE}`) return true;
     const name = rel.startsWith(`${mdir}/changes/`) ? rel.slice(mdir.length + 9) : '';
@@ -790,7 +851,8 @@ export function bashGate(root: string, command: string, cwd: string = root): Gat
   let held: Ownership | null = null;
   const own = (): Ownership => (held ??= readOwnership(root));
   // What the command takes away: part of the model, the settings that switch the hooks on, files of a protected node.
-  const gone = shellRemovals(command, cwd);
+  const removed = shellRemovals(command, cwd);
+  const gone = { deleted: removed.deleted.map(here), moved: removed.moved.map(here) };
   for (const [paths, doing] of [[gone.deleted, 'This command deletes'], [gone.moved, 'This command moves']] as const) {
     const verdict = paths.length ? removalGate(root, paths, doing, own) : null;
     if (verdict?.decision === 'deny') return verdict;
@@ -801,7 +863,7 @@ export function bashGate(root: string, command: string, cwd: string = root): Gat
   if (/\b(?:git\s+)?rm\b/.test(command) && modelFile.test(command)) {
     ask(`This command deletes part of the architecture model under ${mdir}/, with the boundaries, auth and requirements it carries.`);
   }
-  for (const target of shellTargets(command, cwd)) {
+  for (const target of shellTargets(command, cwd).map(here)) {
     const rel = path.relative(root, target).replace(/\\/g, '/');
     // Files that carry guards are written with the file tools, new or not: a write from the shell hides
     // what it adds and what it takes away, and a new settings file can switch the hooks off.

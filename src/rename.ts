@@ -169,6 +169,8 @@ function rewriteYaml(text: string, kind: Kind, rw: Rewriter, ren: Rename, self: 
         return;
       }
       if (kind === 'change') return;
+      // The data policy names the nodes tagged data may go to.
+      if (kind === 'system' && keys[0] === 'data' && last === 'leaves') return set(node, rw.node(v));
       // A node file, or an inline node in system.yaml.
       const here = kind === 'system' ? inlineNodeOf(trail) : self;
       if (kind === 'system' && !here) return;

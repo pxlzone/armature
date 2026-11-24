@@ -6,6 +6,10 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { buildCodeIndex } from '../src/code.js';
 import { compile } from '../src/compile.js';
 import { readDoc } from '../src/docs.js';
+import { readCodeIndex } from '../src/code.js';
+import { bashGate, writeGate } from '../src/gate.js';
+import { status } from '../src/render.js';
+import { rename } from '../src/rename.js';
 
 let root: string;
 
@@ -151,5 +155,116 @@ describe('non-ASCII file names', () => {
     execFileSync('git', ['init', '-q'], { cwd: root });
     const g = compile(root);
     expect(g.nodes.find((n) => n.id === 'api')?.files).toBe(1);
+  });
+});
+
+describe('the gate reads the file a path names, however it is spelled', () => {
+  beforeEach(() => {
+    write('armature/nodes/mail.yaml', lines('kind: service', 'role: sends mail', 'code: [src/mail/**]', 'change: mail'));
+    write('armature/nodes/api.yaml', lines('kind: service', 'role: api', 'code: [src/api/**]', 'protect: true'));
+    write('armature/changes/mail.yaml', lines('title: Mail', 'state: proposed'));
+    write('src/api/server.ts', 'export const s = 1;\n');
+  });
+  const approve = { old_string: 'state: proposed', new_string: 'state: approved' };
+
+  it('asks when a change is approved through other letter case', () => {
+    if (!fs.existsSync(path.join(root, 'ARMATURE'))) return; // only on a disk that ignores case
+    expect(writeGate(root, { file_path: 'ARMATURE/changes/mail.yaml', ...approve })).toMatchObject({ decision: 'ask' });
+    expect(writeGate(root, { file_path: 'SRC/api/server.ts', content: 'x' })).toMatchObject({ decision: 'deny' });
+  });
+
+  it('asks when a change is approved through a symlinked folder', () => {
+    fs.symlinkSync(path.join(root, 'armature'), path.join(root, 'm'));
+    expect(writeGate(root, { file_path: 'm/changes/mail.yaml', ...approve })).toMatchObject({ decision: 'ask' });
+  });
+
+  it('still gates a model or protected file that links outside the repo', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'armature-out-'));
+    fs.renameSync(path.join(root, 'armature/changes/mail.yaml'), path.join(outside, 'mail.yaml'));
+    fs.symlinkSync(path.join(outside, 'mail.yaml'), path.join(root, 'armature/changes/mail.yaml'));
+    fs.renameSync(path.join(root, 'src/api/server.ts'), path.join(outside, 'server.ts'));
+    fs.symlinkSync(path.join(outside, 'server.ts'), path.join(root, 'src/api/server.ts'));
+    expect(writeGate(root, { file_path: 'armature/changes/mail.yaml', ...approve })).toMatchObject({ decision: 'ask' });
+    expect(writeGate(root, { file_path: 'src/api/server.ts', content: 'x' })).toMatchObject({ decision: 'deny' });
+    expect(bashGate(root, 'echo y >> src/api/server.ts')).toMatchObject({ decision: 'deny' });
+  });
+
+  it('still gates the model when its whole folder links outside the repo', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'armature-out-'));
+    fs.renameSync(path.join(root, 'armature'), path.join(outside, 'armature'));
+    fs.symlinkSync(path.join(outside, 'armature'), path.join(root, 'armature'));
+    expect(writeGate(root, { file_path: 'armature/changes/mail.yaml', ...approve })).toMatchObject({ decision: 'ask' });
+  });
+
+  it('reads ln -sf, &> and >| as writes', () => {
+    expect(bashGate(root, 'ln -sf /tmp/x.yaml armature/changes/mail.yaml')).toMatchObject({ decision: 'ask' });
+    expect(bashGate(root, 'echo y &> src/api/server.ts')).toMatchObject({ decision: 'deny' });
+    expect(bashGate(root, 'echo y >| src/api/server.ts')).toMatchObject({ decision: 'deny' });
+  });
+});
+
+describe('model tools and status', () => {
+  it('renames a node in the data policy too', () => {
+    write('armature/system.yaml', lines('name: T', 'headline: t', 'externals:', '  - id: mailer', '    role: sends mail', 'data:', '  pii: { leaves: [mailer] }'));
+    expect(rename(root, 'mailer', 'postmark')).toMatch(/^Renamed /);
+    expect(fs.readFileSync(path.join(root, 'armature/system.yaml'), 'utf8')).toContain('leaves: [postmark]');
+  });
+
+  it('treats auth: public as open', () => {
+    write('armature/system.yaml', lines('name: T', 'headline: t', 'actors:', '  - id: visitor', '    role: anyone', '    calls: [api#profile]'));
+    write('armature/nodes/api.yaml', lines('kind: service', 'role: api', 'code: [src/api/**]', 'accepts:', '  - id: profile', '    via: http', '    gives: User', '    auth: public'));
+    write('armature/shapes/user.yaml', lines('User:', '  fields:', '    email: email @pii'));
+    write('src/api/a.ts', 'export const a = 1;\n');
+    expect(compile(root).problems.some((p) => p.code === 'open-entry')).toBe(true);
+  });
+
+  it('says why nothing is verified when there is no test report', () => {
+    write('armature/nodes/api.yaml', lines('kind: service', 'role: api', 'code: [src/api/**]', 'requirements:', '  - id: works', '    text: works', '    tests: tests/api.test.ts'));
+    write('src/api/a.ts', 'export const a = 1;\n');
+    write('tests/api.test.ts', '');
+    expect(status(compile(root))).toContain('no JUnit test report found');
+  });
+
+  it('counts a deleted file as a change to the code a report tested', async () => {
+    write('armature/nodes/api.yaml', lines('kind: service', 'role: api', 'code: [src/api/**]', 'requirements:', '  - id: works', '    text: works', '    tests: tests/api.test.ts'));
+    write('src/api/a.ts', 'export const a = 1;\n');
+    write('src/api/b.ts', 'export const b = 1;\n');
+    write('tests/api.test.ts', '');
+    const past = new Date(Date.now() - 120_000);
+    for (const f of ['src/api/a.ts', 'src/api/b.ts', 'src/api']) fs.utimesSync(path.join(root, f), past, past);
+    write('armature/.cache/reports/junit.xml', `<?xml version="1.0"?><testsuites><testsuite name="all">${pass('tests/api.test.ts', 'works')}</testsuite></testsuites>\n`);
+    const then = new Date(Date.now() - 60_000);
+    fs.utimesSync(path.join(root, 'armature/.cache/reports/junit.xml'), then, then);
+    expect(statusOf('api')).toBe('verified');
+    fs.rmSync(path.join(root, 'src/api/b.ts'));
+    expect(statusOf('api')).not.toBe('verified');
+  });
+});
+
+describe('imports the dead-code check follows', () => {
+  const importsOf = (f: string): Array<string | null> => readCodeIndex(root)!.files[f].imports.map((i) => i.file);
+
+  it('follows Python submodule imports', async () => {
+    write('app/__init__.py', '');
+    write('app/helpers.py', 'def h():\n    return 1\n');
+    write('app/utils/__init__.py', '');
+    write('app/utils/fmt.py', 'def f():\n    return 1\n');
+    write('app/main.py', 'from . import helpers\nfrom app.utils import fmt\n');
+    await buildCodeIndex(root);
+    expect(importsOf('app/main.py')).toEqual(expect.arrayContaining(['app/helpers.py', 'app/utils/fmt.py']));
+    const count = importsOf('app/main.py').length;
+    await buildCodeIndex(root);
+    await buildCodeIndex(root);
+    expect(importsOf('app/main.py')).toHaveLength(count);
+  });
+
+  it('follows jsconfig aliases, baseUrl paths and folder imports with a trailing slash', async () => {
+    write('jsconfig.json', JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@/*': ['src/*'] } } }));
+    write('src/components/button.js', 'export const b = 1;\n');
+    write('src/pkg/a.js', 'export const a = 1;\n');
+    write('src/dir/index.js', 'export const d = 1;\n');
+    write('src/main.js', "import { b } from '@/components/button';\nimport { a } from 'src/pkg/a';\nimport { d } from './dir/';\n");
+    await buildCodeIndex(root);
+    expect(importsOf('src/main.js')).toEqual(['src/components/button.js', 'src/pkg/a.js', 'src/dir/index.js']);
   });
 });

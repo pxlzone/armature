@@ -20772,7 +20772,7 @@ function stripJsonComments(text) {
 }
 function makeResolver(root, files) {
 	const tryFile = (p) => {
-		const clean = path.posix.normalize(p).replace(/^\.\//, "");
+		const clean = path.posix.normalize(p).replace(/^\.\//, "").replace(/\/+$/, "");
 		if (files.has(clean)) return clean;
 		const noExt = clean.replace(/\.(js|jsx|mjs|cjs)$/, "");
 		for (const base of [clean, noExt]) {
@@ -20791,15 +20791,17 @@ function makeResolver(root, files) {
 	}
 	const aliases = [];
 	for (const f of files) {
-		if (!/(^|\/)tsconfig(\.[\w-]+)?\.json$/.test(f) || SKIP$2.test(f)) continue;
+		if (!/(^|\/)[tj]sconfig(\.[\w-]+)?\.json$/.test(f) || SKIP$2.test(f)) continue;
 		try {
 			const co = JSON.parse(stripJsonComments(fs.readFileSync(path.join(root, f), "utf8"))).compilerOptions ?? {};
-			if (!co.paths) continue;
+			if (!co.paths && !co.baseUrl) continue;
 			const dir = path.posix.dirname(f) === "." ? "" : path.posix.dirname(f);
+			const paths = Object.entries(co.paths ?? {});
+			if (co.baseUrl) paths.push(["*", ["*"]]);
 			aliases.push({
 				dir,
 				base: path.posix.join(dir, co.baseUrl ?? "."),
-				paths: Object.entries(co.paths)
+				paths
 			});
 		} catch {}
 	}
@@ -20982,10 +20984,20 @@ async function buildCodeIndex(root) {
 			mtime: st.mtimeMs,
 			size: st.size,
 			test: TEST_FILE.test(f),
-			imports: entry.imports.map((i) => ({
-				...i,
-				...resolve(f, i.spec, lang === "sql" ? "typescript" : lang)
-			}))
+			imports: entry.imports.filter((i) => !(lang === "python" && i.names.length === 0)).flatMap((i) => {
+				const own = {
+					...i,
+					...resolve(f, i.spec, lang === "sql" ? "typescript" : lang)
+				};
+				if (lang !== "python") return [own];
+				const subs = i.names.filter((n) => n !== "*").map((n) => resolve(f, i.spec.endsWith(".") ? `${i.spec}${n}` : `${i.spec}.${n}`, "python").file);
+				return [own, ...[...new Set(subs)].filter((x) => !!x && x !== own.file).map((file) => ({
+					spec: i.spec,
+					names: [],
+					line: i.line,
+					file
+				}))];
+			})
 		};
 	}
 	const index = {
@@ -22706,7 +22718,7 @@ function compile$1(root, opts = {}) {
 				retire: a.retire,
 				status: "built",
 				evidence: "unchecked",
-				...a.auth !== void 0 ? { auth: /^none$/i.test(String(a.auth).trim()) ? "none" : String(a.auth) } : {},
+				...a.auth !== void 0 ? { auth: /^(?:none|public|anonymous)$/i.test(String(a.auth).trim()) ? "none" : String(a.auth) } : {},
 				...onlyOf(a.only, ref)
 			});
 		}
@@ -23109,12 +23121,19 @@ function compile$1(root, opts = {}) {
 		const hit = newestMemo.get(id);
 		if (hit !== void 0) return hit;
 		let t = 0;
+		const dirs = /* @__PURE__ */ new Set();
 		for (const [nid, list] of filesOf) {
 			if (!isInside(nid, id)) continue;
-			for (const f of list) try {
-				t = Math.max(t, fs.statSync(path.join(root, f)).mtimeMs);
-			} catch {}
+			for (const f of list) {
+				if (path.dirname(f) !== ".") dirs.add(path.dirname(f));
+				try {
+					t = Math.max(t, fs.statSync(path.join(root, f)).mtimeMs);
+				} catch {}
+			}
 		}
+		for (const d of dirs) try {
+			t = Math.max(t, fs.statSync(path.join(root, d)).mtimeMs);
+		} catch {}
 		newestMemo.set(id, t);
 		return t;
 	};
@@ -24742,7 +24761,8 @@ function status(g) {
 	}
 	const reqs = g.nodes.flatMap((n) => n.requirements);
 	if (reqs.length) out.push(`requirements: ${reqs.filter((q) => q.state === "verified").length} verified, ${reqs.filter((q) => q.state === "failing").length} failing, ${reqs.filter((q) => q.state === "unverified").length} unverified`);
-	out.push(`reports: ${g.system.reports.junit} JUnit, ${g.system.reports.lcov} lcov${g.system.reports.at ? ` (newest test report written ${g.system.reports.at.slice(0, 16).replace("T", " ")} UTC; a pass counts only while the report is newer than the code)` : ""}`);
+	if (reqs.length && g.system.reports.junit === 0) out.push("reports: no JUnit test report found, so no requirement can be verified yet. Run the tests with a JUnit reporter into armature/.cache/reports/ (or set \"reports:\" in armature/system.yaml), then run this again.");
+	else out.push(`reports: ${g.system.reports.junit} JUnit, ${g.system.reports.lcov} lcov${g.system.reports.at ? ` (newest test report written ${g.system.reports.at.slice(0, 16).replace("T", " ")} UTC; a pass counts only while the report is newer than the code)` : ""}`);
 	if (g.changes.length) {
 		out.push("changes:");
 		for (const c of g.changes) out.push(`  ${changeLine(c)}`);
@@ -25633,6 +25653,7 @@ function rewriteYaml(text, kind, rw, ren, self) {
 			return;
 		}
 		if (kind === "change") return;
+		if (kind === "system" && keys[0] === "data" && last === "leaves") return set(node, rw.node(v));
 		const here = kind === "system" ? inlineNodeOf(trail) : self;
 		if (kind === "system" && !here) return;
 		if ([
@@ -26772,14 +26793,16 @@ function isTestPath(root, rel) {
 function writeGate(root, input) {
 	const target = targetOf(input);
 	if (!target) return null;
-	const abs = path.resolve(root, target);
+	const abs = inRepo(root, path.resolve(root, target));
+	const written = root;
+	root = onDisk(root);
 	const rel = path.relative(root, abs).replace(/\\/g, "/");
 	if (!rel || rel.startsWith("..")) return null;
 	const mdir = MODEL_DIR;
 	const before = fs.existsSync(abs) && fs.statSync(abs).isFile() ? fs.readFileSync(abs, "utf8") : "";
 	const after = resultOf(root, before, input);
 	const blind = after === null && !writtenText(input).trim();
-	const from = typeof input.source === "string" ? path.relative(root, path.resolve(root, input.source)).replace(/\\/g, "/") : "";
+	const from = typeof input.source === "string" ? path.relative(root, inRepo(written, path.resolve(written, input.source))).replace(/\\/g, "/") : "";
 	if (from === `${mdir}/approvals.lock.json`) return {
 		decision: "ask",
 		reason: `This moves ${from}, the record of what a person approved. Allow it only to remove that record.`
@@ -27114,6 +27137,56 @@ function shellPath(dir, w) {
 	return path.resolve(dir, w);
 }
 /**
+* Where a path lands in the repo, as an absolute path under the repo's real root. The real file
+* counts when it is inside, so a symlink or other letter case cannot hide a model file. Otherwise the
+* path as written counts, so a model file that links outside the repo is still gated.
+*/
+function inRepo(root, p) {
+	const realRoot = onDisk(root);
+	const real = onDisk(p);
+	if (real.startsWith(realRoot + path.sep)) return real;
+	for (const base of [path.resolve(root), realRoot]) {
+		const rel = path.relative(base, path.resolve(p));
+		if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) return path.join(realRoot, trueCase(realRoot, rel));
+	}
+	return real;
+}
+/** `rel` with each part that exists spelled as the disk has it, without following symlinks. */
+function trueCase(base, rel) {
+	const parts = rel.split(path.sep);
+	let dir = base;
+	for (let i = 0; i < parts.length; i++) {
+		let names;
+		try {
+			names = fs.readdirSync(dir);
+		} catch {
+			break;
+		}
+		const hit = names.includes(parts[i]) ? parts[i] : names.find((n) => n.toLowerCase() === parts[i].toLowerCase());
+		if (!hit) break;
+		parts[i] = hit;
+		dir = path.join(dir, hit);
+	}
+	return parts.join(path.sep);
+}
+/**
+* A path as the disk knows it: symlinks resolved and, on a disk that ignores case, the real case of
+* every part that exists. Without this, "ARMATURE/changes/x.yaml" or a symlinked folder is a
+* different string from the model file it writes, and every check below compares strings.
+*/
+function onDisk(p) {
+	let head = path.resolve(p);
+	const tail = [];
+	for (;;) try {
+		return path.join(fs.realpathSync.native(head), ...tail.reverse());
+	} catch {
+		const up = path.dirname(head);
+		if (up === head) return path.resolve(p);
+		tail.push(path.basename(head));
+		head = up;
+	}
+}
+/**
 * Every path a command names, each read from the folder the command stands in at that point
 * ("cd" is followed). Text inside quotes counts too: a script given inline names its files there.
 */
@@ -27136,7 +27209,7 @@ function shellTargets(command, cwd) {
 	const text = command.replace(/<<-?\s*(['"]?)(\w+)\1([^\n]*)\n[\s\S]*?\n[ \t]*\2[ \t]*(?=\n|$)/g, "$3");
 	const out = [];
 	let dir = cwd;
-	for (const part of text.split(/&&|\|\||;|\n|\|/)) {
+	for (const part of text.split(/&&|\|\||;|\n|(?<!>)\|/)) {
 		const words = shellWords(part.trim());
 		if (!words.length) continue;
 		const bare = words.map(unquote);
@@ -27151,7 +27224,7 @@ function shellTargets(command, cwd) {
 		for (let i = 0; i < words.length; i++) {
 			const w = words[i];
 			if (/^['"]/.test(w)) continue;
-			const m = w.match(/^\d?>>?(.*)$/);
+			const m = w.match(/^(?:\d|&)?>[>|]?(.*)$/);
 			if (m && !m[1].startsWith("&")) add(m[1] ? unquote(m[1]) : bare[i + 1]);
 		}
 		const cmd = bare[0] === "git" && bare[1] === "mv" ? "mv" : bare[0] === "sudo" ? bare[1] : bare[0];
@@ -27215,6 +27288,9 @@ function shellRemovals(command, cwd) {
 */
 function bashGate(root, command, cwd = root) {
 	if (!command || !command.trim()) return null;
+	const written = root;
+	const here = (p) => inRepo(written, p);
+	root = onDisk(root);
 	const mdir = MODEL_DIR;
 	let question = null;
 	const ask = (reason) => {
@@ -27226,8 +27302,8 @@ function bashGate(root, command, cwd = root) {
 	if (/(?:\barmature(?:\.mjs)?|\b(?:dist|src)\/cli\.(?:mjs|js|ts))["']?\s+(?:--root\s+\S+\s+)?approve\b/.test(command)) ask("This runs \"armature approve\". Allow it only if you reviewed the plan and want it built.");
 	if (/(?:\barmature(?:\.mjs)?|\b(?:dist|src)\/cli\.(?:mjs|js|ts))["']?\s+(?:--root\s+\S+\s+)?confirm\b[^|;&\n]*\s["']?[\w.-]+:[\w-]+/.test(command)) ask("This runs \"armature confirm\" on a requirement: it records that you read the code and found the requirement true, with no test. Allow it only if you did.");
 	if (/(?:\blocalhost|\b127\.0\.0\.1|\[::1\]|\b0\.0\.0\.0)(?::\d+)?\/approve\b|x-armature-token|__ARMATURE_APPROVE__/i.test(command)) ask("This calls the viewer to approve a change. Allow it only if you reviewed the plan and want it built.");
-	const writes = /(?:^|[^<>&|\d-])>{1,2}(?!&)|\b(?:sed|perl)\b[^|;&\n]*\s(?:-[A-Za-z]*i|--in-place)|\btee\b|\b(?:mv|cp|rm|truncate|dd|install|sponge)\b|\byq\b[^|;&\n]*\s(?:-i|--inplace)|\bawk\b[^|;&\n]*\s-i\s*inplace|\b(?:python3?|node|ruby|deno|bun|tsx)\b/.test(command);
-	const named = writes ? shellPaths(command, cwd).map((p) => path.relative(root, p).replace(/\\/g, "/")) : [];
+	const writes = /(?:^|[^<>|\d-])>{1,2}(?!&)|\b(?:sed|perl)\b[^|;&\n]*\s(?:-[A-Za-z]*i|--in-place)|\btee\b|\b(?:mv|cp|rm|ln|truncate|dd|install|sponge)\b|\byq\b[^|;&\n]*\s(?:-i|--inplace)|\bawk\b[^|;&\n]*\s-i\s*inplace|\b(?:python3?|node|ruby|deno|bun|tsx)\b/.test(command);
+	const named = writes ? shellPaths(command, cwd).map((p) => path.relative(root, here(p)).replace(/\\/g, "/")) : [];
 	const isRecord = (rel) => {
 		if (rel === `${mdir}/approvals.lock.json` || rel === `${mdir}/confirmed.lock.json`) return true;
 		const name = rel.startsWith(`${mdir}/changes/`) ? rel.slice(mdir.length + 9) : "";
@@ -27239,7 +27315,11 @@ function bashGate(root, command, cwd = root) {
 	if (writes && system && /\bgate["']?\s*[:=]\s*["']?off\b/.test(command) && gateOn(root)) ask("This command sets \"gate: off\": the planning gate goes off for everyone who works in this repo.");
 	let held = null;
 	const own = () => held ??= readOwnership(root);
-	const gone = shellRemovals(command, cwd);
+	const removed = shellRemovals(command, cwd);
+	const gone = {
+		deleted: removed.deleted.map(here),
+		moved: removed.moved.map(here)
+	};
 	for (const [paths, doing] of [[gone.deleted, "This command deletes"], [gone.moved, "This command moves"]]) {
 		const verdict = paths.length ? removalGate(root, paths, doing, own) : null;
 		if (verdict?.decision === "deny") return verdict;
@@ -27247,7 +27327,7 @@ function bashGate(root, command, cwd = root) {
 	}
 	const modelFile = new RegExp(`(?:^|[\\s'"/])${mdir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/(?:nodes/[^\\s'"]+|system|tech|shapes/[^\\s'"]+|flows/[^\\s'"]+)\\.ya?ml`);
 	if (/\b(?:git\s+)?rm\b/.test(command) && modelFile.test(command)) ask(`This command deletes part of the architecture model under ${mdir}/, with the boundaries, auth and requirements it carries.`);
-	for (const target of shellTargets(command, cwd)) {
+	for (const target of shellTargets(command, cwd).map(here)) {
 		const rel = path.relative(root, target).replace(/\\/g, "/");
 		if (rel.startsWith(`${mdir}/`) && GUARD_FILE.test(rel.slice(mdir.length + 1)) || SETTINGS_FILE.test(rel)) return {
 			decision: "deny",
@@ -43893,7 +43973,7 @@ async function runMcp(rootFlag) {
 	server.registerTool("islands", {
 		description: "Dead code: code files that no entry point (package script, container command, route, test, Temporal workflowsPath) reaches, by node. Do not build on these files.",
 		inputSchema: { node: string().optional() }
-	}, async ({ node }) => run((root) => islands(compile(root), node))());
+	}, async ({ node }) => withIndex((root) => islands(compile(root), node))());
 	server.registerTool("tech", {
 		description: "Technologies the system is made of (frameworks, databases, runtimes, AI SDKs, tools) from armature/tech.yaml, or one technology with the nodes that use it.",
 		inputSchema: { id: string().optional() }
@@ -44331,6 +44411,7 @@ async function main() {
 			})));
 			return;
 		case "islands":
+			await buildCodeIndex(root);
 			console.log(islands(compile$1(root), args[0]));
 			return;
 		case "tech":
