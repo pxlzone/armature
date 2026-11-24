@@ -218,9 +218,9 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
         if (mode === 'plan') {
           if (once(root, 'plan-sessions', sid)) out.push(planModeNote(MODEL_DIR, newPlanPath(docsDir(root), MODEL_DIR)));
           else if (was !== 'plan') out.push(planReminder(MODEL_DIR));
-        } else if (PLANNING_WORDS.test(prompt)) {
-          if (once(root, 'planning-sessions', sid)) out.push(planningNote(MODEL_DIR, newPlanPath(docsDir(root), MODEL_DIR)));
-          else out.push(planReminder(MODEL_DIR));
+        } else if (PLANNING_WORDS.test(prompt) && once(root, 'planning-sessions', sid)) {
+          // Once per session: the word match is loose, and a reminder on every message that says "plan" is noise. The plan gate still holds.
+          out.push(planningNote(MODEL_DIR, newPlanPath(docsDir(root), MODEL_DIR)));
         }
       }
       if (out.length) process.stdout.write(`${out.join('\n\n')}\n`);
@@ -236,7 +236,15 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
       if (!verdict) return;
       if (verdict.approves) {
         // The person sees what the change does to security before saying yes, and is not asked while it has security errors.
-        const sec = changeSecurity(compile(root), verdict.approves);
+        // Approval stays the person's even when the model cannot compile: ask, and say security could not be read.
+        let sec: ReturnType<typeof changeSecurity>;
+        try {
+          sec = changeSecurity(compile(root), verdict.approves);
+        } catch (e: any) {
+          notePendingApproval(root, verdict.approves, callKey(input.tool_input));
+          decide('ask', `${verdict.reason}\nSecurity: not checked, the model does not compile (${String(e?.message ?? e)}). Run "armature check" before you say yes.`);
+          return;
+        }
         if (sec.errors.length) {
           decide('deny', `Change "${verdict.approves}" cannot be put up for approval while it has security errors. Fix them in the model first:\n${sec.errors.map((e) => `- ${e.code}: ${e.message}`).join('\n')}`);
           return;

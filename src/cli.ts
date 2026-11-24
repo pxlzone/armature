@@ -1,4 +1,4 @@
-import { surfaceText } from './security.js';
+import { changeSecurity, surfaceText } from './security.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -164,10 +164,13 @@ async function main(): Promise<void> {
     case 'orient':
       console.log(orient(compile(root)));
       return;
-    case 'show':
+    case 'show': {
       if (!args[0]) return fail('Usage: armature show <ref>');
-      console.log(show(compile(root), args[0], Number(flags.depth) || 1));
+      const text = show(compile(root), args[0], Number(flags.depth) || 1);
+      if (text.startsWith('Nothing named')) return refuse(text);
+      console.log(text);
       return;
+    }
     case 'where': {
       if (!args[0]) return fail('Usage: armature where <file>');
       // An absolute path, or one relative to where you stand inside the repo; otherwise relative to the repo root.
@@ -203,13 +206,21 @@ async function main(): Promise<void> {
       if (typeof d === 'string') process.exit(2);
       return;
     }
-    case 'approve':
+    case 'approve': {
       if (!args[0]) return fail('Usage: armature approve <change> [--by name]');
-      console.log(approveChange(root, args[0], typeof flags.by === 'string' ? flags.by : undefined));
+      // Same refusal as the viewer: a change with security errors is not approved.
+      const sec = changeSecurity(compile(root), args[0]);
+      if (sec.errors.length) return refuse(`Change "${args[0]}" cannot be approved while it has security errors:\n${sec.errors.map((e) => `- ${e.code}: ${e.message}`).join('\n')}`);
+      const msg = approveChange(root, args[0], typeof flags.by === 'string' ? flags.by : undefined);
+      if (!msg.startsWith('Approved change')) return refuse(msg);
+      console.log(msg);
       return;
+    }
     case 'rename': {
       if (!args[1]) return fail('Usage: armature rename <ref> <new name>');
-      console.log(rename(root, args[0], args[1]));
+      const msg = rename(root, args[0], args[1]);
+      if (!msg.startsWith('Renamed ')) return refuse(msg);
+      console.log(msg);
       // Rule files are named after node ids and quote the model: bring them along when the repo has them.
       if (fs.existsSync(path.join(root, '.claude', 'rules'))) {
         const r = syncRules(root);
@@ -472,6 +483,12 @@ async function main(): Promise<void> {
     default:
       fail(`Unknown command "${cmd}".\n\n${HELP}`);
   }
+}
+
+/** The command ran and said no: exit 1, so scripts and CI do not read a refusal as success. */
+function refuse(msg: string): void {
+  console.error(msg);
+  process.exitCode = 1;
 }
 
 function fail(msg: string): void {

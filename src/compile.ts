@@ -520,7 +520,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
         id: a.id, ref, node: n.id, holds: false, via: a.via, route: a.route, queue: a.queue,
         takes: shapeList(a.takes, ref, n.source), gives: shapeList(a.gives, ref, n.source),
         dlq: a.dlq, note: a.note, change: a.change, modify: a.modify, retire: a.retire, status: 'built', evidence: 'unchecked',
-        ...(a.auth !== undefined ? { auth: String(a.auth) } : {}), ...onlyOf(a.only, ref),
+        ...(a.auth !== undefined ? { auth: /^none$/i.test(String(a.auth).trim()) ? 'none' : String(a.auth) } : {}), ...onlyOf(a.only, ref),
       });
     }
     for (const h of toArr<any>(d.holds)) {
@@ -960,8 +960,17 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
   // A failure is remembered. With a report to read, the memory is brought up to date; with none,
   // what failed last time still fails, so removing the report does not turn it into "nothing to check".
   const failedFile = path.join(archAbs, '.cache', FAILED_FILE);
-  if (cases.length > 0) rememberFailures(failedFile, [...reqs.values()].filter((q) => q.state === 'failing').map((q) => q.ref));
-  else {
+  if (cases.length > 0) {
+    // A partial run says nothing about requirements it did not test, so their failures stand.
+    for (const ref of readFailures(failedFile)) {
+      const q = reqs.get(ref);
+      // With no tests named any more, no run could clear it, so the memory goes.
+      if (!q || proof.has(q.ref) || (!q.tests.length && !q.match.length)) continue;
+      q.state = 'failing';
+      q.evidence.push('failed: in an earlier test run, and the latest report has none of its tests. Run them again.');
+    }
+    rememberFailures(failedFile, [...reqs.values()].filter((q) => q.state === 'failing').map((q) => q.ref));
+  } else {
     for (const ref of readFailures(failedFile)) {
       const q = reqs.get(ref);
       if (!q) continue;
@@ -1324,13 +1333,17 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     const kids = n.children.map((c) => nodes.get(c)!);
     const has = (s: Status): boolean => kids.some((k) => k.status === s);
     const all = (s: Status): boolean => kids.every((k) => k.status === s);
-    const own = n.code.length > 0 ? n.status : null;
+    // A parent's own requirements and tests count too, with or without code of its own.
+    const ownActive = n.requirements.filter((q) => !open(q.change));
+    const ownFailing = n.requirements.some((q) => q.state === 'failing') || (n.testSummary?.failed ?? 0) > 0;
+    const own = n.code.length > 0 ? n.status : ownFailing ? 'failing' : null;
+    const ownVerified = n.code.length > 0 ? own === 'verified' || (own === 'built' && ownActive.length === 0) : ownActive.every((q) => q.state === 'verified');
     if (n.retire) [n.status, n.statusWhy] = ['retiring', `Marked for retirement by change "${n.retire}".`];
-    else if (has('failing') || own === 'failing') [n.status, n.statusWhy] = ['failing', 'A node inside is failing.'];
+    else if (has('failing') || own === 'failing') [n.status, n.statusWhy] = ['failing', has('failing') ? 'A node inside is failing.' : 'Its own requirement or linked test is failing.'];
     else if (has('stale') || own === 'stale') [n.status, n.statusWhy] = ['stale', 'A node inside is stale.'];
     else if (all('planned') && (own === null || own === 'planned')) [n.status, n.statusWhy] = ['planned', 'Everything inside is planned.'];
     else if (has('planned') || has('building') || own === 'building') [n.status, n.statusWhy] = ['building', 'Some nodes inside are planned or being built.'];
-    else if (all('verified')) [n.status, n.statusWhy] = ['verified', 'Everything inside is verified.'];
+    else if (all('verified') && ownVerified) [n.status, n.statusWhy] = ['verified', 'Everything inside is verified.'];
     else [n.status, n.statusWhy] = ['built', 'Everything inside is built.'];
     let found = 0;
     let hit = 0;
@@ -1644,7 +1657,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
   const securityView: SecurityView = { nodes: [...nodes.values()], edges, shapes: [...shapes.values()], changes: [...changes.values()], system: { data: dataPolicy } };
   for (const f of securityFindings(securityView)) {
     if (f.level === 'error') err(f.code, f.message, f.ref, f.file);
-    else warn(f.code, f.message, f.ref, f.file);
+    else warn(f.code, f.message, f.ref, f.file, f.items);
   }
 
   // ---- accepted warnings: looked at by the team and kept, each with a reason ------------

@@ -264,7 +264,10 @@ export function readDoc(root: string, file: string): string | null {
   const abs = path.resolve(root, file);
   if (!abs.startsWith(path.resolve(root) + path.sep)) return null;
   try {
-    return fs.readFileSync(abs, 'utf8');
+    // A symlinked .md could point anywhere, and export would copy that file into a page people share.
+    const real = fs.realpathSync(abs);
+    if (!real.startsWith(fs.realpathSync(root) + path.sep)) return null;
+    return fs.readFileSync(real, 'utf8');
   } catch {
     return null;
   }

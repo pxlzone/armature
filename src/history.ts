@@ -30,7 +30,7 @@ export const MAX_FILES_PER_COMMIT = 30;
 
 function git(root: string, args: string[]): string | null {
   try {
-    return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 });
+    return execFileSync('git', ['-c', 'core.quotePath=false', ...args], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 });
   } catch {
     return null;
   }

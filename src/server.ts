@@ -107,6 +107,12 @@ export function serve(root: string, port: number, github: boolean): Promise<stri
   const clients = new Set<http.ServerResponse>();
   const token = randomBytes(24).toString('hex');
   const server = http.createServer((req, res) => {
+    // A page on another site can rebind its name to 127.0.0.1, so every route checks the Host, not only /approve.
+    if (!/^(?:localhost|127\.0\.0\.1|\[::1\]):\d+$/.test(req.headers.host ?? '')) {
+      res.writeHead(403);
+      res.end();
+      return;
+    }
     const url = (req.url ?? '/').split('?')[0];
     if (url === '/graph.json') {
       try {
