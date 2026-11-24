@@ -956,7 +956,8 @@ export async function buildCodeIndex(root: string): Promise<IndexResult> {
       mtime: st.mtimeMs,
       size: st.size,
       test: TEST_FILE.test(f),
-      imports: entry.imports.flatMap((i) => {
+      // A reused entry still holds the submodule imports added last time (names: []); they are added again below.
+      imports: entry.imports.filter((i) => !(lang === 'python' && i.names.length === 0)).flatMap((i) => {
         const own = { ...i, ...resolve(f, i.spec, lang === 'sql' ? 'typescript' : lang) };
         if (lang !== 'python') return [own];
         // "from pkg import mod" loads pkg/mod.py as well as pkg/__init__.py, or mod.py would look like dead code.

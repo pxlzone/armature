@@ -20984,7 +20984,7 @@ async function buildCodeIndex(root) {
 			mtime: st.mtimeMs,
 			size: st.size,
 			test: TEST_FILE.test(f),
-			imports: entry.imports.flatMap((i) => {
+			imports: entry.imports.filter((i) => !(lang === "python" && i.names.length === 0)).flatMap((i) => {
 				const own = {
 					...i,
 					...resolve(f, i.spec, lang === "sql" ? "typescript" : lang)
@@ -26793,15 +26793,16 @@ function isTestPath(root, rel) {
 function writeGate(root, input) {
 	const target = targetOf(input);
 	if (!target) return null;
+	const abs = inRepo(root, path.resolve(root, target));
+	const written = root;
 	root = onDisk(root);
-	const abs = onDisk(path.resolve(root, target));
 	const rel = path.relative(root, abs).replace(/\\/g, "/");
 	if (!rel || rel.startsWith("..")) return null;
 	const mdir = MODEL_DIR;
 	const before = fs.existsSync(abs) && fs.statSync(abs).isFile() ? fs.readFileSync(abs, "utf8") : "";
 	const after = resultOf(root, before, input);
 	const blind = after === null && !writtenText(input).trim();
-	const from = typeof input.source === "string" ? path.relative(root, onDisk(path.resolve(root, input.source))).replace(/\\/g, "/") : "";
+	const from = typeof input.source === "string" ? path.relative(root, inRepo(written, path.resolve(written, input.source))).replace(/\\/g, "/") : "";
 	if (from === `${mdir}/approvals.lock.json`) return {
 		decision: "ask",
 		reason: `This moves ${from}, the record of what a person approved. Allow it only to remove that record.`
@@ -27131,9 +27132,42 @@ function shellWords(text) {
 var unquote = (w) => w.replace(/^(['"])(.*)\1$/, "$2");
 /** A path as the shell reads it from `dir`: "~" is the home folder, not a folder here. Null for another user's home. */
 function shellPath(dir, w) {
-	if (w === "~" || w.startsWith("~/")) return onDisk(path.join(os.homedir(), w.slice(1)));
+	if (w === "~" || w.startsWith("~/")) return path.join(os.homedir(), w.slice(1));
 	if (w.startsWith("~")) return null;
-	return onDisk(path.resolve(dir, w));
+	return path.resolve(dir, w);
+}
+/**
+* Where a path lands in the repo, as an absolute path under the repo's real root. The real file
+* counts when it is inside, so a symlink or other letter case cannot hide a model file. Otherwise the
+* path as written counts, so a model file that links outside the repo is still gated.
+*/
+function inRepo(root, p) {
+	const realRoot = onDisk(root);
+	const real = onDisk(p);
+	if (real.startsWith(realRoot + path.sep)) return real;
+	for (const base of [path.resolve(root), realRoot]) {
+		const rel = path.relative(base, path.resolve(p));
+		if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) return path.join(realRoot, trueCase(realRoot, rel));
+	}
+	return real;
+}
+/** `rel` with each part that exists spelled as the disk has it, without following symlinks. */
+function trueCase(base, rel) {
+	const parts = rel.split(path.sep);
+	let dir = base;
+	for (let i = 0; i < parts.length; i++) {
+		let names;
+		try {
+			names = fs.readdirSync(dir);
+		} catch {
+			break;
+		}
+		const hit = names.includes(parts[i]) ? parts[i] : names.find((n) => n.toLowerCase() === parts[i].toLowerCase());
+		if (!hit) break;
+		parts[i] = hit;
+		dir = path.join(dir, hit);
+	}
+	return parts.join(path.sep);
 }
 /**
 * A path as the disk knows it: symlinks resolved and, on a disk that ignores case, the real case of
@@ -27254,8 +27288,9 @@ function shellRemovals(command, cwd) {
 */
 function bashGate(root, command, cwd = root) {
 	if (!command || !command.trim()) return null;
+	const written = root;
+	const here = (p) => inRepo(written, p);
 	root = onDisk(root);
-	cwd = onDisk(cwd);
 	const mdir = MODEL_DIR;
 	let question = null;
 	const ask = (reason) => {
@@ -27268,7 +27303,7 @@ function bashGate(root, command, cwd = root) {
 	if (/(?:\barmature(?:\.mjs)?|\b(?:dist|src)\/cli\.(?:mjs|js|ts))["']?\s+(?:--root\s+\S+\s+)?confirm\b[^|;&\n]*\s["']?[\w.-]+:[\w-]+/.test(command)) ask("This runs \"armature confirm\" on a requirement: it records that you read the code and found the requirement true, with no test. Allow it only if you did.");
 	if (/(?:\blocalhost|\b127\.0\.0\.1|\[::1\]|\b0\.0\.0\.0)(?::\d+)?\/approve\b|x-armature-token|__ARMATURE_APPROVE__/i.test(command)) ask("This calls the viewer to approve a change. Allow it only if you reviewed the plan and want it built.");
 	const writes = /(?:^|[^<>|\d-])>{1,2}(?!&)|\b(?:sed|perl)\b[^|;&\n]*\s(?:-[A-Za-z]*i|--in-place)|\btee\b|\b(?:mv|cp|rm|ln|truncate|dd|install|sponge)\b|\byq\b[^|;&\n]*\s(?:-i|--inplace)|\bawk\b[^|;&\n]*\s-i\s*inplace|\b(?:python3?|node|ruby|deno|bun|tsx)\b/.test(command);
-	const named = writes ? shellPaths(command, cwd).map((p) => path.relative(root, p).replace(/\\/g, "/")) : [];
+	const named = writes ? shellPaths(command, cwd).map((p) => path.relative(root, here(p)).replace(/\\/g, "/")) : [];
 	const isRecord = (rel) => {
 		if (rel === `${mdir}/approvals.lock.json` || rel === `${mdir}/confirmed.lock.json`) return true;
 		const name = rel.startsWith(`${mdir}/changes/`) ? rel.slice(mdir.length + 9) : "";
@@ -27280,7 +27315,11 @@ function bashGate(root, command, cwd = root) {
 	if (writes && system && /\bgate["']?\s*[:=]\s*["']?off\b/.test(command) && gateOn(root)) ask("This command sets \"gate: off\": the planning gate goes off for everyone who works in this repo.");
 	let held = null;
 	const own = () => held ??= readOwnership(root);
-	const gone = shellRemovals(command, cwd);
+	const removed = shellRemovals(command, cwd);
+	const gone = {
+		deleted: removed.deleted.map(here),
+		moved: removed.moved.map(here)
+	};
 	for (const [paths, doing] of [[gone.deleted, "This command deletes"], [gone.moved, "This command moves"]]) {
 		const verdict = paths.length ? removalGate(root, paths, doing, own) : null;
 		if (verdict?.decision === "deny") return verdict;
@@ -27288,7 +27327,7 @@ function bashGate(root, command, cwd = root) {
 	}
 	const modelFile = new RegExp(`(?:^|[\\s'"/])${mdir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/(?:nodes/[^\\s'"]+|system|tech|shapes/[^\\s'"]+|flows/[^\\s'"]+)\\.ya?ml`);
 	if (/\b(?:git\s+)?rm\b/.test(command) && modelFile.test(command)) ask(`This command deletes part of the architecture model under ${mdir}/, with the boundaries, auth and requirements it carries.`);
-	for (const target of shellTargets(command, cwd)) {
+	for (const target of shellTargets(command, cwd).map(here)) {
 		const rel = path.relative(root, target).replace(/\\/g, "/");
 		if (rel.startsWith(`${mdir}/`) && GUARD_FILE.test(rel.slice(mdir.length + 1)) || SETTINGS_FILE.test(rel)) return {
 			decision: "deny",

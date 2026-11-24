@@ -178,6 +178,24 @@ describe('the gate reads the file a path names, however it is spelled', () => {
     expect(writeGate(root, { file_path: 'm/changes/mail.yaml', ...approve })).toMatchObject({ decision: 'ask' });
   });
 
+  it('still gates a model or protected file that links outside the repo', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'armature-out-'));
+    fs.renameSync(path.join(root, 'armature/changes/mail.yaml'), path.join(outside, 'mail.yaml'));
+    fs.symlinkSync(path.join(outside, 'mail.yaml'), path.join(root, 'armature/changes/mail.yaml'));
+    fs.renameSync(path.join(root, 'src/api/server.ts'), path.join(outside, 'server.ts'));
+    fs.symlinkSync(path.join(outside, 'server.ts'), path.join(root, 'src/api/server.ts'));
+    expect(writeGate(root, { file_path: 'armature/changes/mail.yaml', ...approve })).toMatchObject({ decision: 'ask' });
+    expect(writeGate(root, { file_path: 'src/api/server.ts', content: 'x' })).toMatchObject({ decision: 'deny' });
+    expect(bashGate(root, 'echo y >> src/api/server.ts')).toMatchObject({ decision: 'deny' });
+  });
+
+  it('still gates the model when its whole folder links outside the repo', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'armature-out-'));
+    fs.renameSync(path.join(root, 'armature'), path.join(outside, 'armature'));
+    fs.symlinkSync(path.join(outside, 'armature'), path.join(root, 'armature'));
+    expect(writeGate(root, { file_path: 'armature/changes/mail.yaml', ...approve })).toMatchObject({ decision: 'ask' });
+  });
+
   it('reads ln -sf, &> and >| as writes', () => {
     expect(bashGate(root, 'ln -sf /tmp/x.yaml armature/changes/mail.yaml')).toMatchObject({ decision: 'ask' });
     expect(bashGate(root, 'echo y &> src/api/server.ts')).toMatchObject({ decision: 'deny' });
@@ -234,6 +252,10 @@ describe('imports the dead-code check follows', () => {
     write('app/main.py', 'from . import helpers\nfrom app.utils import fmt\n');
     await buildCodeIndex(root);
     expect(importsOf('app/main.py')).toEqual(expect.arrayContaining(['app/helpers.py', 'app/utils/fmt.py']));
+    const count = importsOf('app/main.py').length;
+    await buildCodeIndex(root);
+    await buildCodeIndex(root);
+    expect(importsOf('app/main.py')).toHaveLength(count);
   });
 
   it('follows jsconfig aliases, baseUrl paths and folder imports with a trailing slash', async () => {

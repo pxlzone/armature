@@ -249,8 +249,9 @@ function isTestPath(root: string, rel: string): boolean {
 export function writeGate(root: string, input: WriteInput): GateDecision | null {
   const target = targetOf(input);
   if (!target) return null;
+  const abs = inRepo(root, path.resolve(root, target));
+  const written = root;
   root = onDisk(root);
-  const abs = onDisk(path.resolve(root, target));
   const rel = path.relative(root, abs).replace(/\\/g, '/');
   if (!rel || rel.startsWith('..')) return null;
 
@@ -261,7 +262,7 @@ export function writeGate(root: string, input: WriteInput): GateDecision | null 
   const blind = after === null && !writtenText(input).trim();
 
   // Moving the approval record away removes it as surely as editing it.
-  const from = typeof input.source === 'string' ? path.relative(root, onDisk(path.resolve(root, input.source))).replace(/\\/g, '/') : '';
+  const from = typeof input.source === 'string' ? path.relative(root, inRepo(written, path.resolve(written, input.source))).replace(/\\/g, '/') : '';
   if (from === `${mdir}/${APPROVALS_FILE}`) {
     return { decision: 'ask', reason: `This moves ${from}, the record of what a person approved. Allow it only to remove that record.` };
   }
@@ -636,9 +637,44 @@ const unquote = (w: string): string => w.replace(/^(['"])(.*)\1$/, '$2');
 
 /** A path as the shell reads it from `dir`: "~" is the home folder, not a folder here. Null for another user's home. */
 function shellPath(dir: string, w: string): string | null {
-  if (w === '~' || w.startsWith('~/')) return onDisk(path.join(os.homedir(), w.slice(1)));
+  if (w === '~' || w.startsWith('~/')) return path.join(os.homedir(), w.slice(1));
   if (w.startsWith('~')) return null;
-  return onDisk(path.resolve(dir, w));
+  return path.resolve(dir, w);
+}
+
+/**
+ * Where a path lands in the repo, as an absolute path under the repo's real root. The real file
+ * counts when it is inside, so a symlink or other letter case cannot hide a model file. Otherwise the
+ * path as written counts, so a model file that links outside the repo is still gated.
+ */
+export function inRepo(root: string, p: string): string {
+  const realRoot = onDisk(root);
+  const real = onDisk(p);
+  if (real.startsWith(realRoot + path.sep)) return real;
+  for (const base of [path.resolve(root), realRoot]) {
+    const rel = path.relative(base, path.resolve(p));
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return path.join(realRoot, trueCase(realRoot, rel));
+  }
+  return real;
+}
+
+/** `rel` with each part that exists spelled as the disk has it, without following symlinks. */
+function trueCase(base: string, rel: string): string {
+  const parts = rel.split(path.sep);
+  let dir = base;
+  for (let i = 0; i < parts.length; i++) {
+    let names: string[];
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      break;
+    }
+    const hit = names.includes(parts[i]) ? parts[i] : names.find((n) => n.toLowerCase() === parts[i].toLowerCase());
+    if (!hit) break;
+    parts[i] = hit;
+    dir = path.join(dir, hit);
+  }
+  return parts.join(path.sep);
 }
 
 /**
@@ -771,8 +807,9 @@ export function shellRemovals(command: string, cwd: string): { deleted: string[]
  */
 export function bashGate(root: string, command: string, cwd: string = root): GateDecision | null {
   if (!command || !command.trim()) return null;
+  const written = root;
+  const here = (p: string): string => inRepo(written, p);
   root = onDisk(root);
-  cwd = onDisk(cwd);
   const mdir = MODEL_DIR;
   // A question for the person is kept until the whole command is read: something it does further on
   // may be refused outright, and an answer to the question must not carry that through.
@@ -795,7 +832,7 @@ export function bashGate(root: string, command: string, cwd: string = root): Gat
   const writes =
     /(?:^|[^<>|\d-])>{1,2}(?!&)|\b(?:sed|perl)\b[^|;&\n]*\s(?:-[A-Za-z]*i|--in-place)|\btee\b|\b(?:mv|cp|rm|ln|truncate|dd|install|sponge)\b|\byq\b[^|;&\n]*\s(?:-i|--inplace)|\bawk\b[^|;&\n]*\s-i\s*inplace|\b(?:python3?|node|ruby|deno|bun|tsx)\b/.test(command);
   // The files the command names, wherever it stands: "changes/mail.yaml" from inside the model folder is the same file.
-  const named = writes ? shellPaths(command, cwd).map((p) => path.relative(root, p).replace(/\\/g, '/')) : [];
+  const named = writes ? shellPaths(command, cwd).map((p) => path.relative(root, here(p)).replace(/\\/g, '/')) : [];
   const isRecord = (rel: string): boolean => {
     if (rel === `${mdir}/${APPROVALS_FILE}` || rel === `${mdir}/${CONFIRMED_FILE}`) return true;
     const name = rel.startsWith(`${mdir}/changes/`) ? rel.slice(mdir.length + 9) : '';
@@ -814,7 +851,8 @@ export function bashGate(root: string, command: string, cwd: string = root): Gat
   let held: Ownership | null = null;
   const own = (): Ownership => (held ??= readOwnership(root));
   // What the command takes away: part of the model, the settings that switch the hooks on, files of a protected node.
-  const gone = shellRemovals(command, cwd);
+  const removed = shellRemovals(command, cwd);
+  const gone = { deleted: removed.deleted.map(here), moved: removed.moved.map(here) };
   for (const [paths, doing] of [[gone.deleted, 'This command deletes'], [gone.moved, 'This command moves']] as const) {
     const verdict = paths.length ? removalGate(root, paths, doing, own) : null;
     if (verdict?.decision === 'deny') return verdict;
@@ -825,7 +863,7 @@ export function bashGate(root: string, command: string, cwd: string = root): Gat
   if (/\b(?:git\s+)?rm\b/.test(command) && modelFile.test(command)) {
     ask(`This command deletes part of the architecture model under ${mdir}/, with the boundaries, auth and requirements it carries.`);
   }
-  for (const target of shellTargets(command, cwd)) {
+  for (const target of shellTargets(command, cwd).map(here)) {
     const rel = path.relative(root, target).replace(/\\/g, '/');
     // Files that carry guards are written with the file tools, new or not: a write from the shell hides
     // what it adds and what it takes away, and a new settings file can switch the hooks off.
