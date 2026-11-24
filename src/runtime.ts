@@ -21,15 +21,18 @@ function pathEndsWith(full: string, tail: string): boolean {
   const a = segs(full);
   const b = segs(tail);
   if (b.length === 0 || b.length > a.length) return false;
-  // A tail of parameters alone ("/:id" on a mounted router) would match every route, so it needs a fixed segment.
-  if (b.length < a.length && b.every((s) => s === ':')) return false;
   const off = a.length - b.length;
-  return b.every((s, i) => s === a[off + i]);
+  // A declared parameter or wildcard matches anything. A parameter in the code matches only a declared
+  // one: letting it match a fixed segment made a router's "/:id" count as every declared route.
+  return b.every((s, i) => a[off + i] === ':' || s === a[off + i]);
 }
 
 /** True when a route registered in code (`op` and `path`) is the route an interface declares. */
 function sameRoute(declared: string, op: string | undefined, path: string): boolean {
-  return pathEndsWith(routePath(declared), path) && (!/^[A-Z]+\s/.test(declared) || !op || declared.toUpperCase().startsWith(`${op} `));
+  // "/api/sellers/*" covers every route under it, and a router's routes are written relative to a mount the index cannot see.
+  // A route at the router's own root ("/") is the mount point itself, which only the declaration names.
+  const covers = routePath(declared).endsWith('/*') || segs(path).length === 0 || pathEndsWith(routePath(declared), path);
+  return covers && (!/^[A-Z]+\s/.test(declared) || !op || declared.toUpperCase().startsWith(`${op} `));
 }
 
 export interface RuntimeResult {

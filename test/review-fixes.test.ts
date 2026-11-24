@@ -69,6 +69,40 @@ describe('failures across test runs', () => {
     report(pass('tests/core.test.ts', 'works'));
     expect(statusOf('core')).toBe('verified');
   });
+
+  it('forgets a failure once the requirement names no test', () => {
+    write('armature/nodes/core.yaml', lines('kind: service', 'role: core', 'code: [src/core/**]', 'requirements:', '  - id: works', '    text: works', '    tests: tests/core.test.ts'));
+    write('src/core/a.ts', 'export const a = 1;\n');
+    write('tests/core.test.ts', '');
+    write('tests/other.test.ts', '');
+    report(failing('tests/core.test.ts', 'works'));
+    expect(statusOf('core')).toBe('failing');
+    write('armature/nodes/core.yaml', lines('kind: service', 'role: core', 'code: [src/core/**]', 'requirements:', '  - id: works', '    text: works'));
+    report(pass('tests/other.test.ts', 'other'));
+    expect(statusOf('core')).not.toBe('failing');
+  });
+});
+
+describe('routes', () => {
+  const served = async (declared: string, code: string): Promise<boolean> => {
+    write('armature/system.yaml', lines('name: T', 'headline: t', 'entry: [src/api/**]'));
+    write('armature/nodes/api.yaml', lines('kind: service', 'role: api', 'code: [src/api/**]', 'accepts:', '  - id: one', '    via: http', `    route: ${declared}`));
+    write('src/api/server.ts', `export const app = { get: (..._a: unknown[]) => undefined };\napp.get('${code}', () => undefined);\n`);
+    await buildCodeIndex(root);
+    return !compile(root).problems.some((p) => p.code === 'not-in-code' || p.code === 'runtime-drift');
+  };
+
+  it('lets a declared wildcard cover the routes under it', async () => {
+    expect(await served('GET /api/admin/*', '/users/:id/roles')).toBe(true);
+  });
+
+  it('matches parameters a prefixed router declares', async () => {
+    expect(await served('GET /api/control-log/:subjectType/:subjectId', '/:subjectType/:subjectId')).toBe(true);
+  });
+
+  it('matches a router root route to the declared route of its node', async () => {
+    expect(await served('GET /api/approvals', '/')).toBe(true);
+  });
 });
 
 describe('security and drift', () => {

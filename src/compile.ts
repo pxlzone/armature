@@ -964,7 +964,8 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     // A partial run says nothing about requirements it did not test, so their failures stand.
     for (const ref of readFailures(failedFile)) {
       const q = reqs.get(ref);
-      if (!q || proof.has(q.ref)) continue;
+      // With no tests named any more, no run could clear it, so the memory goes.
+      if (!q || proof.has(q.ref) || (!q.tests.length && !q.match.length)) continue;
       q.state = 'failing';
       q.evidence.push('failed: in an earlier test run, and the latest report has none of its tests. Run them again.');
     }

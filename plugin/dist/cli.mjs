@@ -21047,13 +21047,12 @@ function pathEndsWith(full, tail) {
 	const a = segs(full);
 	const b = segs(tail);
 	if (b.length === 0 || b.length > a.length) return false;
-	if (b.length < a.length && b.every((s) => s === ":")) return false;
 	const off = a.length - b.length;
-	return b.every((s, i) => s === a[off + i]);
+	return b.every((s, i) => a[off + i] === ":" || s === a[off + i]);
 }
 /** True when a route registered in code (`op` and `path`) is the route an interface declares. */
 function sameRoute(declared, op, path) {
-	return pathEndsWith(routePath(declared), path) && (!/^[A-Z]+\s/.test(declared) || !op || declared.toUpperCase().startsWith(`${op} `));
+	return (routePath(declared).endsWith("/*") || segs(path).length === 0 || pathEndsWith(routePath(declared), path)) && (!/^[A-Z]+\s/.test(declared) || !op || declared.toUpperCase().startsWith(`${op} `));
 }
 function analyzeRuntime(idx, nodes, edges, ifaces, owner, ancestors, planned = () => false) {
 	const tables = /* @__PURE__ */ new Set();
@@ -23214,7 +23213,7 @@ function compile$1(root, opts = {}) {
 	if (cases.length > 0) {
 		for (const ref of readFailures(failedFile)) {
 			const q = reqs.get(ref);
-			if (!q || proof.has(q.ref)) continue;
+			if (!q || proof.has(q.ref) || !q.tests.length && !q.match.length) continue;
 			q.state = "failing";
 			q.evidence.push("failed: in an earlier test run, and the latest report has none of its tests. Run them again.");
 		}
