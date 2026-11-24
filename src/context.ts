@@ -465,7 +465,12 @@ export function contextPack(g: Graph, idx: CodeIndex, root: string, task: string
     const hold = mustHold(g, shown.map((n) => n.id));
     if (hold.length) {
       const head = ['', '## Must hold', 'Boundaries, who may call, where data may go, secrets and rules for these nodes. Check, approval and the gate refuse work that breaks the first four.'];
-      if (!push(...head, ...hold.slice(0, 40))) push(...head, ...hold.slice(0, 12), '  … "armature impact <node>" lists the rest.');
+      // When they do not all fit, the ones that share words with the task go first, so a cut keeps the relevant rules.
+      const qw = new Set(q);
+      const score = (l: string): number => words(l).filter((w) => qw.has(w)).length;
+      const ranked = hold.map((l, i) => ({ l, i, s: score(l) })).sort((a, b) => b.s - a.s || a.i - b.i).map((x) => x.l);
+      const pick = (n: number): string[] => (hold.length <= n ? hold : ranked.slice(0, n));
+      if (!push(...head, ...pick(40))) push(...head, ...pick(12), '  … "armature impact <node>" lists the rest.');
     }
   }
   const shapeIds = new Set<string>();
@@ -492,7 +497,7 @@ export function contextPack(g: Graph, idx: CodeIndex, root: string, task: string
     listed++;
     if (listed >= 25) break;
   }
-  limit = budget;
+  // The reserve stays in place for the sections before the tests, or they could use it up.
   const topFiles = files.filter((f) => !idx.files[f.path]?.test).slice(0, Math.max(3, listed)).map((f) => f.path);
   if (hist) {
     const partners = new Map<string, number>();
@@ -509,6 +514,7 @@ export function contextPack(g: Graph, idx: CodeIndex, root: string, task: string
   const byFile: string[] = [];
   for (const f of topFiles.slice(0, 8)) for (const t of testsForFiles(idx, [f])) if (!byFile.includes(t)) byFile.push(t);
   const tests = [...new Set([...named, ...byFile])].slice(0, 6);
+  limit = budget;
   if (tests.length) push('', '## Tests to run', ...tests.map((t) => `- ${t}`));
   const docs = new Set<string>();
   const replaced = new Set(g.docs.filter((d) => d.supersededBy).map((d) => d.path));

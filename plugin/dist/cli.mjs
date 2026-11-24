@@ -26638,7 +26638,15 @@ function contextPack(g, idx, root, task, opt = {}) {
 				"## Must hold",
 				"Boundaries, who may call, where data may go, secrets and rules for these nodes. Check, approval and the gate refuse work that breaks the first four."
 			];
-			if (!push(...head, ...hold.slice(0, 40))) push(...head, ...hold.slice(0, 12), "  … \"armature impact <node>\" lists the rest.");
+			const qw = new Set(q);
+			const score = (l) => words(l).filter((w) => qw.has(w)).length;
+			const ranked = hold.map((l, i) => ({
+				l,
+				i,
+				s: score(l)
+			})).sort((a, b) => b.s - a.s || a.i - b.i).map((x) => x.l);
+			const pick = (n) => hold.length <= n ? hold : ranked.slice(0, n);
+			if (!push(...head, ...pick(40))) push(...head, ...pick(12), "  … \"armature impact <node>\" lists the rest.");
 		}
 	}
 	const shapeIds = /* @__PURE__ */ new Set();
@@ -26663,7 +26671,6 @@ function contextPack(g, idx, root, task, opt = {}) {
 		listed++;
 		if (listed >= 25) break;
 	}
-	limit = budget;
 	const topFiles = files.filter((f) => !idx.files[f.path]?.test).slice(0, Math.max(3, listed)).map((f) => f.path);
 	if (hist) {
 		const partners = /* @__PURE__ */ new Map();
@@ -26678,6 +26685,7 @@ function contextPack(g, idx, root, task, opt = {}) {
 	const byFile = [];
 	for (const f of topFiles.slice(0, 8)) for (const t of testsForFiles(idx, [f])) if (!byFile.includes(t)) byFile.push(t);
 	const tests = [.../* @__PURE__ */ new Set([...named, ...byFile])].slice(0, 6);
+	limit = budget;
 	if (tests.length) push("", "## Tests to run", ...tests.map((t) => `- ${t}`));
 	const docs = /* @__PURE__ */ new Set();
 	const replaced = new Set(g.docs.filter((d) => d.supersededBy).map((d) => d.path));
@@ -27424,7 +27432,7 @@ function bashGate(root, command, cwd = root) {
 	if (/(?:\barmature(?:\.mjs)?|\b(?:dist|src)\/cli\.(?:mjs|js|ts))["']?\s+(?:--root\s+\S+\s+)?approve\b/.test(command)) ask("This runs \"armature approve\". Allow it only if you reviewed the plan and want it built.");
 	if (/(?:\barmature(?:\.mjs)?|\b(?:dist|src)\/cli\.(?:mjs|js|ts))["']?\s+(?:--root\s+\S+\s+)?confirm\b[^|;&\n]*\s["']?[\w.-]+:[\w-]+/.test(command)) ask("This runs \"armature confirm\" on a requirement: it records that you read the code and found the requirement true, with no test. Allow it only if you did.");
 	if (/(?:\blocalhost|\b127\.0\.0\.1|\[::1\]|\b0\.0\.0\.0)(?::\d+)?\/approve\b|x-armature-token|__ARMATURE_APPROVE__/i.test(command)) ask("This calls the viewer to approve a change. Allow it only if you reviewed the plan and want it built.");
-	const writes = /(?:^|[^<>|\d-])>{1,2}(?!&)|\b(?:sed|perl)\b[^|;&\n]*\s(?:-[A-Za-z]*i|--in-place)|\btee\b|\b(?:mv|cp|rm|ln|truncate|dd|install|sponge)\b|\byq\b[^|;&\n]*\s(?:-i|--inplace)|\bawk\b[^|;&\n]*\s-i\s*inplace|\b(?:python3?|node|ruby|deno|bun|tsx)\b/.test(command);
+	const writes = /(?:^|[^<>|\d-])>{1,2}(?!&)|\b(?:sed|perl)\b[^|;&\n]*\s(?:-[A-Za-z]*i|--in-place)|\btee\b|(?<![-\w])(?:mv|cp|rm|ln|truncate|dd|install|sponge)\b|\byq\b[^|;&\n]*\s(?:-i|--inplace)|\bawk\b[^|;&\n]*\s-i\s*inplace|\b(?:python3?|node|ruby|deno|bun|tsx)\b/.test(command);
 	const named = writes ? shellPaths(command, cwd).map((p) => path.relative(root, here(p)).replace(/\\/g, "/")) : [];
 	const isRecord = (rel) => {
 		if (rel === `${mdir}/approvals.lock.json` || rel === `${mdir}/confirmed.lock.json`) return true;
