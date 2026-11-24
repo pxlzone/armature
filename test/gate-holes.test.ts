@@ -319,3 +319,12 @@ describe('the hook itself', () => {
     expect(Date.now() - started).toBeLessThan(1400);
   });
 });
+
+describe('commands that only read', () => {
+  it('does not take "-ln" for the ln command', () => {
+    const root = repo();
+    expect(bashGate(root, `grep -ln proposed ${change}`)).toBeNull();
+    expect(bashGate(root, `ls -ln ${change}`)).toBeNull();
+    expect(bashGate(root, `ln -sf /tmp/x ${change}`)).not.toBeNull();
+  });
+});

@@ -170,6 +170,15 @@ describe('planning with the constraints in view', () => {
     expect(surfaceText(g, 'export')).toContain('Errors:');
   });
 
+  it('keeps the rules that match the task when "Must hold" is cut short', async () => {
+    const filler = Array.from({ length: 30 }, (_, i) => `  - Rule number ${i} about something unrelated entirely.`);
+    setApi((s) => `${s}rules:\n${filler.join('\n')}\n  - Refunds are idempotent by refund key.\n`);
+    await buildCodeIndex(root);
+    const pack = contextText(compile(root), readCodeIndex(root)!, root, 'make refunds idempotent in the order API', { budget: 1800 });
+    expect(pack).toContain('## Must hold');
+    expect(pack).toContain('Refunds are idempotent by refund key.');
+  });
+
   it('tells a planner to look at the security surface', () => {
     expect(planModeNote()).toContain('armature surface');
   });
