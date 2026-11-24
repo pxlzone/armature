@@ -462,8 +462,9 @@ function guardsOfFile(rel: string, text: string, up: Inherited = { protect: fals
   if (!data || typeof data !== 'object') return out;
   const ofNode = (id: string, d: any, around: Inherited): void => {
     if (!d || typeof d !== 'object') return;
-    if (d.protect === true) guards.add(`protect ${id}`);
-    if (d.client === true) guards.add(`client ${id}`);
+    // A node inside a protected or client node is one already, so its own line guards nothing more.
+    if (d.protect === true && !around.protect) guards.add(`protect ${id}`);
+    if (d.client === true && !around.client) guards.add(`client ${id}`);
     // Both pass to the nodes inside. One that says "false" steps out of what the node around it set.
     if (d.protect === false && around.protect) allowances.add(optOut('protect', id));
     if (d.client === false && around.client) allowances.add(optOut('client', id));
@@ -594,7 +595,14 @@ function removalGate(root: string, paths: string[], doing: string, own?: () => O
 /** How many lost guards a question lists: the permission prompt is a small window, and the rest is cut off. */
 const ASK_ITEMS = 5;
 
-function weakenAsk(rel: string, lost: string[], lead = `This edit to ${rel} weakens`): GateDecision | null {
+/**
+ * Losses that do not stop the session: a plain requirement taken out, or a warning accepted. Neither
+ * opens a way around the gate or the security checks, and "armature diff" lists both for the reviewer.
+ */
+const REVIEW_ONLY = /^(?:no longer: requirement (?!.*\(security\)$)|now allowed: accept )/;
+
+function weakenAsk(rel: string, all: string[], lead = `This edit to ${rel} weakens`): GateDecision | null {
+  const lost = all.filter((x) => !REVIEW_ONLY.test(x));
   if (!lost.length) return null;
   return {
     decision: 'ask',
