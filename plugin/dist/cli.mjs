@@ -24526,7 +24526,7 @@ function show(g, ref, depth = 1) {
 		return out.join("\n") + also;
 	}
 	if (r.type === "flow") return showFlow(g, ix.flows.get(r.id)) + also;
-	if (r.type === "change") return showChange(g, ix.changes.get(r.id)) + also;
+	if (r.type === "change") return showChange$1(g, ix.changes.get(r.id)) + also;
 	return nodeCard(g, ix.nodes.get(r.id), depth).join("\n") + also;
 }
 function showFlow(g, f) {
@@ -24546,7 +24546,7 @@ function showFlow(g, f) {
 	}
 	return out.join("\n");
 }
-function showChange(g, c) {
+function showChange$1(g, c) {
 	const ix = index(g);
 	const out = [`change ${changeLine(c)}`];
 	if (c.why) out.push(`  why: ${c.why}`);
@@ -25861,6 +25861,113 @@ function rename(root, from, to) {
 	out.push(errors ? `armature check now reports ${errors} error${errors === 1 ? "" : "s"}; run it.` : "armature check reports no errors.");
 	return out.join("\n");
 }
+// src/viewer-open.ts
+var RUNNING = "viewer.json";
+/** The same change is not opened again in a new tab within this time. */
+var REOPEN_AFTER = 6e5;
+var runningFile = (root) => path.join(root, MODEL_DIR, ".cache", RUNNING);
+/** Called by "armature view" once it listens, so a hook can find it. */
+function noteViewer(root, url) {
+	const file = runningFile(root);
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, JSON.stringify({
+		url,
+		pid: process.pid
+	}));
+	const forget = () => {
+		try {
+			if (JSON.parse(fs.readFileSync(file, "utf8")).pid === process.pid) fs.rmSync(file, { force: true });
+		} catch {}
+	};
+	process.once("exit", forget);
+	for (const sig of ["SIGINT", "SIGTERM"]) process.once(sig, () => process.exit(0));
+}
+function readRunning(root) {
+	try {
+		const r = JSON.parse(fs.readFileSync(runningFile(root), "utf8"));
+		if (typeof r.url !== "string" || typeof r.pid !== "number") return null;
+		process.kill(r.pid, 0);
+		return r;
+	} catch {
+		return null;
+	}
+}
+/** Off in CI and tests, and when the person turned it off. */
+function openingAllowed(env = process.env) {
+	return !env.CI && !env.VITEST && ![
+		"1",
+		"true",
+		"yes"
+	].includes(String(env.ARMATURE_NO_OPEN ?? "").toLowerCase());
+}
+function changeUrl(base, change) {
+	return `${base.replace(/\/$/, "")}/?lens=work&change=${encodeURIComponent(change)}`;
+}
+function sleep(ms) {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function startViewer(root) {
+	const cli = process.argv[1];
+	if (!cli) return null;
+	try {
+		spawn(process.execPath, [
+			cli,
+			"view",
+			"--root",
+			root,
+			"--idle",
+			String(30)
+		], {
+			cwd: root,
+			detached: true,
+			stdio: "ignore"
+		}).unref();
+	} catch {
+		return null;
+	}
+	for (let waited = 0; waited < 4e3; waited += 100) {
+		sleep(100);
+		const r = readRunning(root);
+		if (r) return r;
+	}
+	return null;
+}
+function openBrowser(url) {
+	const [cmd, args] = process.platform === "darwin" ? ["open", [url]] : process.platform === "win32" ? ["cmd", [
+		"/c",
+		"start",
+		"\"\"",
+		url
+	]] : ["xdg-open", [url]];
+	try {
+		spawn(cmd, args, {
+			detached: true,
+			stdio: "ignore"
+		}).unref();
+	} catch {}
+}
+/**
+* Opens the change in the viewer for the person to look at while they answer the prompt.
+* Returns the page's address, or null when no viewer could be reached.
+*/
+function showChange(root, change) {
+	if (!openingAllowed()) return null;
+	const running = readRunning(root) ?? startViewer(root);
+	if (!running) return null;
+	const url = changeUrl(running.url, change);
+	const opened = running.opened ?? {};
+	if (!(Date.now() - (opened[change] ?? 0) < REOPEN_AFTER)) {
+		openBrowser(url);
+		opened[change] = Date.now();
+		try {
+			fs.writeFileSync(runningFile(root), JSON.stringify({
+				...running,
+				opened
+			}));
+		} catch {}
+	}
+	return url;
+}
 // src/server.ts
 function viewerHtml() {
 	const file = new URL("../viewer/dist/index.html", import.meta.url);
@@ -25964,11 +26071,13 @@ function exportHtml(root, out, github) {
 	fs.writeFileSync(target, embed(viewerHtml(), graph));
 	return target;
 }
-function serve(root, port, github) {
+function serve(root, port, github, opts = {}) {
 	viewerHtml();
 	const clients = /* @__PURE__ */ new Set();
 	const token = randomBytes(24).toString("hex");
+	let lastSeen = Date.now();
 	const server = http.createServer((req, res) => {
+		lastSeen = Date.now();
 		if (!/^(?:localhost|127\.0\.0\.1|\[::1\]):\d+$/.test(req.headers.host ?? "")) {
 			res.writeHead(403);
 			res.end();
@@ -26042,7 +26151,10 @@ function serve(root, port, github) {
 			});
 			res.write("retry: 1000\n\n");
 			clients.add(res);
-			req.on("close", () => clients.delete(res));
+			req.on("close", () => {
+				clients.delete(res);
+				lastSeen = Date.now();
+			});
 			return;
 		}
 		if (url === "/" || url === "/index.html") {
@@ -26082,7 +26194,17 @@ function serve(root, port, github) {
 				if (e.code === "EADDRINUSE" && attempts > 0) tryListen(p + 1, attempts - 1);
 				else reject(e);
 			});
-			server.listen(p, "127.0.0.1", () => resolve(`http://localhost:${p}`));
+			server.listen(p, "127.0.0.1", () => {
+				const url = `http://localhost:${p}`;
+				noteViewer(root, url);
+				if (opts.idleMinutes && opts.idleMinutes > 0) {
+					const idle = opts.idleMinutes * 60 * 1e3;
+					setInterval(() => {
+						if (clients.size === 0 && Date.now() - lastSeen > idle) process.exit(0);
+					}, Math.min(idle, 6e4)).unref();
+				}
+				resolve(url);
+			});
 		};
 		tryListen(port, 20);
 	});
@@ -27402,7 +27524,7 @@ Make writing those model files the first step of the plan, before any code. Run 
 /** What to tell an agent that has just entered plan mode. */
 function planModeNote(dir = MODEL_DIR, planPath = newPlanPath(`${dir}/docs`, dir)) {
 	return `You are planning. In this repo a plan is a change to the architecture model in ${dir}/:\n1. Run "armature context" for the task and "armature impact <ref>" on every node, interface and shape the work touches.
-2. Give the plan a "Model change" section: the change id, new nodes with their "code:" globs, new or changed interfaces, links, shapes, flows and requirements, and the plan document ${planPath}. If the work changes none of these, write "None" and why.\n3. Make the first step after approval writing those files: the planned elements tagged "change: <id>" (or "modify: <id>" for what exists and changes), the plan document with a header (kind: plan, change: <id>), and ${dir}/changes/<id>.yaml with "state: proposed". Run "armature check". Then set "state: approved" as the last edit: the person is asked to confirm it, and what the change holds at that moment is what they approve. Code comes after.\n4. Keep what must hold in view: "armature impact <node>" lists boundaries, auth, allow-lists, data policy, secrets and rules. If the work adds an entry point, sends tagged data out of the system or needs a credential, run "armature surface" and the armature-threat skill, and put the answers in the model: "auth:" and "only:" on interfaces, "secrets:" on nodes, a requirement of kind security for each entry point that reaches sensitive data.
+2. Give the plan a "Model change" section: the change id, new nodes with their "code:" globs, new or changed interfaces, links, shapes, flows and requirements, and the plan document ${planPath}. If the work changes none of these, write "None" and why.\n3. Make the first step after approval writing those files: the planned elements tagged "change: <id>" (or "modify: <id>" for what exists and changes), the plan document with a header (kind: plan, change: <id>), and ${dir}/changes/<id>.yaml with "state: proposed". Run "armature check". Then set "state: approved" as the last edit: the person is asked to confirm it with the change's diagram opened beside the prompt, and what the change holds at that moment is what they approve. Write all of it before that edit, without stopping to ask about parts. Code comes after.\n4. Keep what must hold in view: "armature impact <node>" lists boundaries, auth, allow-lists, data policy, secrets and rules. If the work adds an entry point, sends tagged data out of the system or needs a credential, run "armature surface" and the armature-threat skill, and put the answers in the model: "auth:" and "only:" on interfaces, "secrets:" on nodes, a requirement of kind security for each entry point that reaches sensitive data.
 The armature-design skill has the format. A plan without the "Model change" section is sent back, and approval is refused while the change has security errors.`;
 }
 /** One line for every later plan in a session: the full note was given once, and the rules have not changed. */
@@ -27411,7 +27533,7 @@ function planReminder(dir = MODEL_DIR) {
 }
 /** A shorter pointer for a prompt that asks for a plan or a design outside plan mode. */
 function planningNote(dir = MODEL_DIR, planPath = newPlanPath(`${dir}/docs`, dir)) {
-	return `This prompt asks for a plan or a design. In this repo that is a change in the architecture model, not a loose document: follow the armature-design skill (${dir}/changes/<id>.yaml with "state: proposed", planned elements tagged with it, and the plan in ${planPath}), run "armature check", then ask the person to review it in "armature view" before any code. Check "armature impact <node>" for what must hold, and "armature surface" if the work adds an entry point, sends tagged data out or needs a credential.`;
+	return `This prompt asks for a plan or a design. In this repo that is a change in the architecture model, not a loose document: follow the armature-design skill (${dir}/changes/<id>.yaml with "state: proposed", planned elements tagged with it, and the plan in ${planPath}), run "armature check" until it is clean, then set "state: approved" as the last edit. That is the one question for the person: the change's diagram opens beside the prompt. Do not stop to ask about parts before it, and write no code before they confirm. Check "armature impact <node>" for what must hold, and "armature surface" if the work adds an entry point, sends tagged data out or needs a credential.`;
 }
 var PLANNING_WORDS = /\b(plan|design|propose|proposal|architect|architecture for|spec out|roadmap)\b/i;
 // src/agent.ts
@@ -27628,6 +27750,8 @@ async function hook(name, rootFlag) {
 				}
 				const more = sec.lines.length - 5;
 				verdict.reason += `\n${sec.lines.length ? `Security:\n${sec.lines.slice(0, 5).join("\n")}${more > 0 ? `\n  and ${more} more: "armature approve" prints all` : ""}` : "Security: no new entry point, no sensitive data sent out, no secret."}`;
+				const graph = showChange(root, verdict.approves);
+				if (graph) verdict.reason = `Diagram of the change: ${graph}\n${verdict.reason}`;
 				notePendingApproval(root, verdict.approves, callKey(input.tool_input));
 			}
 			decide(verdict.decision, verdict.reason);
@@ -44123,7 +44247,7 @@ Changing the model
                                 requirement, shape, flow or change, and rewrite every reference to it
 
 Viewing
-  armature view [--port n] [--github]   Local diagram with live reload
+  armature view [--port n] [--github] [--idle min]  Local diagram with live reload (--idle: stop after min minutes with no page open)
   armature export [file] [--github]     One self-contained HTML file
   armature build                        Write armature/.cache/graph.json
 
@@ -44160,7 +44284,8 @@ function parse(argv) {
 		"only",
 		"fail-on",
 		"by",
-		"since"
+		"since",
+		"idle"
 	]);
 	for (let i = 0; i < rest.length; i++) {
 		const a = rest[i];
@@ -44515,7 +44640,7 @@ async function main() {
 		}
 		case "view": {
 			await buildCodeIndex(root).catch(() => void 0);
-			const url = await serve(root, Number(flags.port) || 4747, flags.github === true);
+			const url = await serve(root, Number(flags.port) || 4747, flags.github === true, { idleMinutes: Number(flags.idle) || void 0 });
 			console.log(`Viewer for ${path.basename(root)} at ${url}  (Ctrl+C to stop; reloads when armature/ changes)`);
 			return;
 		}
