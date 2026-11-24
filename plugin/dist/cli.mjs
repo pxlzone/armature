@@ -24315,18 +24315,7 @@ function orientText(g, compact) {
 	out.push(`- Documents are Markdown with a header (kind, about, change) and [[references]] to nodes, node#interfaces, Shapes, flows and changes. New ones go under ${g.system.docs}/. The armature-docs skill has the format.`);
 	out.push("");
 	out.push("## Digging deeper");
-	out.push("- `armature show <ref>` for a node, node#interface, Shape, flow or change. Add `--depth 2` to include children.");
-	out.push("- `armature where <file>` for the node that owns a file, with its rules.");
-	out.push("- `armature impact <ref>` for what depends on something before you change it.");
-	if (g.code) {
-		out.push(`- \`armature map <node>\` for a node's files, most central first, with exported signatures (${g.code.files} files and ${g.code.symbols} symbols are indexed). Use it to pick what to read.`);
-		out.push("- `armature context \"<task>\"` first: the nodes, rules, data, ranked files and tests for that task, within a budget.");
-		out.push("- `armature docs <ref>` for the plans and written documents about a node, shape, flow or change.");
-		out.push("- `armature callers <symbol>` before changing a signature; `armature tests <file|node|symbol>` for what to run; `armature search \"<words>\"` to find code by topic.");
-		out.push("- `armature symbol <name>` for where something is defined and who imports it. `armature deps <node>` for what a node's code imports.");
-	}
-	out.push("- `armature islands [node]` for dead code; `armature tech [id]` for the technologies and who uses them.");
-	out.push(`- \`armature check\` after editing anything under ${g.system.dir}/.`);
+	out.push(`- ${g.code ? "`armature context \"<task>\"` first, " : ""}\`armature impact <ref>\` before you change something, and \`armature check\` after editing anything under ${g.system.dir}/. \`armature help\` lists the rest.`);
 	return out.join("\n");
 }
 /** How much of the repo the model places, and the commit it describes. */
@@ -26497,9 +26486,10 @@ function contextPack(g, idx, root, task, opt = {}) {
 	})).sort((a, b) => b.score - a.score);
 	const out = [];
 	const used = () => out.reduce((n, l) => n + l.length + 1, 0);
+	let limit = budget;
 	const push = (...lines) => {
 		const size = lines.reduce((n, l) => n + l.length + 1, 0);
-		if (used() + size > budget) return false;
+		if (used() + size > limit) return false;
 		out.push(...lines);
 		return true;
 	};
@@ -26512,11 +26502,9 @@ function contextPack(g, idx, root, task, opt = {}) {
 		const overlaps = (text) => words(text).some((w) => qs.has(w));
 		for (const n of shown) {
 			const block = [`- ${n.id} (${n.kind}): ${n.role}${n.status !== "built" ? ` [${n.status}]` : ""}`];
-			const own = n.rules.filter((r) => r.from === n.id);
-			for (const r of [...own.filter((r) => overlaps(r.text)), ...own.filter((r) => !overlaps(r.text))].slice(0, 2)) block.push(`  rule: ${r.text}`);
 			const plans = g.changes.filter((c) => c.state !== "done" && c.state !== "dropped" && (c.nodes.includes(n.id) || c.interfaces.some((i) => i.startsWith(`${n.id}#`))) && overlaps(`${c.title} ${c.why ?? ""}`));
 			for (const c of plans.slice(0, 2)) block.push(`  plan: ${c.title} [${c.state}]${c.doc ? ` (${c.doc})` : ""}`);
-			for (const r of n.requirements.filter((r) => overlaps(r.text)).slice(0, 2)) block.push(`  must hold: ${r.text}`);
+			for (const r of n.requirements.filter((r) => r.kind !== "security" && overlaps(r.text)).slice(0, 2)) block.push(`  must hold: ${r.text}`);
 			if (lines.concat(block).reduce((k, l) => k + l.length + 1, 0) > cap) break;
 			lines.push(...block);
 		}
@@ -26539,6 +26527,7 @@ function contextPack(g, idx, root, task, opt = {}) {
 		for (const s of shapeList) push(`- ${s.id}${s.source ? ` (${s.source})` : ""}: ${s.fields.slice(0, 12).map((f) => `${f.name}: ${f.type}`).join(", ")}${s.fields.length > 12 ? ", …" : ""}`);
 	}
 	push("", "## Files, most relevant first (signatures only)");
+	limit = budget - 600;
 	let listed = 0;
 	const qset = new Set(q);
 	for (const r of files) {
@@ -26552,6 +26541,7 @@ function contextPack(g, idx, root, task, opt = {}) {
 		listed++;
 		if (listed >= 25) break;
 	}
+	limit = budget;
 	const topFiles = files.filter((f) => !idx.files[f.path]?.test).slice(0, Math.max(3, listed)).map((f) => f.path);
 	if (hist) {
 		const partners = /* @__PURE__ */ new Map();
@@ -26561,7 +26551,11 @@ function contextPack(g, idx, root, task, opt = {}) {
 			for (const [p, s] of [...partners].sort((a, b) => b[1] - a[1]).slice(0, 4)) push(`- ${p} (${Math.round(s * 100)}% of the time)`);
 		}
 	}
-	const tests = testsForFiles(idx, topFiles.slice(0, 8)).slice(0, 6);
+	const hits = (f) => new Set(words(path.basename(f)).filter((w) => qset.has(w) && !/^(?:tests?|specs?|[cm]?[jt]sx?|py|add|fix|new|update|remove|make|use|get|set)$/.test(w))).size;
+	const named = Object.values(idx.files).filter((f) => f.test && hits(f.path) > 0).map((f) => f.path).sort((a, b) => hits(b) - hits(a)).slice(0, 3);
+	const byFile = [];
+	for (const f of topFiles.slice(0, 8)) for (const t of testsForFiles(idx, [f])) if (!byFile.includes(t)) byFile.push(t);
+	const tests = [.../* @__PURE__ */ new Set([...named, ...byFile])].slice(0, 6);
 	if (tests.length) push("", "## Tests to run", ...tests.map((t) => `- ${t}`));
 	const docs = /* @__PURE__ */ new Set();
 	const replaced = new Set(g.docs.filter((d) => d.supersededBy).map((d) => d.path));

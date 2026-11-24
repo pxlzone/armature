@@ -5,6 +5,8 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { WRITE_TOOLS } from '../src/agent.js';
 import { DOC_KINDS, NODE_KINDS, VIA_KINDS, WARNING_INFO } from '../src/types.js';
+// @ts-expect-error a plain .mjs script with no types
+import { pluginInputsHash } from '../scripts/plugin-inputs.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const read = (rel: string): string => fs.readFileSync(path.join(root, rel), 'utf8');
@@ -54,6 +56,10 @@ describe('one fact, one home', () => {
     for (const key of ['after', 'state', 'doc', 'done_when']) expect(Object.keys(schema.change.properties)).toContain(key);
     for (const key of ['accept', 'ignore', 'gate', 'docs', 'reports']) expect(Object.keys(schema.system.properties)).toContain(key);
     for (const key of ['covers', 'modify', 'tests', 'match']) expect(Object.keys(schema.requirement.properties)).toContain(key);
+  });
+
+  it('ships a plugin built from the current source', () => {
+    expect(read('plugin/source.sha256').trim(), 'plugin/ is older than the source. Run "npm run build:plugin" and commit plugin/.').toBe(pluginInputsHash(root));
   });
 
   it('gives the plugin the same hooks a local install writes', () => {
