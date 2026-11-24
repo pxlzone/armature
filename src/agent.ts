@@ -13,8 +13,9 @@ import { formatProblems, orient, ownerOf } from './render.js';
 import { isDocPath } from './docs.js';
 import { bashGate, gateOn, PLANNING_WORDS, planGate, planModeNote, planningNote, planReminder, targetOf, writeGate } from './gate.js';
 import { changeSecurity } from './security.js';
-import { showChange } from './viewer-open.js';
+import { progressGate, showChange } from './viewer-open.js';
 import { callKey, dropPendingApproval, notePendingApproval, settleApproval } from './approve.js';
+import { commandName, noteLive } from './live.js';
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = path.join(PKG_ROOT, 'bin', 'armature.mjs');
@@ -187,8 +188,11 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
   const start = rootFlag ?? input.cwd ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
   const root = findRoot(start);
   if (!root) return; // no model in this project: stay silent
+  // Each step is also written down for the viewer, which shows what the session is working on.
+  const live = (kind: Parameters<typeof noteLive>[2], more?: Parameters<typeof noteLive>[3]): void => noteLive(root, input.session_id, kind, more);
   try {
     if (name === 'session-start') {
+      live('start');
       await buildCodeIndex(root).catch(() => undefined);
       const out = [orient(compile(root))];
       // Compaction drops what the session was told: tell it again, and let the next prompt bring the notes back.
@@ -202,6 +206,7 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
     }
     if (name === 'prompt') {
       const prompt: string = String(input.prompt ?? '').trim();
+      if (prompt) live('prompt', { text: prompt });
       if (prompt.length < 12 || prompt.startsWith('/')) return;
       const sid = String(input.session_id ?? '');
       const out: string[] = [];
@@ -234,7 +239,16 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
       // One question is open at a time: any other write means the earlier one was answered, so a
       // question the person declined cannot be settled by something that happens later.
       dropPendingApproval(root);
-      if (!verdict) return;
+      if (verdict?.decision !== 'deny') live('editing', { file: targetOf(input.tool_input) });
+      if (!verdict) {
+        // An edit that may go ahead: the person's progress view is open first. The first edit of a
+        // session is sent back once to have it opened; after that the hook opens it itself, once.
+        const sid = String(input.session_id ?? '');
+        const first = once(root, 'progress-sessions', sid);
+        const open = await progressGate(root, sid, first, () => once(root, 'progress-opened', sid));
+        if (open) decide('deny', open);
+        return;
+      }
       if (verdict.approves) {
         // The person sees what the change does to security before saying yes, and is not asked while it has security errors.
         // Approval stays the person's even when the model cannot compile: ask, and say security could not be read.
@@ -265,7 +279,13 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
     if (name === 'pre-bash') {
       // Before a shell command: the same rules, for what the command plainly does.
       const verdict = bashGate(root, String(input.tool_input?.command ?? ''), typeof input.cwd === 'string' ? input.cwd : root);
+      if (verdict?.decision !== 'deny') live('run', { text: commandName(String(input.tool_input?.command ?? '')) });
       if (verdict) decide(verdict.decision, verdict.reason);
+      return;
+    }
+    if (name === 'note') {
+      // After a file was read. The launcher answers this one itself, without loading the CLI; this is the same answer for a caller that did load it.
+      live('read', { file: targetOf(input.tool_input) });
       return;
     }
     if (name === 'pre-plan') {
@@ -287,6 +307,7 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
     if (name === 'post-edit') {
       const file: string = targetOf(input.tool_input) ?? '';
       if (!file) return;
+      live('edited', { file });
       const rel = path.relative(root, path.resolve(root, file)).replace(/\\/g, '/');
       if (rel.startsWith('..') || rel.startsWith(`${MODEL_DIR}/.cache/`)) return;
       const inArch = rel.startsWith(`${MODEL_DIR}/`);
@@ -322,6 +343,7 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
       return;
     }
     if (name === 'stop') {
+      live('stop');
       dropPendingApproval(root);
       if (input.stop_hook_active) return;
       const changed = changedFiles(root);
@@ -375,6 +397,7 @@ function mergeHooks(settingsPath: string): boolean {
     ['PreToolUse', 'Bash', cmd('pre-bash')],
     ['PreToolUse', 'ExitPlanMode', cmd('pre-plan')],
     ['PostToolUse', WRITE_TOOLS, cmd('post-edit')],
+    ['PostToolUse', 'Read', cmd('note')],
     ['Stop', undefined, cmd('stop')],
   ];
   let changed = false;
@@ -432,7 +455,7 @@ function copyDir(from: string, to: string): number {
 export function install(root: string): string[] {
   const out: string[] = [];
   const hooksChanged = mergeHooks(path.join(root, '.claude', 'settings.local.json'));
-  out.push(`${hooksChanged ? 'Added' : 'Kept'} hooks in .claude/settings.local.json (session start, prompts, before writes and before a plan is presented, after edits to ${MODEL_DIR}/ and to documents, on stop).`);
+  out.push(`${hooksChanged ? 'Added' : 'Kept'} hooks in .claude/settings.local.json (session start, prompts, before writes and before a plan is presented, after edits to ${MODEL_DIR}/ and to documents, after reads, on stop).`);
 
   const mcpPath = path.join(root, '.mcp.json');
   // A committed .mcp.json is shared with the team: an entry naming a path on this machine would break theirs.

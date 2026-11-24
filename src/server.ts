@@ -10,9 +10,10 @@ import { changeSecurity } from './security.js';
 import { MODEL_DIR } from './paths.js';
 import { git } from './repo.js';
 import { readDoc } from './docs.js';
-import { buildCodeIndex } from './code.js';
+import { buildCodeIndex, readCodeIndex } from './code.js';
 import { watchSources } from './watch.js';
 import { awaitingApproval, type Graph } from './types.js';
+import { fileDiff, LIVE_FILE, readLive } from './live.js';
 
 function viewerHtml(): string {
   const file = new URL('../viewer/dist/index.html', import.meta.url);
@@ -44,6 +45,24 @@ export function proposedAt(root: string, id: string): string | undefined {
     return (stat.birthtimeMs > 0 ? stat.birthtime : stat.mtime).toISOString();
   }
   return undefined;
+}
+
+/** What the code index knows about each listed file: its size, its symbols, and the files of this repo it imports. */
+export function fileDetails(graph: Graph, root: string): Graph {
+  const idx = readCodeIndex(root);
+  if (!graph.files || !idx) return graph;
+  for (const list of Object.values(graph.files)) {
+    for (const f of list) {
+      const c = idx.files[f.path];
+      if (!c) continue;
+      f.lines = c.lines;
+      f.symbols = c.symbols.length;
+      if (c.test) f.test = true;
+      const imports = [...new Set(c.imports.map((i) => i.file).filter((x): x is string => !!x && x !== f.path))];
+      if (imports.length) f.imports = imports;
+    }
+  }
+  return graph;
 }
 
 /** Adds, to each change that waits for approval, when it was proposed and what it does to security: the person reads both before they approve. */
@@ -86,7 +105,7 @@ export function approveFromPage(root: string, token: string, req: Pick<http.Inco
 }
 
 export function exportHtml(root: string, out: string, github: boolean): string {
-  const graph = forReview(compile(root, { github, activity: true }), root);
+  const graph = fileDetails(forReview(compile(root, { github, activity: true, files: true }), root), root);
   graph.root = path.basename(root);
   // A static file has no server to ask, so the document texts travel inside it (up to 12 MB).
   graph.docTexts = {};
@@ -106,8 +125,12 @@ export function exportHtml(root: string, out: string, github: boolean): string {
 export function serve(root: string, port: number, github: boolean, opts: { idleMinutes?: number } = {}): Promise<string> {
   viewerHtml(); // fail early when the viewer is not built
   const clients = new Set<http.ServerResponse>();
+  // Pages that show the session view: a hook asks whether one is open before it asks the agent to open it.
+  const watching = new Set<http.ServerResponse>();
   const token = randomBytes(24).toString('hex');
   let lastSeen = Date.now();
+  // The model as last compiled, to say which part owns a file an agent touches. Dropped when the model or the code changes.
+  let owners: Graph | null = null;
   const server = http.createServer((req, res) => {
     lastSeen = Date.now();
     // A page on another site can rebind its name to 127.0.0.1, so every route checks the Host, not only /approve.
@@ -119,13 +142,45 @@ export function serve(root: string, port: number, github: boolean, opts: { idleM
     const url = (req.url ?? '/').split('?')[0];
     if (url === '/graph.json') {
       try {
-        const graph = forReview(compile(root, { github, activity: true }), root);
+        const graph = fileDetails(forReview(compile(root, { github, activity: true, files: true }), root), root);
         res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
         res.end(JSON.stringify(graph));
       } catch (e: any) {
         res.writeHead(500, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ error: String(e?.message ?? e) }));
       }
+      return;
+    }
+    if (url === '/live.json') {
+      // What agent sessions are doing right now. Read on every step they take, so it does not compile the model each time.
+      let body: string;
+      try {
+        owners ??= compile(root);
+        body = JSON.stringify(readLive(root, owners, Date.now(), { changes: true }));
+      } catch {
+        body = JSON.stringify({ at: new Date().toISOString(), sessions: [] });
+      }
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      res.end(body);
+      return;
+    }
+    if (url === '/watchers') {
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      res.end(JSON.stringify({ session: watching.size }));
+      return;
+    }
+    if (url === '/diff') {
+      // What one file an agent session edited holds that the last commit does not. Other files are refused.
+      const file = new URL(req.url ?? '/', 'http://x').searchParams.get('path') ?? '';
+      let text: string | null = null;
+      try {
+        owners ??= compile(root);
+        text = fileDiff(root, readLive(root, owners), file);
+      } catch {
+        text = null;
+      }
+      res.writeHead(text === null ? 404 : 200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(text ?? 'Not found');
       return;
     }
     if (url === '/approve') {
@@ -162,8 +217,10 @@ export function serve(root: string, port: number, github: boolean, opts: { idleM
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
       res.write('retry: 1000\n\n');
       clients.add(res);
+      if (new URL(req.url ?? '/', 'http://x').searchParams.get('view') === 'session') watching.add(res);
       req.on('close', () => {
         clients.delete(res);
+        watching.delete(res);
         lastSeen = Date.now();
       });
       return;
@@ -179,10 +236,20 @@ export function serve(root: string, port: number, github: boolean, opts: { idleM
 
   let timer: NodeJS.Timeout | null = null;
   const notify = (): void => {
+    owners = null;
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
       for (const c of clients) c.write('data: changed\n\n');
     }, 150);
+  };
+  // A step of an agent session: the page asks for /live.json, not for the whole model again.
+  let liveTimer: NodeJS.Timeout | null = null;
+  const notifyLive = (): void => {
+    if (liveTimer) return;
+    liveTimer = setTimeout(() => {
+      liveTimer = null;
+      for (const c of clients) c.write('data: live\n\n');
+    }, 120);
   };
   // Keep the code index fresh while the viewer runs.
   watchSources(root, () => buildCodeIndex(root).then((r) => { if (r.parsed) notify(); }, () => undefined));
@@ -191,6 +258,7 @@ export function serve(root: string, port: number, github: boolean, opts: { idleM
     fs.watch(archAbs, { recursive: true }, (_event, file) => {
       if (file && String(file).replace(/\\/g, '/').startsWith('.cache')) {
         if (String(file).includes('reports')) notify();
+        else if (String(file).endsWith(LIVE_FILE)) notifyLive();
         return;
       }
       notify();

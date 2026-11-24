@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Edge, Graph, GNode, Shape } from '../../src/types.ts';
+import type { Edge, Graph, GNode, Live, LiveFile, Shape } from '../../src/types.ts';
 import { pendingChanges, type ApproveFn } from './Review.tsx';
-import { buildView, dataDirection, indexGraph, isInside, pathOf, visibleFor, HEADER, HUB_H, HUB_W, TILE, type VEdge, type View, type VNode } from './view.ts';
+import { buildView, dataDirection, indexGraph, isInside, pathOf, visibleFor, withFiles, HEADER, HUB_H, HUB_W, TILE, type VEdge, type View, type VNode } from './view.ts';
 import { Panel } from './Panel.tsx';
 import { colorOf, iconOf } from './icons.tsx';
 import { Reader, docsFor } from './Docs.tsx';
+import { DiffView, LiveBar, SessionSheet, SessionTop, editedPaths, editedSpots, liveFiles, liveMarks, liveNode, sizeOf } from './Live.tsx';
 import { SettingsButton, SettingsDialog, changedFromDefault, loadSettings, saveSettings, type ViewSettings } from './Settings.tsx';
 
 export type Lens = 'structure' | 'flow' | 'data' | 'tests' | 'work' | 'review' | 'docs' | 'activity' | 'code' | 'rules';
@@ -25,6 +26,24 @@ declare global {
     /** Set by the live server only: lets this page ask it to approve a change. */
     __ARMATURE_APPROVE__?: string;
   }
+}
+
+export interface WheelGesture { kind: 'wheel' | 'trackpad'; at: number }
+
+/**
+ * Whether a wheel event comes from a mouse wheel (which zooms) or a trackpad (which pans). Decided
+ * once per gesture, a run of events less than 200 ms apart, and kept for the rest of it: a fast
+ * two-finger scroll sends the same large whole steps a wheel does, and judging each event alone
+ * made one scroll pan and zoom at once. A gesture that starts with a large step on one axis is a
+ * wheel; a trackpad starts small. Sideways movement or a fractional step settles it as a trackpad.
+ */
+export function wheelKind(g: WheelGesture, e: { deltaMode: number; deltaX: number; deltaY: number }, now: number): 'wheel' | 'trackpad' {
+  const fresh = now - g.at > 200;
+  g.at = now;
+  if (e.deltaMode !== 0) return (g.kind = 'wheel');
+  if (e.deltaX !== 0 || !Number.isInteger(e.deltaY)) return (g.kind = 'trackpad');
+  if (fresh) g.kind = Math.abs(e.deltaY) >= 50 ? 'wheel' : 'trackpad';
+  return g.kind;
 }
 
 function wrap(text: string, max: number, lines: number): string[] {
@@ -70,7 +89,8 @@ export function App() {
   const linked = useMemo(() => {
     const q = new URLSearchParams(window.location.search);
     const l = q.get('lens');
-    return { lens: LENSES.some(([id]) => id === l) ? (l as Lens) : null, change: q.get('change') };
+    // "?view=session" is the view for a narrow pane beside an agent: the map follows it, with its steps underneath.
+    return { lens: LENSES.some(([id]) => id === l) ? (l as Lens) : null, change: q.get('change'), session: q.get('view') === 'session', pick: q.get('session') };
   }, []);
   const [lens, setLens] = useState<Lens>(linked.lens ?? (linked.change ? 'work' : 'structure'));
   const [sel, setSel] = useState<Selection>(null);
@@ -96,6 +116,12 @@ export function App() {
   const [dragging, setDragging] = useState(false);
   const [docPath, setDocPath] = useState<string | null>(null);
   const [autoBundle, setAutoBundle] = useState(true);
+  const [live, setLive] = useState<Live | null>(null);
+  const sessionMode = linked.session;
+  const [followLive, setFollowLive] = useState(sessionMode);
+  const [sessionPick, setSessionPick] = useState<string | null>(linked.pick);
+  const [diffPath, setDiffPath] = useState<string | null>(null);
+  const closeDiff = useCallback(() => setDiffPath(null), []);
   const tfRef = useRef(tf);
   tfRef.current = tf;
   const viewRef = useRef<View | null>(null);
@@ -107,6 +133,7 @@ export function App() {
   const busy = useRef(false);
   const pointer = useRef<{ x: number; y: number } | null>(null);
   const userZoom = useRef(0);
+  const wheel = useRef<WheelGesture>({ kind: 'trackpad', at: -1e9 });
 
   const load = useCallback(() => {
     fetch('/graph.json')
@@ -133,15 +160,33 @@ export function App() {
     };
   }, [load]);
 
+  // What agent sessions are doing: asked for again on each step they take, without loading the model again.
+  const loadLive = useCallback(() => {
+    fetch('/live.json')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((l) => setLive(l && Array.isArray(l.sessions) ? l : null))
+      .catch(() => undefined);
+  }, []);
+
   useEffect(() => {
     if (window.__ARMATURE_GRAPH__) return;
     load();
-    const es = new EventSource('/events');
-    es.onmessage = () => load();
-    return () => es.close();
-  }, [load]);
+    loadLive();
+    // The session view says what it is, so a hook can tell that the person has it open.
+    const es = new EventSource(linked.session ? '/events?view=session' : '/events');
+    es.onmessage = (e) => (e.data === 'live' ? loadLive() : load());
+    // A session that goes quiet sends nothing, so "working" and "3 min ago" are also read on a timer.
+    const tick = setInterval(loadLive, 20000);
+    return () => {
+      es.close();
+      clearInterval(tick);
+    };
+  }, [load, loadLive, linked.session]);
 
-  const ix = useMemo(() => (graph ? indexGraph(graph) : null), [graph]);
+  // The map draws each part's files inside it. Files a session edited are always among them.
+  const editedKey = editedPaths(live).join('\n');
+  const mapped = useMemo(() => (graph ? withFiles(graph, new Set(editedKey ? editedKey.split('\n') : []), linked.session ? 8 : 14) : null), [graph, editedKey, linked.session]);
+  const ix = useMemo(() => (mapped ? indexGraph(mapped.graph) : null), [mapped]);
 
   useEffect(() => {
     if (graph) document.title = `${graph.system.name} architecture`;
@@ -182,7 +227,7 @@ export function App() {
     const codeEdges: Edge[] | undefined = lens === 'code'
       ? graph.codeDeps.map((d) => ({ id: `code:${d.from}>${d.to}>${d.via ?? 'import'}`, from: d.from, to: d.to, owner: d.from, verb: 'calls' as const, async: false, shapes: [], returns: [], status: 'built' as const, evidence: 'seen' as const, code: { count: d.count, kind: d.kind, via: d.via ?? 'import' } }))
       : undefined;
-    buildView(graph, ix, { focus: f, expanded, showLibraries: showLibs, hidePlanned, edges: codeEdges, bundle: bundled }).then((v) => {
+    buildView(mapped?.graph ?? graph, ix, { focus: f, expanded, showLibraries: showLibs, hidePlanned, edges: codeEdges, fileEdges: mapped?.edges, bundle: bundled }).then((v) => {
       if (!live) return;
       setView(v);
       setVersion((n) => n + 1);
@@ -236,8 +281,7 @@ export function App() {
       e.preventDefault();
       const rect = el.getBoundingClientRect();
       const pinch = e.ctrlKey || e.metaKey;
-      // A mouse wheel sends large whole-number steps on one axis; a trackpad sends small ones on both.
-      const mouseWheel = e.deltaMode !== 0 || (e.deltaX === 0 && Math.abs(e.deltaY) >= 50 && Number.isInteger(e.deltaY));
+      const mouseWheel = wheelKind(wheel.current, e, performance.now()) === 'wheel';
       if (pinch || mouseWheel) {
         const factor = Math.exp(-e.deltaY * (pinch ? 0.01 : e.deltaMode !== 0 ? 0.05 : 0.0016));
         zoomAt(e.clientX - rect.left, e.clientY - rect.top, factor, false);
@@ -496,6 +540,63 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tf.k, zoomOpens]);
 
+  // Following an agent: the block it is in, or the closed group that holds it, is brought to the middle.
+  // The session view opens the groups around the parts the agent is in or has edited, so the parts themselves are on the map.
+  const livePart = ix ? liveNode(live, ix) : null;
+  const workedParts = ix ? [...(livePart ? [livePart] : []), ...editedSpots(live, ix)].join(' ') : '';
+  useEffect(() => {
+    if (!sessionMode || !workedParts || !ix) return;
+    const chain: string[] = [];
+    for (const id of workedParts.split(' ')) for (let p = ix.nodes.get(id)?.parent; p; p = ix.nodes.get(p)?.parent ?? null) chain.push(p);
+    setExpanded((prev) => (chain.every((c) => prev.has(c)) ? prev : new Set([...prev, ...chain])));
+  }, [sessionMode, workedParts, ix]);
+  const liveAt = ix && followLive ? liveNode(live, ix) : null;
+  const liveBlock = ix && liveAt ? visibleFor(ix, liveAt, focus, expanded) : null;
+  useEffect(() => {
+    const v = liveBlock ? view?.nodes.find((n) => n.id === liveBlock) : undefined;
+    const el = svgRef.current;
+    if (!v || !el || drag.current) return;
+    const { width, height } = el.getBoundingClientRect();
+    setGlide(true);
+    // In a narrow pane the whole map is too small to read: stay close enough to read the part.
+    setTf((t) => {
+      const k = sessionMode ? Math.max(t.k, 0.8) : t.k;
+      return { k, x: width / 2 - (v.x + v.w / 2) * k, y: height / 2 - (v.y + v.h / 2) * k };
+    });
+  }, [liveBlock, view, sessionMode]);
+
+  // With nobody working, the session view shows what was worked on: the blocks a session edited, as large as they fit. With none, the whole map.
+  const fitWork = useCallback((v: View) => {
+    const el = svgRef.current;
+    const at = ix ? [...liveMarks(live, ix, focus, expanded).keys()] : [];
+    const boxes = v.nodes.filter((n) => at.includes(n.id));
+    if (!el || boxes.length === 0) return fit(v);
+    const { width, height } = el.getBoundingClientRect();
+    const pad = 90;
+    const x0 = Math.min(...boxes.map((n) => n.x)) - pad;
+    const y0 = Math.min(...boxes.map((n) => n.y)) - pad;
+    const x1 = Math.max(...boxes.map((n) => n.x + n.w)) + pad;
+    const y1 = Math.max(...boxes.map((n) => n.y + n.h)) + pad + 40;
+    const k = Math.max(MIN_ZOOM, Math.min(width / (x1 - x0), height / (y1 - y0), 1));
+    setGlide(true);
+    setTf({ k, x: width / 2 - ((x0 + x1) / 2) * k, y: height / 2 - ((y0 + y1) / 2) * k });
+  }, [fit, ix, live, focus, expanded]);
+
+  // In the session view the sheet under the map grows as steps arrive. With no working part to follow, the whole map is fitted again.
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!sessionMode || !el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      if (!liveBlock && viewRef.current && !drag.current) fitWork(viewRef.current);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [sessionMode, liveBlock, fitWork, !!view]);
+  // The same when the map is laid out again, as when the groups around the edited parts open.
+  useEffect(() => {
+    if (sessionMode && !liveBlock && view && !drag.current) fitWork(view);
+  }, [sessionMode, liveBlock, view, fitWork]);
+
   if (error && !graph) return <div className="empty">Could not load the model: {error}</div>;
   if (!graph || !ix) return <div className="empty">Loading the model…</div>;
 
@@ -514,6 +615,10 @@ export function App() {
   const pending = pendingChanges(graph);
   const pendingNodes = pending.flatMap((c) => c.nodes);
   const toApprove = (id: string): boolean => pendingNodes.some((x) => isInside(x, id) || isInside(id, x));
+  const marks = liveMarks(live, ix, focus, expanded);
+  const worked = liveFiles(live, ix, focus, expanded);
+  const diffFile: LiveFile | null = diffPath ? [...worked.values()].flat().find((f) => f.path === diffPath) ?? null : null;
+  const session = live?.sessions.find((s) => s.id === sessionPick) ?? live?.sessions[0] ?? null;
   const headline = lens === 'flow' && flow ? flow.headline : focusNode ? focusNode.description ?? focusNode.role : graph.system.headline;
   const plannedCount = graph.nodes.filter((n) => n.children.length === 0 && n.status === 'planned').length;
 
@@ -678,9 +783,16 @@ export function App() {
   );
 
   const nodeEvents = (v: VNode) => ({
-    onClick: (e: React.MouseEvent) => { e.stopPropagation(); setSel({ type: 'node', id: v.id }); },
+    onClick: (e: React.MouseEvent) => {
+      e.stopPropagation();
+      // A file an agent edited opens what changed in it. Any other file stands for the part it belongs to.
+      const f = v.node.file;
+      if (f && worked.get(v.id)?.some((x) => x.path === f.path)) setDiffPath(f.path);
+      else setSel({ type: 'node', id: f ? v.node.parent ?? v.id : v.id });
+    },
     onDoubleClick: (e: React.MouseEvent) => {
       e.stopPropagation();
+      if (v.node.file) return;
       if (v.ghost) goTo(v.id);
       else toggle(v.id);
     },
@@ -712,6 +824,7 @@ export function App() {
       <g key={v.id} className={`vn${hot ? ' hot' : ''}`} style={{ transform: `translate(${v.x}px, ${v.y}px)` }} opacity={lit(v.id, 'node') ? 1 : 0.55}>
         <g className="enter">
           <rect className={`cont${v.level > 0 ? ' inner' : ''}`} style={{ width: v.w, height: v.h, fill: body, stroke: edge }} rx={r} strokeWidth={selected || hot ? 2.4 : v.level > 0 ? 1.8 : 1.4} strokeDasharray={planned ? '7 5' : undefined} />
+          {marks.get(v.id) === 'now' && <rect className="live-ring" x={-6} y={-6} width={v.w + 12} height={v.h + 12} rx={r + 5} />}
           <g className="cont-head" {...nodeEvents(v)}>
             <path d={head} fill={bar} />
             <path d={`M0 ${HEADER} H${v.w}`} stroke={edge} strokeWidth={1} opacity={0.6} />
@@ -750,20 +863,25 @@ export function App() {
     const building = st === 'building';
     const unused = n.unused;
     const waiting = toApprove(v.id);
-    const stroke = unused ? 'var(--ink-3)' : st === 'failing' ? 'var(--red)' : st === 'stale' ? 'var(--amber)' : selected ? 'var(--ink)' : waiting ? 'var(--amber)' : strong ? 'var(--accent)' : st === 'verified' ? 'var(--ok)' : planned || building ? 'var(--ink-3)' : 'var(--line-2)';
+    // A part an agent session edited stands out in every lens: a filled tile with a heavy outline, and its files under it.
+    const files = worked.get(v.id);
+    const stroke = unused ? 'var(--ink-3)' : st === 'failing' ? 'var(--red)' : st === 'stale' ? 'var(--amber)' : selected ? 'var(--ink)' : waiting ? 'var(--amber)' : strong || files ? 'var(--accent)' : st === 'verified' ? 'var(--ok)' : planned || building ? 'var(--ink-3)' : 'var(--line-2)';
     const dash = planned || building ? '6 5' : undefined;
-    const sw = waiting || st === 'verified' || st === 'failing' || st === 'stale' || selected || strong ? 2.2 : 1.4;
+    const sw = files ? 3 : waiting || st === 'verified' || st === 'failing' || st === 'stale' || selected || strong ? 2.2 : 1.4;
     let fill = unused ? 'var(--unused)' : planned ? 'var(--canvas)' : building ? 'url(#hatch)' : 'var(--tile)';
     if (lens === 'activity' && !planned) {
       const heat = Math.sqrt(activityCount(n, activityType).total / maxActivity);
       fill = `color-mix(in srgb, var(--heat) ${Math.round(heat * 55)}%, var(--tile))`;
-    } else if (strong && !planned) fill = 'var(--accent-bg)';
+    } else if ((strong || files) && !planned) fill = 'var(--accent-bg)';
     const w = v.hub ? HUB_W : TILE;
     const h = v.hub ? HUB_H : TILE;
     const badge = badgeFor(n);
-    const roleLines = wrap(n.role, 22, 2);
+    // A file's second line is its size, or what the agent changed in it.
+    const roleLines = wrap(n.file && files?.[0] ? sizeOf(files[0]) || n.role : n.role, 22, 2);
     const tech = techOf(n);
-    const op = (st === 'retiring' ? 0.45 : 1) * (on ? 1 : DIM) * (v.ghost && !strong && !selected ? 0.6 : 1);
+    // In the session view everything the agent has not touched steps back.
+    const aside = sessionMode && marks.size > 0 && !marks.has(v.id) && !selected;
+    const op = (st === 'retiring' ? 0.45 : 1) * (on ? 1 : DIM) * (v.ghost && !strong && !selected ? 0.6 : 1) * (aside ? 0.38 : 1);
     const stacked = n.children.length > 0;
     // Zoomed out, tiles are drawn larger than their layout slot so they stay readable.
     const boost = Math.min(1.7, Math.max(1, 0.72 / tf.k)) * (hot ? 1.06 : 1);
@@ -771,9 +889,10 @@ export function App() {
       <g key={v.id} className={`vn${hot ? ' hot' : ''}`} style={{ transform: `translate(${v.x}px, ${v.y}px)` }} opacity={op} {...nodeEvents(v)}>
         <g className="enter">
         <g className="boost" style={{ transform: `translate(${w / 2}px, ${h / 2}px) scale(${boost}) translate(${-w / 2}px, ${-h / 2}px)` }}>
-          <title>{`${n.id}: ${n.statusWhy}${n.tech.length ? ` Built with ${tech.slice(0, n.tech.length).join(', ')}.` : ''}${n.tags.length ? ` Tagged ${n.tags.join(', ')}.` : ''}${stacked ? ' Double-click to expand.' : ''}`}</title>
+          <title>{n.file ? (n.file.more ? n.statusWhy : `${n.file.path}${n.file.lines !== undefined ? `, ${n.file.lines} lines` : ''}${n.file.symbols ? `, ${n.file.symbols} symbols` : ''}${files ? '. Click to see what changed.' : ''}`) : `${n.id}: ${n.statusWhy}${n.tech.length ? ` Built with ${tech.slice(0, n.tech.length).join(', ')}.` : ''}${n.tags.length ? ` Tagged ${n.tags.join(', ')}.` : ''}${stacked ? ' Double-click to expand.' : ''}`}</title>
           {stacked && <rect x={6} y={6} width={w} height={h} rx={14} fill="var(--tile)" stroke={stroke} strokeWidth={1} strokeDasharray={dash} opacity={0.7} />}
           <rect className="tile" width={w} height={h} rx={14} fill={fill} stroke={stroke} strokeWidth={sw} strokeDasharray={dash} />
+          {marks.get(v.id) === 'now' && <rect className="live-ring" x={-6} y={-6} width={w + 12} height={h + 12} rx={19} />}
           {v.hub ? (
             <>
               <Icon x={16} y={(h - 28) / 2} width={28} height={28} color={color} stroke={1.6} opacity={planned ? 0.55 : 1} />
@@ -785,16 +904,21 @@ export function App() {
             <>
               <Icon x={(TILE - 28) / 2} y={(TILE - 28) / 2} width={28} height={28} color={unused ? 'var(--ink-3)' : color} stroke={1.6} opacity={planned || unused ? 0.5 : 1} />
               <text className={planned || unused ? 'n-name planned' : 'n-name'} x={TILE / 2} y={TILE + 17} textAnchor="middle" style={st === 'retiring' ? { textDecoration: 'line-through' } : undefined}>{clip(n.name, 19)}</text>
-              {roleLines.map((l, i) => (
-                <text key={i} className="n-role" x={TILE / 2} y={TILE + 32 + i * 13} textAnchor="middle" style={{ fill: planned ? 'var(--ink-3)' : color }}>{l}</text>
-              ))}
-              <TechChips names={tech} x={TILE / 2} y={TILE + 36 + roleLines.length * 13} room={150} align="middle" />
+              {files && !n.file ? <FileRows files={files} x={TILE / 2} y={TILE + 27} open={setDiffPath} /> : (
+                <>
+                  {roleLines.map((l, i) => (
+                    <text key={i} className="n-role" x={TILE / 2} y={TILE + 32 + i * 13} textAnchor="middle" style={{ fill: planned ? 'var(--ink-3)' : color }}>{l}</text>
+                  ))}
+                  <TechChips names={tech} x={TILE / 2} y={TILE + 36 + roleLines.length * 13} room={150} align="middle" />
+                </>
+              )}
             </>
           )}
           {waiting && <Tag x={w / 2} y={h} text="to approve" warn />}
           {!waiting && planned && <Tag x={w / 2} y={h} text="planned" />}
           {!waiting && unused && <Tag x={w / 2} y={h} text="unused" />}
           {!waiting && building && <Tag x={w / 2} y={h} text="building" accent />}
+          {marks.has(v.id) && <circle className={`live-mark ${marks.get(v.id)}`} cx={3} cy={3} r={5.5}><title>{marks.get(v.id) === 'now' ? 'An agent is working here' : 'Edited by an agent session'}</title></circle>}
           {st === 'verified' && <StatusDot x={w - 3} color="var(--ok)" glyph="✓" />}
           {st === 'failing' && <StatusDot x={w - 3} color="var(--red)" glyph="!" />}
           {st === 'stale' && <StatusDot x={w - 3} color="var(--amber)" glyph="≠" />}
@@ -825,8 +949,9 @@ export function App() {
   const stepEdge: Edge | null = rawStepEdge && flow?.steps[step]?.reply ? { ...rawStepEdge, shapes: [], returns: rawStepEdge.returns } : rawStepEdge;
 
   return (
-    <div className="app">
-      <header className="top">
+    <div className={sessionMode ? 'app session' : 'app'}>
+      {sessionMode && <SessionTop system={graph.system.name} session={session} sessions={live?.sessions.slice(0, 4) ?? []} pick={setSessionPick} ix={ix} />}
+      {!sessionMode && <header className="top">
         <div className="top-row">
           <span className="sysname">{graph.system.name}</span>
           <nav className="crumbs" aria-label="Zoom level">
@@ -868,7 +993,7 @@ export function App() {
           <SettingsButton open={settingsOpen} setOpen={setSettingsOpen} changed={changedFromDefault(settings)} />
           {settingsOpen && <SettingsDialog s={settings} set={updateSettings} plannedCount={plannedCount} onClose={closeSettings} />}
         </div>
-      </header>
+      </header>}
       <div className="main">
         <div className="canvas">
           <svg
@@ -949,6 +1074,7 @@ export function App() {
               }}
             />
           )}
+          {diffPath && <DiffView path={diffPath} file={diffFile} onClose={closeDiff} />}
           {lens === 'flow' && flow && (
             <div className="flowbar" role="status">
               <span className="flowbar-dot" />
@@ -956,18 +1082,30 @@ export function App() {
               <button onClick={clearPicks} aria-label="Close the flow">Close ✕</button>
             </div>
           )}
-          <div className="hint">
+          {live && live.sessions.length > 0 && !docPath && !sessionMode && (
+            <LiveBar
+              live={live}
+              graph={graph}
+              ix={ix}
+              follow={followLive}
+              setFollow={setFollowLive}
+              goTo={goTo}
+              openChange={(id) => { clearPicks(); setSel(null); setShowProblems(false); setLens('work'); setChangeId(id); }}
+              openDiff={setDiffPath}
+            />
+          )}
+          {!sessionMode && <div className="hint">
             Scroll or drag to pan · pinch or Ctrl/⌘ + scroll to zoom · {zoomOpens ? 'zoom into' : 'double-click'} a stacked node to open it
             {view && view.hiddenLibraries > 0 && !showLibs ? ` · ${view.hiddenLibraries} shared-code node${view.hiddenLibraries === 1 ? '' : 's'} hidden` : ''}
             {hidePlanned ? ` · built parts only${view && view.hiddenPlanned > 0 ? ` (${view.hiddenPlanned} planned hidden)` : ''}; change in Settings` : ''}
-          </div>
+          </div>}
           <div className="zoomctl">
             <button onClick={() => { const c = center(); zoomAt(c.x, c.y, 1.25, true); }} aria-label="Zoom in">+</button>
             <span className="zoomval" aria-live="polite">{Math.round(tf.k * 100)}%</span>
             <button onClick={() => { const c = center(); zoomAt(c.x, c.y, 0.8, true); }} aria-label="Zoom out">−</button>
             <button onClick={() => view && fit(view)}>Fit</button>
           </div>
-          {legend && <div className="legend" aria-label="Legend">
+          {legend && !sessionMode && <div className="legend" aria-label="Legend">
             <span><i className="lg verified" />Verified by tests</span>
             <span><i className="lg" />Built</span>
             <span><i className="lg building" />Building</span>
@@ -976,10 +1114,11 @@ export function App() {
             <span><i className="lg unused" />Unused (dead code)</span>
             <span><i className="lg stale" />Stale</span>
             <span><i className="lg failing" />Failing</span>
+            {marks.size > 0 && <span><i className="lg live" />Agent at work</span>}
             <span><b>▶</b> call&nbsp;&nbsp;<b>›</b> one-way message&nbsp;&nbsp;<b>- -</b> planned link</span>
           </div>}
         </div>
-        <Panel
+        {!sessionMode && <Panel
           graph={graph}
           ix={ix}
           view={view}
@@ -1009,9 +1148,35 @@ export function App() {
           isInside={isInside}
           docPath={docPath}
           openDoc={setDocPath}
-        />
+        />}
       </div>
+      {sessionMode && <SessionSheet session={session} graph={graph} ix={ix} goTo={(id) => { setDiffPath(null); goTo(id); }} openDiff={setDiffPath} />}
     </div>
+  );
+}
+
+/** The files an agent session edited in a part, under its tile: up to three, each opening what changed in it. */
+function FileRows({ files, x, y, open }: { files: LiveFile[]; x: number; y: number; open: (path: string) => void }) {
+  const W = 168;
+  const shown = files.slice(0, 3);
+  return (
+    <g transform={`translate(${x} ${y})`}>
+      {shown.map((f, i) => {
+        const size = sizeOf(f);
+        const name = f.path.split('/').pop() ?? f.path;
+        return (
+          <g key={f.path} className="n-file" transform={`translate(0 ${i * 18})`} onClick={(e) => { e.stopPropagation(); open(f.path); }} onDoubleClick={(e) => e.stopPropagation()}>
+            <title>{`${f.path}: ${f.edits} edit${f.edits === 1 ? '' : 's'}${size ? `, ${size}` : ''}. Click to see what changed.`}</title>
+            <rect x={-W / 2} y={0} width={W} height={16} rx={5} />
+            <text x={-W / 2 + 7} y={8.5} dominantBaseline="central">{clip(name, size ? 15 : 24)}</text>
+            {size && (f.fresh || f.added === undefined
+              ? <text className="n-file-size" x={W / 2 - 7} y={8.5} dominantBaseline="central" textAnchor="end">{f.fresh ? `new +${f.added}` : size}</text>
+              : <text className="n-file-size" x={W / 2 - 7} y={8.5} dominantBaseline="central" textAnchor="end"><tspan className="plus">+{f.added}</tspan> <tspan className="minus">−{f.removed ?? 0}</tspan></text>)}
+          </g>
+        );
+      })}
+      {files.length > shown.length && <text className="n-role" x={0} y={shown.length * 18 + 10} textAnchor="middle">and {files.length - shown.length} more file{files.length - shown.length === 1 ? '' : 's'}</text>}
+    </g>
   );
 }
 

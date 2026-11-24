@@ -49,6 +49,60 @@ export function openingAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
   return !env.CI && !env.VITEST && !['1', 'true', 'yes'].includes(String(env.ARMATURE_NO_OPEN ?? '').toLowerCase());
 }
 
+/** The session view of one session: the page made for a pane beside the agent. */
+export function sessionUrl(base: string, session: string): string {
+  return `${base.replace(/\/$/, '')}/?view=session${session ? `&session=${encodeURIComponent(session)}` : ''}`;
+}
+
+/** The address of the viewer for this repo, started when none runs. Null when none could be started. */
+export function ensureViewer(root: string): string | null {
+  return (readRunning(root) ?? startViewer(root))?.url ?? null;
+}
+
+/** How many pages show the session view right now. Null when the viewer does not answer in time. */
+export async function watchers(base: string): Promise<number | null> {
+  try {
+    const res = await fetch(`${base.replace(/\/$/, '')}/watchers`, { signal: AbortSignal.timeout(800) });
+    const n = ((await res.json()) as { session?: unknown }).session;
+    return typeof n === 'number' ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface ProgressDeps {
+  allowed: () => boolean;
+  viewer: (root: string) => string | null;
+  watchers: (base: string) => Promise<number | null>;
+  open: (url: string) => void;
+}
+
+/**
+ * The person watches a session on the diagram, so the progress view is open before the session's
+ * first edit. `first` is true on that edit: with no view open, the edit is sent back once with the
+ * address to open. On a later edit, if the agent could not open it, the hook opens it in the
+ * default browser, once (`fallback`). Returns the reason to send the edit back, or null to let it through.
+ */
+export async function progressGate(root: string, session: string, first: boolean, fallback: () => boolean, deps: ProgressDeps = { allowed: openingAllowed, viewer: ensureViewer, watchers, open: openBrowser }): Promise<string | null> {
+  if (!session || !deps.allowed()) return null;
+  if (!first && !fallback()) return null;
+  const base = deps.viewer(root);
+  if (!base) return null;
+  // A viewer that does not answer must not hold an edit back.
+  if ((await deps.watchers(base)) !== 0) return null;
+  const url = sessionUrl(base, session);
+  if (!first) {
+    deps.open(url);
+    return null;
+  }
+  return (
+    `Armature shows the person what this session does on the diagram, so the progress view is opened before the first edit: ${url}\n` +
+    `- In the Claude desktop app: open that address in the browser pane (the preview_start tool with "url"), and leave it open.\n` +
+    `- With no browser tool: say so in one line and go on. The next edit opens it in the person's default browser.\n` +
+    `Then make this edit again. This is asked once per session.`
+  );
+}
+
 export function changeUrl(base: string, change: string): string {
   return `${base.replace(/\/$/, '')}/?lens=work&change=${encodeURIComponent(change)}`;
 }
@@ -75,7 +129,7 @@ function startViewer(root: string): Running | null {
   return null;
 }
 
-function openBrowser(url: string): void {
+export function openBrowser(url: string): void {
   const [cmd, args] =
     process.platform === 'darwin' ? ['open', [url]] : process.platform === 'win32' ? ['cmd', ['/c', 'start', '""', url]] : ['xdg-open', [url]];
   try {

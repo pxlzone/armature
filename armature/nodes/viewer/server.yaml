@@ -10,13 +10,30 @@ accepts:
     route: GET /graph.json
     gives: Graph
     auth: local
-    note: Bound to 127.0.0.1, so only this machine can reach it.
+    note: Bound to 127.0.0.1, so only this machine can reach it. The graph carries each node's files, with their size and the files they import, for the map to draw inside the node.
   - id: doc
     via: http
     route: GET /doc
     gives: MarkdownText
     auth: local
     note: One Markdown file of the repo, by path. Nothing outside the repo and nothing that is not Markdown.
+  - id: live
+    via: http
+    route: GET /live.json
+    gives: Live
+    auth: local
+    note: What agent sessions are doing right now. The page asks again each time the events stream says "live".
+  - id: watchers
+    via: http
+    route: GET /watchers
+    auth: local
+    note: How many pages show the session view right now. A hook asks before a session's first edit.
+  - id: diff
+    via: http
+    route: GET /diff
+    gives: DiffText
+    auth: local
+    note: What one file holds that the last commit does not, by path. Only for a file an agent session shown on the page edited.
   - id: approve
     via: http
     route: POST /approve
@@ -32,6 +49,7 @@ accepts:
 reads: [project.model#documents]
 calls:
   - to: core.compiler#compile
+  - to: core.answers#live
   - to: core.code-graph#index
   - to: core.model-tools#edit
     note: approveChange, for the approve request only.

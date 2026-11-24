@@ -12,5 +12,7 @@ holds:
     note: Recent commits and the files each changed.
   - id: summaries
     note: One-line file summaries written by a model.
+  - id: live
+    note: One line per step of an agent session (a file read or edited, the name of a command, a stop), for the viewer. Trimmed as it grows.
   - id: hook-state
     note: What a hook has already said in a session, and an approval waiting to be recorded.

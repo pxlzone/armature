@@ -382,3 +382,98 @@ button.pill { background: none; cursor: pointer; font: inherit; font-size: 11.5p
 .notice.err { background: var(--red-bg); border-left-color: var(--red); }
 .btn:disabled { opacity: 0.5; cursor: default; }
 .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Agent sessions: the card over the map, and the marks on the blocks they touch. */
+.livebar { position: absolute; right: 14px; top: 12px; z-index: 4; width: min(330px, calc(100% - 28px)); display: flex; flex-direction: column; gap: 8px; animation: rise 160ms var(--ease-in) backwards; }
+.live { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.1); overflow: hidden; }
+.live.on { border-color: var(--accent); }
+.live-head { display: flex; align-items: center; gap: 9px; width: 100%; border: 0; background: none; padding: 9px 12px; cursor: pointer; text-align: left; font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.live.on .live-head { color: var(--ink); }
+.live-what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.live-dot { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--ink-3); flex: none; }
+.live.on .live-dot { background: var(--accent); border-color: var(--accent); animation: livepulse 1.6s ease-in-out infinite; }
+.live-body { padding: 0 12px 10px; display: flex; flex-direction: column; gap: 7px; font-size: 12.5px; color: var(--ink-2); }
+.live-file { font-family: var(--mono); font-size: 11.5px; color: var(--ink); overflow-wrap: anywhere; }
+.live-prompt { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.live-change { display: flex; justify-content: space-between; gap: 10px; border: 1px solid var(--line); background: var(--canvas); border-radius: 8px; padding: 5px 9px; cursor: pointer; font-size: 12.5px; color: var(--ink); text-align: left; }
+.live-change:hover { border-color: var(--accent); }
+.live-count { color: var(--ink-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.live-nodes { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.live-nodes .chip { font-size: 12px; padding: 2px 9px; display: inline-flex; gap: 6px; align-items: center; }
+.live-nodes .chip:hover { border-color: var(--accent); color: var(--accent); }
+.live-nodes .chip b { color: var(--accent); font-variant-numeric: tabular-nums; }
+.live-more { font-size: 12px; color: var(--ink-3); }
+.live-follow { align-self: flex-end; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); background: color-mix(in srgb, var(--panel) 88%, transparent); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px 3px 7px; cursor: pointer; }
+.live-follow input { accent-color: var(--accent); margin: 0; }
+.live-ring { fill: none; stroke: var(--accent); stroke-width: 2.5; pointer-events: none; animation: livepulse 1.6s ease-in-out infinite; }
+.live-mark { fill: var(--accent); stroke: var(--canvas); stroke-width: 2; }
+.live-mark.touched { fill: var(--canvas); stroke: var(--accent); }
+.lg.live { border-radius: 50%; border-color: var(--accent); background: var(--accent); }
+@keyframes livepulse { 50% { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) { .live-ring, .live.on .live-dot { animation: none; } }
+
+/* The session view ("?view=session"): the map follows the agent, with its steps underneath. Made for a narrow pane. */
+/* The map and the sheet under it share the height in halves. */
+.app.session { grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr); }
+.app.session .main { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+.stop { padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.stop-now { display: flex; align-items: center; gap: 9px; min-width: 0; font-size: 14px; font-weight: 600; color: var(--ink-2); }
+.stop-now.on { color: var(--ink); }
+.stop-now.on .live-dot { background: var(--accent); border-color: var(--accent); animation: livepulse 1.6s ease-in-out infinite; }
+.stop-what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stop a.chip { text-decoration: none; flex: none; font-weight: 400; font-size: 12px; }
+.stop-pick { display: flex; gap: 5px; flex-wrap: wrap; }
+.stop-pick .chip { font-size: 12px; padding: 2px 9px; }
+.ssheet { border-top: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; font-size: 12.5px; }
+.ssheet-task { margin: 0; color: var(--ink-2); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.ssheet-none { margin: 0; color: var(--ink-2); }
+.ssheet-change > div:first-child { display: flex; justify-content: space-between; gap: 10px; }
+.ssheet-steps { list-style: none; margin: 0; padding: 0 14px 6px; overflow-y: auto; overflow-anchor: none; min-height: 0; flex: 1; }
+.ssheet-steps li { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; border-top: 1px solid var(--line); color: var(--ink-2); min-width: 0; }
+.ssheet-steps li.on { color: var(--ink); }
+.ssheet-steps time { font-family: var(--mono); font-size: 11px; color: var(--ink-3); flex: none; font-variant-numeric: tabular-nums; }
+.ssheet-verb { flex: none; width: 46px; font-weight: 600; }
+.ssheet-steps li.on .ssheet-verb { color: var(--accent); }
+.ssheet-what { flex: 1; min-width: 0; font-family: var(--mono); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ssheet-part { flex: none; border: 0; background: var(--accent-bg); color: var(--accent); border-radius: 999px; padding: 1px 8px; font-size: 11.5px; cursor: pointer; }
+.ssheet-part:hover { background: var(--accent); color: var(--panel); }
+a.live-follow { text-decoration: none; padding-left: 10px; }
+a.live-follow:hover { border-color: var(--accent); color: var(--accent); }
+@media (prefers-reduced-motion: reduce) { .stop-now.on .live-dot { animation: none; } }
+
+/* Files an agent session edited: rows under a tile on the map, rows in the card and the sheet, and the diff over the map. */
+.n-file { cursor: pointer; }
+.n-file rect { fill: var(--panel); stroke: var(--accent); stroke-width: 1; }
+.n-file:hover rect { fill: var(--accent-bg); stroke-width: 1.6; }
+.n-file text { font-family: var(--mono); font-size: 9.5px; fill: var(--ink); }
+.n-file-size { font-weight: 700; }
+.plus { color: var(--ok); fill: var(--ok); }
+.minus { color: var(--red); fill: var(--red); }
+.far .n-file { display: none; }
+.diffview { position: absolute; inset: 0; z-index: 7; background: var(--panel); display: flex; flex-direction: column; min-width: 0; animation: rise 160ms var(--ease-in) backwards; }
+.diff-head { display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+.diff-title { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.diff-title b { font-family: var(--mono); font-size: 13px; }
+.diff-title span { font-family: var(--mono); font-size: 11px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diff-body { flex: 1; min-height: 0; overflow: auto; font-family: var(--mono); font-size: 11.5px; line-height: 1.55; padding: 6px 0 20px; }
+.dl { white-space: pre; padding: 0 14px; min-width: max-content; }
+.dl.add { background: color-mix(in srgb, var(--ok) 16%, transparent); }
+.dl.del { background: color-mix(in srgb, var(--red) 14%, transparent); }
+.dl.hunk { color: var(--ink-3); background: var(--bg); margin-top: 6px; }
+.diff-note { font-family: var(--sans); font-size: 13px; color: var(--ink-2); padding: 14px; margin: 0; }
+
+/* The sheet's sections: the top lines stay, the steps and the changed files each fold away and scroll on their own. */
+.ssheet-top { flex: none; padding: 10px 14px 8px; display: flex; flex-direction: column; gap: 8px; }
+.ssheet-none { padding: 12px 14px; }
+.live-nodes .chip.worked { border-color: var(--accent); color: var(--ink); background: var(--accent-bg); }
+.steps-sec { display: flex; flex-direction: column; min-height: 0; flex: 0 1 auto; border-top: 1px solid var(--line); }
+.steps-sec.open { flex: 1 1 0; min-height: 64px; }
+.sec-head { flex: none; display: flex; align-items: center; gap: 6px; width: 100%; border: 0; background: var(--bg); padding: 4px 10px; cursor: pointer; text-align: left; color: var(--ink-2); font-size: 11px; }
+.sec-title { font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
+.sec-count { min-width: 17px; padding: 0 5px; border-radius: 999px; background: var(--line); color: var(--ink); font-size: 10.5px; font-weight: 600; text-align: center; line-height: 16px; }
+.tree-chev { flex: none; width: 9px; display: inline-block; text-align: center; color: var(--ink-3); font-size: 13px; line-height: 1; transition: transform 100ms var(--ease); }
+.tree-chev.open { transform: rotate(90deg); }
+.tree-size { flex: none; font-family: var(--mono); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ssheet-what.link { border: 0; background: none; padding: 0; cursor: pointer; text-align: left; color: inherit; text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 2px; }
+.ssheet-what.link:hover { color: var(--accent); text-decoration-color: var(--accent); }
+

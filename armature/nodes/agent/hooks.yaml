@@ -13,7 +13,7 @@ accepts:
     takes: HookInput
     gives: GateDecision
     auth: local
-    note: session-start, prompt, pre-write, pre-bash, pre-plan, post-edit and stop.
+    note: session-start, prompt, pre-write, pre-bash, pre-plan, post-edit, note and stop. Each also writes its step down for the viewer; note, after a file is read, does only that and is answered by the launcher. Before a session's first edit, pre-write asks a running viewer over HTTP whether the progress view is open; it loads no viewer code.
 
 reads:
   - project.model#system
@@ -25,6 +25,7 @@ writes: [project.cache#hook-state]
 calls:
   - to: core.compiler#compile
   - to: core.answers#text
+  - to: core.answers#live
   - to: core.code-graph#index
   - to: core.model-tools#edit
     note: Records an approval after the person confirmed the edit.
@@ -36,6 +37,10 @@ rules:
   - What the gate cannot see before the fact, the checker must report after it.
 
 requirements:
+  - id: progress-view-first
+    text: A session's first edit is sent back once to have the progress view opened, unless one is open; an edit is never held back when the viewer does not answer or opening is turned off.
+    tests: test/live.test.ts
+    match: the progress view is open before a session edits
   - id: approval-is-asked
     text: An edit that approves a change is put to the person, however the edit is written.
     tests: test/gate-holes.test.ts
