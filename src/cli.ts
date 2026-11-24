@@ -83,7 +83,7 @@ Changing the model
                                 requirement, shape, flow or change, and rewrite every reference to it
 
 Viewing
-  armature view [--port n] [--github]   Local diagram with live reload
+  armature view [--port n] [--github] [--idle min]  Local diagram with live reload (--idle: stop after min minutes with no page open)
   armature export [file] [--github]     One self-contained HTML file
   armature build                        Write armature/.cache/graph.json
 
@@ -104,7 +104,7 @@ function parse(argv: string[]): { cmd: string; args: string[]; flags: Record<str
   const [cmd = 'help', ...rest] = argv;
   const args: string[] = [];
   const flags: Record<string, string | boolean> = {};
-  const valued = new Set(['root', 'depth', 'port', 'kind', 'days', 'budget', 'files', 'node', 'limit', 'n', 'skip', 'marketplace', 'ref', 'only', 'fail-on', 'by', 'since']);
+  const valued = new Set(['root', 'depth', 'port', 'kind', 'days', 'budget', 'files', 'node', 'limit', 'n', 'skip', 'marketplace', 'ref', 'only', 'fail-on', 'by', 'since', 'idle']);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a.startsWith('--')) {
@@ -455,7 +455,7 @@ async function main(): Promise<void> {
     }
     case 'view': {
       await buildCodeIndex(root).catch(() => undefined);
-      const url = await serve(root, Number(flags.port) || 4747, flags.github === true);
+      const url = await serve(root, Number(flags.port) || 4747, flags.github === true, { idleMinutes: Number(flags.idle) || undefined });
       console.log(`Viewer for ${path.basename(root)} at ${url}  (Ctrl+C to stop; reloads when armature/ changes)`);
       return;
     }

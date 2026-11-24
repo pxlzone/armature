@@ -951,7 +951,7 @@ export function planModeNote(dir: string = MODEL_DIR, planPath = newPlanPath(`${
     `You are planning. In this repo a plan is a change to the architecture model in ${dir}/:\n` +
     '1. Run "armature context" for the task and "armature impact <ref>" on every node, interface and shape the work touches.\n' +
     `2. Give the plan a "Model change" section: the change id, new nodes with their "code:" globs, new or changed interfaces, links, shapes, flows and requirements, and the plan document ${planPath}. If the work changes none of these, write "None" and why.\n` +
-    `3. Make the first step after approval writing those files: the planned elements tagged "change: <id>" (or "modify: <id>" for what exists and changes), the plan document with a header (kind: plan, change: <id>), and ${dir}/changes/<id>.yaml with "state: proposed". Run "armature check". Then set "state: approved" as the last edit: the person is asked to confirm it, and what the change holds at that moment is what they approve. Code comes after.\n` +
+    `3. Make the first step after approval writing those files: the planned elements tagged "change: <id>" (or "modify: <id>" for what exists and changes), the plan document with a header (kind: plan, change: <id>), and ${dir}/changes/<id>.yaml with "state: proposed". Run "armature check". Then set "state: approved" as the last edit: the person is asked to confirm it with the change's diagram opened beside the prompt, and what the change holds at that moment is what they approve. Write all of it before that edit, without stopping to ask about parts. Code comes after.\n` +
     '4. Keep what must hold in view: "armature impact <node>" lists boundaries, auth, allow-lists, data policy, secrets and rules. If the work adds an entry point, sends tagged data out of the system or needs a credential, run "armature surface" and the armature-threat skill, and put the answers in the model: "auth:" and "only:" on interfaces, "secrets:" on nodes, a requirement of kind security for each entry point that reaches sensitive data.\n' +
     'The armature-design skill has the format. A plan without the "Model change" section is sent back, and approval is refused while the change has security errors.'
   );
@@ -966,7 +966,7 @@ export function planReminder(dir: string = MODEL_DIR): string {
 export function planningNote(dir: string = MODEL_DIR, planPath = newPlanPath(`${dir}/docs`, dir)): string {
   return (
     'This prompt asks for a plan or a design. In this repo that is a change in the architecture model, not a loose document: follow the armature-design skill ' +
-    `(${dir}/changes/<id>.yaml with "state: proposed", planned elements tagged with it, and the plan in ${planPath}), run "armature check", then ask the person to review it in "armature view" before any code. ` +
+    `(${dir}/changes/<id>.yaml with "state: proposed", planned elements tagged with it, and the plan in ${planPath}), run "armature check" until it is clean, then set "state: approved" as the last edit. That is the one question for the person: the change's diagram opens beside the prompt. Do not stop to ask about parts before it, and write no code before they confirm. ` +
     'Check "armature impact <node>" for what must hold, and "armature surface" if the work adds an entry point, sends tagged data out or needs a credential.'
   );
 }

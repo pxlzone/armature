@@ -66,7 +66,13 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [focus, setFocus] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [lens, setLens] = useState<Lens>('structure');
+  // "?lens=work&change=<id>" opens on one change: the approval prompt links here.
+  const linked = useMemo(() => {
+    const q = new URLSearchParams(window.location.search);
+    const l = q.get('lens');
+    return { lens: LENSES.some(([id]) => id === l) ? (l as Lens) : null, change: q.get('change') };
+  }, []);
+  const [lens, setLens] = useState<Lens>(linked.lens ?? (linked.change ? 'work' : 'structure'));
   const [sel, setSel] = useState<Selection>(null);
   const [hover, setHover] = useState<string | null>(null);
   const [hoverEdge, setHoverEdge] = useState<string | null>(null);
@@ -79,7 +85,7 @@ export function App() {
   const [step, setStep] = useState(-1);
   const [playing, setPlaying] = useState(false);
   const [shapeId, setShapeId] = useState<string | null>(null);
-  const [changeId, setChangeId] = useState<string | null>(null);
+  const [changeId, setChangeId] = useState<string | null>(linked.change);
   const [activityType, setActivityType] = useState<string | null>(null);
   const [view, setView] = useState<View | null>(null);
   const [version, setVersion] = useState(0);
@@ -360,6 +366,19 @@ export function App() {
     glideTo([...flowSet.nodes], [...flowSet.edges]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flowId, version, !!flowSet]);
+
+  // Opened from an approval prompt: once the map is laid out, bring the change into view at a readable size.
+  const linkZoom = useRef(!!linked.change);
+  useEffect(() => {
+    if (!linkZoom.current || !view || !lensSet || !('nodes' in lensSet) || lensSet.nodes.size === 0) return;
+    const set = lensSet;
+    const t = setTimeout(() => {
+      linkZoom.current = false;
+      glideTo([...set.nodes], [...set.edges]);
+    }, 150);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, lensSet]);
 
   // While a flow is stepped through, the camera follows the active step.
   const followKey = lens === 'flow' && follow && flow && step >= 0 && lensSet ? `${flow.id}|${step}|${version}` : '';
