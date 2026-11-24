@@ -26959,8 +26959,8 @@ function guardsOfFile(rel, text, up = {
 	if (!data || typeof data !== "object") return out;
 	const ofNode = (id, d, around) => {
 		if (!d || typeof d !== "object") return;
-		if (d.protect === true) guards.add(`protect ${id}`);
-		if (d.client === true) guards.add(`client ${id}`);
+		if (d.protect === true && !around.protect) guards.add(`protect ${id}`);
+		if (d.client === true && !around.client) guards.add(`client ${id}`);
 		if (d.protect === false && around.protect) allowances.add(optOut("protect", id));
 		if (d.client === false && around.client) allowances.add(optOut("client", id));
 		for (const b of Array.isArray(d.never) ? d.never : []) {
@@ -27090,7 +27090,13 @@ function removalGate(root, paths, doing, own) {
 }
 /** How many lost guards a question lists: the permission prompt is a small window, and the rest is cut off. */
 var ASK_ITEMS = 5;
-function weakenAsk(rel, lost, lead = `This edit to ${rel} weakens`) {
+/**
+* Losses that do not stop the session: a plain requirement taken out, or a warning accepted. Neither
+* opens a way around the gate or the security checks, and "armature diff" lists both for the reviewer.
+*/
+var REVIEW_ONLY = /^(?:no longer: requirement (?!.*\(security\)$)|now allowed: accept )/;
+function weakenAsk(rel, all, lead = `This edit to ${rel} weakens`) {
+	const lost = all.filter((x) => !REVIEW_ONLY.test(x));
 	if (!lost.length) return null;
 	return {
 		decision: "ask",

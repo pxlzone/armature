@@ -294,3 +294,29 @@ describe('the context pack', () => {
     expect(listed.length).toBeLessThanOrEqual(3);
   });
 });
+
+describe('what the gate asks about', () => {
+  beforeEach(() => {
+    write('armature/nodes/web/_group.yaml', lines('kind: group', 'role: browser code', 'client: true'));
+    write('armature/nodes/web/page.yaml', lines('kind: app', 'role: page', 'client: true', 'code: [src/web/**]', 'requirements:', '  - id: renders', '    text: renders', '  - id: no-token', '    kind: security', '    text: never holds a token'));
+  });
+  const edit = (old: string, now: string) => writeGate(root, { file_path: 'armature/nodes/web/page.yaml', old_string: old, new_string: now });
+
+  it('does not ask when a node drops a client line its group already sets', () => {
+    expect(edit('client: true\n', '')).toBeNull();
+  });
+
+  it('asks when the group itself stops being a client', () => {
+    expect(writeGate(root, { file_path: 'armature/nodes/web/_group.yaml', old_string: 'client: true\n', new_string: '' })).toMatchObject({ decision: 'ask' });
+  });
+
+  it('asks for a security requirement, not a plain one', () => {
+    expect(edit('  - id: renders\n    text: renders\n', '')).toBeNull();
+    expect(edit('  - id: no-token\n    kind: security\n    text: never holds a token\n', '')).toMatchObject({ decision: 'ask' });
+  });
+
+  it('does not ask for an accepted warning', () => {
+    write('armature/system.yaml', lines('name: T', 'headline: t'));
+    expect(writeGate(root, { file_path: 'armature/system.yaml', old_string: 'headline: t\n', new_string: 'headline: t\naccept:\n  - { code: no-shape, ref: web.page, reason: wiring }\n' })).toBeNull();
+  });
+});
