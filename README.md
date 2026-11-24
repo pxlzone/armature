@@ -343,7 +343,7 @@ The skills describe how to plan. The gate makes sure it happens. It runs as Clau
 | sets `gate: off`, or edits the approval record | asks you |
 | sets a change to `approved` that has security errors | refuses; otherwise the question put to you lists the entry points, outgoing sensitive data and secrets the change adds |
 | edits, moves or deletes a file of a node with `protect: true` | refuses unless an approved change adds or modifies the node |
-| removes a guard (`never:`, `auth:`, `only:`, `protect`, a tag on a field, a requirement, a data policy), changes an `auth:`, adds a name to an `only:` list, an `ignore:`, `accept:` or allowed destination, leaves a protected file unowned, or takes the hooks out of the Claude Code settings | asks you, listing what is lost. `armature diff` lists the same under "Guards removed" for the reviewer |
+| removes a guard (`never:`, `auth:`, `only:`, `protect`, a tag on a field, a security requirement, a data policy), changes an `auth:`, adds a name to an `only:` list, an `ignore:` or allowed destination, leaves a protected file unowned, or takes the hooks out of the Claude Code settings | asks you, listing what is lost. `armature diff` lists the same under "Guards removed" for the reviewer. Removing another requirement or adding an `accept:` entry is not asked about; `armature diff` still lists it. Nor is dropping a `protect` or `client` that the node around it already sets |
 | runs a shell command that would do any of the above | does the same: it reads redirects, `tee`, `touch`, `cp`, `mv`, `rm`, in-place `sed`, writes to change files and deletions of model files, and refuses writing a model or settings file from the shell |
 
 You approve a change by confirming the agent's edit, or yourself:
