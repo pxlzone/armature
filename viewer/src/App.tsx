@@ -6,6 +6,7 @@ import { Panel } from './Panel.tsx';
 import { colorOf, iconOf } from './icons.tsx';
 import { Reader, docsFor } from './Docs.tsx';
 import { DiffView, LiveBar, SessionSheet, SessionTop, editedPaths, editedSpots, liveFiles, liveMarks, liveNode, sizeOf } from './Live.tsx';
+import { applyStyle } from './theme.ts';
 import { SettingsButton, SettingsDialog, changedFromDefault, loadSettings, saveSettings, type ViewSettings } from './Settings.tsx';
 
 export type Lens = 'structure' | 'flow' | 'data' | 'tests' | 'work' | 'review' | 'docs' | 'activity' | 'code' | 'rules';
@@ -191,6 +192,12 @@ export function App() {
   useEffect(() => {
     if (graph) document.title = `${graph.system.name} architecture`;
   }, [graph]);
+
+  // Colours: the model's style: block, or the theme and palette picked in Settings.
+  const modelStyle = graph?.system.style;
+  useEffect(() => {
+    applyStyle(modelStyle, settings);
+  }, [modelStyle, settings.theme, settings.palette]);
 
   useEffect(() => {
     if (graph && ix && focus && !ix.nodes.has(focus)) setFocus(null);
@@ -991,7 +998,7 @@ export function App() {
             ) : 'No problems'}
           </button>
           <SettingsButton open={settingsOpen} setOpen={setSettingsOpen} changed={changedFromDefault(settings)} />
-          {settingsOpen && <SettingsDialog s={settings} set={updateSettings} plannedCount={plannedCount} onClose={closeSettings} />}
+          {settingsOpen && <SettingsDialog s={settings} set={updateSettings} plannedCount={plannedCount} modelPalette={modelStyle?.palette} onClose={closeSettings} />}
         </div>
       </header>}
       <div className="main">

@@ -11,6 +11,7 @@ code:
   - src/docs.ts
   - src/deploy.ts
   - src/repo.ts
+  - src/style.ts
   - schemas/**
 tests:
   - test/compile.test.ts
@@ -54,7 +55,7 @@ rules:
   - Status is computed. Never add a field in which a person types that something is built, verified or current.
   - A check that cannot look says "unchecked". It never passes silently and never guesses a finding.
   - A new warning code needs an entry in WARNING_INFO (src/types.ts) and a mention in SPEC.md section 8.
-  - src/types.ts and src/refs.ts are imported by the viewer. Keep them free of Node imports.
+  - src/types.ts, src/refs.ts and src/style.ts are imported by the viewer. Keep them free of Node imports.
 
 requirements:
   - id: status-is-computed

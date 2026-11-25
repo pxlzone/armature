@@ -2,9 +2,14 @@
 // Choices are remembered per browser.
 import { useEffect, useRef } from 'react';
 import { IconSettings, IconX } from '@tabler/icons-react';
+import { PALETTES } from '../../src/style.ts';
 
 export type LineMode = 'auto' | 'merged' | 'separate';
 export type Motion = 'off' | 'active' | 'all';
+/** auto: what the model's style: says, else the reader's system. */
+export type Theme = 'auto' | 'light' | 'dark';
+/** model: the model's style: block. Any other value is a built-in palette, for this browser only. */
+export type Palette = 'model' | string;
 
 export interface ViewSettings {
   hidePlanned: boolean;
@@ -14,6 +19,8 @@ export interface ViewSettings {
   zoomOpens: boolean;
   follow: boolean;
   legend: boolean;
+  theme: Theme;
+  palette: Palette;
 }
 
 // Only choices that differ from the defaults are stored, so a changed default reaches everyone who
@@ -22,7 +29,7 @@ const KEY = 'armature.settings.v2';
 
 export function defaultSettings(): ViewSettings {
   const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
-  return { hidePlanned: false, showLibs: false, lineMode: 'auto', motion: reduced ? 'off' : 'active', zoomOpens: false, follow: true, legend: true };
+  return { hidePlanned: false, showLibs: false, lineMode: 'auto', motion: reduced ? 'off' : 'active', zoomOpens: false, follow: true, legend: true, theme: 'auto', palette: 'model' };
 }
 
 export function loadSettings(): ViewSettings {
@@ -58,6 +65,8 @@ export function changedFromDefault(s: ViewSettings): string[] {
   if (s.zoomOpens !== d.zoomOpens) out.push('zoom opens groups');
   if (s.follow !== d.follow) out.push('camera stays');
   if (s.legend !== d.legend) out.push('no legend');
+  if (s.theme !== d.theme) out.push(`${s.theme} theme`);
+  if (s.palette !== d.palette) out.push(`${PALETTES[s.palette]?.title ?? s.palette} palette`);
   return out;
 }
 
@@ -110,7 +119,7 @@ export function SettingsButton({ open, setOpen, changed }: { open: boolean; setO
   );
 }
 
-export function SettingsDialog({ s, set, plannedCount, onClose }: { s: ViewSettings; set: (patch: Partial<ViewSettings>) => void; plannedCount: number; onClose: () => void }) {
+export function SettingsDialog({ s, set, plannedCount, modelPalette, onClose }: { s: ViewSettings; set: (patch: Partial<ViewSettings>) => void; plannedCount: number; modelPalette?: string; onClose: () => void }) {
   const ref = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     ref.current?.querySelector<HTMLElement>('button[aria-checked="true"], button')?.focus();
@@ -154,6 +163,19 @@ export function SettingsDialog({ s, set, plannedCount, onClose }: { s: ViewSetti
         </Row>
         <Row title="Data motion" help="Dots travel the way data goes. Active moves only what you hover, select or play.">
           <Seg label="Data motion" value={s.motion} onChange={(v) => set({ motion: v })} options={[['off', 'Off', 'Nothing moves'], ['active', 'Active', 'Only the links in focus'], ['all', 'All', 'Every built link']]} />
+        </Row>
+      </section>
+
+      <section>
+        <h3>Appearance</h3>
+        <Row title="Theme" help="Auto follows the model's style: in system.yaml, and otherwise this computer's light or dark setting.">
+          <Seg label="Theme" value={s.theme} onChange={(v) => set({ theme: v })} options={[['auto', 'Auto', 'As the model or this computer says'], ['light', 'Light', 'Always light'], ['dark', 'Dark', 'Always dark']]} />
+        </Row>
+        <Row title="Palette" help={`From model uses the colours in system.yaml${modelPalette ? ` (${PALETTES[modelPalette]?.title ?? modelPalette} with its changes)` : ', none set'}. Another palette applies in this browser only.`}>
+          <select className="set-select" aria-label="Palette" value={s.palette} onChange={(e) => set({ palette: e.target.value })}>
+            <option value="model">From model</option>
+            {Object.entries(PALETTES).map(([id, p]) => <option key={id} value={id}>{p.title}</option>)}
+          </select>
         </Row>
       </section>
 
