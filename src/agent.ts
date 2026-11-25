@@ -13,7 +13,7 @@ import { formatProblems, orient, ownerOf } from './render.js';
 import { isDocPath } from './docs.js';
 import { bashGate, gateOn, PLANNING_WORDS, planGate, planModeNote, planningNote, planReminder, targetOf, writeGate } from './gate.js';
 import { changeSecurity } from './security.js';
-import { progressGate, showChange } from './viewer-open.js';
+import { changeGate, progressGate } from './viewer-open.js';
 import { callKey, dropPendingApproval, notePendingApproval, settleApproval } from './approve.js';
 import { commandName, noteLive } from './live.js';
 
@@ -149,6 +149,25 @@ function once(root: string, name: string, key: string): boolean {
   return true;
 }
 
+/** True when `key` was not seen under `name` in the last `ms`; the sighting is recorded. For a hook that asks, then acts when the same call comes back. */
+function onceIn(root: string, name: string, key: string, ms: number): boolean {
+  const marker = path.join(root, MODEL_DIR, '.cache', name);
+  let seen: Record<string, number> = {};
+  try {
+    seen = JSON.parse(fs.readFileSync(marker, 'utf8'));
+  } catch {
+    /* first time */
+  }
+  const now = Date.now();
+  const fresh = !(now - (seen[key] ?? 0) < ms);
+  if (fresh) {
+    seen[key] = now;
+    fs.mkdirSync(path.dirname(marker), { recursive: true });
+    fs.writeFileSync(marker, JSON.stringify(Object.fromEntries(Object.entries(seen).slice(-50))));
+  }
+  return fresh;
+}
+
 /** Forgets that a session was told something, so it is told again (after the context was compacted). */
 function forget(root: string, names: string[], key: string): void {
   for (const name of names) {
@@ -267,9 +286,17 @@ export async function hook(name: string, rootFlag?: string): Promise<void> {
         // Kept short: the permission prompt is a small window and cuts the rest off.
         const more = sec.lines.length - 5;
         verdict.reason += `\n${sec.lines.length ? `Security:\n${sec.lines.slice(0, 5).join('\n')}${more > 0 ? `\n  and ${more} more: "armature approve" prints all` : ''}` : 'Security: no new entry point, no sensitive data sent out, no secret.'}`;
-        // The prompt is plain text; the diagram of the change opens beside it, and its address goes first so it is never cut off.
-        const graph = showChange(root, verdict.approves);
-        if (graph) verdict.reason = `Diagram of the change: ${graph}\n${verdict.reason}`;
+        // The prompt is plain text; the diagram of the change opens beside it. Only the agent can open the
+        // desktop app's browser pane, so the edit goes back to it once; when it comes again, the hook opens
+        // the default browser if the change is still not shown.
+        const approves = verdict.approves;
+        const graph = await changeGate(root, approves, () => onceIn(root, 'approval-shown.json', `${String(input.session_id ?? '')}:${approves}`, 2 * 60 * 1000));
+        if (graph.send) {
+          decide('deny', graph.send);
+          return;
+        }
+        // The address goes first so it is never cut off.
+        if (graph.url) verdict.reason = `Diagram of the change: ${graph.url}\n${verdict.reason}`;
         // If the person says yes, this edit goes through and the approval is recorded after it.
         notePendingApproval(root, verdict.approves, callKey(input.tool_input));
       }

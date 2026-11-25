@@ -7,7 +7,7 @@ import { hook } from '../src/agent.js';
 import { compile } from '../src/compile.js';
 import { commandName, fileDiff, liveFile, noteLive, readLive, type LiveEvent } from '../src/live.js';
 import { fileId, indexGraph, visibleGraph, withFiles } from '../viewer/src/view.js';
-import { progressGate, sessionUrl, type ProgressDeps } from '../src/viewer-open.js';
+import { progressGate, sessionUrl, type ProgressDeps, type Watching } from '../src/viewer-open.js';
 import { liveFiles, liveMarks, liveNode, sizeOf, stepLines } from '../viewer/src/Live.js';
 
 function repo(): string {
@@ -276,9 +276,10 @@ describe('files on the map', () => {
 });
 
 describe('the progress view is open before a session edits', () => {
+  const watching = (session: number, pages = session): Watching => ({ session, pages, shown: {} });
   const deps = (over: Partial<ProgressDeps> = {}): ProgressDeps & { opened: string[] } => {
     const opened: string[] = [];
-    return { opened, allowed: () => true, viewer: () => 'http://localhost:4747', watchers: async () => 0, open: (url) => void opened.push(url), ...over };
+    return { opened, allowed: () => true, viewer: () => 'http://localhost:4747', watchers: async () => watching(0), open: (url) => void opened.push(url), pause: async () => undefined, ...over };
   };
 
   it('sends the first edit back once, with the address of this session', async () => {
@@ -291,7 +292,7 @@ describe('the progress view is open before a session edits', () => {
   });
 
   it('lets the edit through when the view is already open', async () => {
-    const d = deps({ watchers: async () => 1 });
+    const d = deps({ watchers: async () => watching(1) });
     expect(await progressGate('/repo', 's1', true, () => true, d)).toBeNull();
     expect(await progressGate('/repo', 's1', false, () => true, d)).toBeNull();
     expect(d.opened).toEqual([]);
@@ -304,6 +305,22 @@ describe('the progress view is open before a session edits', () => {
     expect(await progressGate('/repo', 's1', false, fallback, d)).toBeNull();
     expect(await progressGate('/repo', 's1', false, fallback, d)).toBeNull();
     expect(d.opened).toEqual(['http://localhost:4747/?view=session&session=s1']);
+  });
+
+  it('opens no second window when the viewer is open on another view', async () => {
+    // The pane shows the viewer without "?view=session": the first edit still asks for the session view, the fallback stays quiet.
+    const d = deps({ watchers: async () => watching(0, 1) });
+    expect(await progressGate('/repo', 's1', true, () => true, d)).toContain('?view=session');
+    expect(await progressGate('/repo', 's1', false, () => true, d)).toBeNull();
+    expect(d.opened).toEqual([]);
+  });
+
+  it('waits for a page the agent just opened before it opens one itself', async () => {
+    let asked = 0;
+    const d = deps({ watchers: async () => watching(asked++ < 2 ? 0 : 1) });
+    expect(await progressGate('/repo', 's1', false, () => true, d)).toBeNull();
+    expect(asked).toBe(3);
+    expect(d.opened).toEqual([]);
   });
 
   it('never holds an edit back when it is turned off, has no session, or the viewer does not answer', async () => {
