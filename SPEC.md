@@ -82,7 +82,7 @@ YAML, validated by JSON Schema. Folder nesting under `nodes/` is the hierarchy.
 
 ```
 armature/
-  system.yaml          name, headline, actors, externals, system-wide rules
+  system.yaml          name, headline, actors, externals, system-wide rules, viewer style
   nodes/
     web.yaml
     billing.yaml
@@ -572,6 +572,26 @@ One diagram, switchable overlays.
 | **Code** | Replaces data links with what the code imports, node to node. Undeclared dependencies are red and dashed; the panel lists them with the importing files |
 | **Rules** | Which nodes carry rules; click to read them with inherited ones |
 
+### 7.3 Style
+
+A team can give the viewer its own colours with `style:` in `system.yaml`. Everything is optional; with no `style:` the viewer uses its own palette, light or dark as each reader's system is.
+
+```yaml
+# armature/system.yaml
+style:
+  palette: slate          # a built-in palette: paper (the default), slate, contrast
+  mode: auto              # auto follows each reader's system; light or dark fixes it for everyone
+  colors:                 # laid over the palette, in light and dark mode
+    accent: "#5b4bd6"
+    blue: "#1f6feb"
+  dark:                   # dark mode only, laid over colors
+    accent: "#a597ff"
+```
+
+The colours have names: `bg` (around the map), `canvas` (the map), `panel`, `tile`, `ink`, `ink-2`, `ink-3` (text, strongest to quietest), `line`, `line-2`, `accent` and `accent-bg` (selection and the active flow), `red`, `red-bg`, `amber`, `amber-bg`, `ok` (status: failing, stale, verified), `heat` (the Activity and Tests lenses) and the group hues `green`, `blue`, `teal`, `purple`, `pink`, `orange`, `gray`, which a node's `color:` and its kind pick from. A value is a hex colour, a CSS colour function (`rgb()`, `hsl()`, `oklch()`, ...) or a colour name; anything else is a schema error. When main text would sit on a background under 4.5:1, or secondary text under 3:1, the check says so (`style-contrast`).
+
+A reader can override the theme (Auto, Light, Dark) and the palette in the viewer's Settings, under Appearance. That choice stays in their browser; the model's `style:` is what everyone else sees, and what a rendered page carries.
+
 ## 8. Checks
 
 `armature check` runs locally and in CI.
@@ -591,7 +611,7 @@ One diagram, switchable overlays.
 **Warnings** never block by themselves. They fall in two groups, so the ones that matter are not buried under the ones that only ask for more detail:
 
 - **Wrong: the model disagrees with the code.** Fix these first; until then, trust the code over the model. `runtime-drift` (tables, queues, workflows or routes the code uses and the model does not declare), `not-in-code` (an interface the model declares and the node's code does not register), `undeclared-import`, `overlap` (two nodes claim the same files), `shape-fields`, `stale-shape`, `source-symbol`, `verb` (reading or writing something that is neither a store nor, for reads, a queue), `reference` and `type` (names that resolve to nothing), `no-test-match`, `done-untested` (a finished change with a requirement that names no test), `stale-confirmation` (a requirement a person confirmed by reading, whose files changed since), `dropped`, `built-unapproved` (code written for a change nobody approved), `scope-changed` (a change that grew or shrank after it was approved), `report` (an unreadable test or coverage report), `deploy-missing`, `unused-reachable`, `unused-linked`, `doc-reference` (a document names something that is not in the model), `doc-header` (a document in the documents folder with no kind, or an unknown one).
-- **Incomplete: the model leaves something out, or cannot be checked.** `no-shape`, `no-requirement`, `no-code`, `coarse-link` (a link to a node, not an interface), `unowned` (files that belong to no node), `dead-code`, `undeployed`, `unknown-tech`, `ignore-reason`, `unconfirmed`, `empty-change`, `unrecorded-approval`, `done-unchecked` (a finished change that nothing here can prove), `outdated-report` (a test report older than the code), `ambiguous-reference`, `ambiguous-step`, `no-auth` (an entry point that does not say who may call it), `no-security-requirement` (an entry point that reaches sensitive data with nothing proving who gets it), `undeclared-secret` (code reads a credential the model does not list), `loose-doc` (documents nothing ties to the model), `typed-status` (a plan that types its own status), `accept-reason`, `stale-accept`, `untested-requirement` (requirements of a node with code that name no test, with the test files that already exercise the node), `unread-node` (a node whose files are all in a language the index does not read, so nothing about it is checked).
+- **Incomplete: the model leaves something out, or cannot be checked.** `no-shape`, `no-requirement`, `no-code`, `coarse-link` (a link to a node, not an interface), `unowned` (files that belong to no node), `dead-code`, `undeployed`, `unknown-tech`, `ignore-reason`, `style-contrast` (the colours in `style:` make text hard to read), `unconfirmed`, `empty-change`, `unrecorded-approval`, `done-unchecked` (a finished change that nothing here can prove), `outdated-report` (a test report older than the code), `ambiguous-reference`, `ambiguous-step`, `no-auth` (an entry point that does not say who may call it), `no-security-requirement` (an entry point that reaches sensitive data with nothing proving who gets it), `undeclared-secret` (code reads a credential the model does not list), `loose-doc` (documents nothing ties to the model), `typed-status` (a plan that types its own status), `accept-reason`, `stale-accept`, `untested-requirement` (requirements of a node with code that name no test, with the test files that already exercise the node), `unread-node` (a node whose files are all in a language the index does not read, so nothing about it is checked).
 
 `armature check` prints errors, then each group with its count, and ends with a split summary; `--only wrong` (or `incomplete`, `errors`) narrows the list. With `--annotate`, wrong warnings show on a pull request as warnings and incomplete ones as quieter notices. The session digest (`armature orient`) lists the wrong count under "Needs attention". The viewer's checks chip reads, for example, "53 wrong · 197 incomplete", and its panel groups findings by code with one line on what each code means. The meaning and group of every code live in one table, `WARNING_INFO` in `src/types.ts`.
 
