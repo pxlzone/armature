@@ -127,6 +127,8 @@ export function serve(root: string, port: number, github: boolean, opts: { idleM
   const clients = new Set<http.ServerResponse>();
   // Pages that show the session view: a hook asks whether one is open before it asks the agent to open it.
   const watching = new Set<http.ServerResponse>();
+  // When the page of each change was last opened: the approval hook asks before it has one opened.
+  const shown = new Map<string, number>();
   const token = randomBytes(24).toString('hex');
   let lastSeen = Date.now();
   // The model as last compiled, to say which part owns a file an agent touches. Dropped when the model or the code changes.
@@ -166,7 +168,7 @@ export function serve(root: string, port: number, github: boolean, opts: { idleM
     }
     if (url === '/watchers') {
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-      res.end(JSON.stringify({ session: watching.size }));
+      res.end(JSON.stringify({ session: watching.size, pages: clients.size, shown: Object.fromEntries(shown) }));
       return;
     }
     if (url === '/diff') {
@@ -226,6 +228,12 @@ export function serve(root: string, port: number, github: boolean, opts: { idleM
       return;
     }
     if (url === '/' || url === '/index.html') {
+      const change = new URL(req.url ?? '/', 'http://x').searchParams.get('change');
+      if (change) {
+        shown.delete(change);
+        shown.set(change, Date.now());
+        if (shown.size > 100) shown.delete(shown.keys().next().value as string);
+      }
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
       res.end(embed(viewerHtml(), null, token));
       return;

@@ -24527,7 +24527,7 @@ function show(g, ref, depth = 1) {
 		return out.join("\n") + also;
 	}
 	if (r.type === "flow") return showFlow(g, ix.flows.get(r.id)) + also;
-	if (r.type === "change") return showChange$1(g, ix.changes.get(r.id)) + also;
+	if (r.type === "change") return showChange(g, ix.changes.get(r.id)) + also;
 	return nodeCard(g, ix.nodes.get(r.id), depth).join("\n") + also;
 }
 function showFlow(g, f) {
@@ -24547,7 +24547,7 @@ function showFlow(g, f) {
 	}
 	return out.join("\n");
 }
-function showChange$1(g, c) {
+function showChange(g, c) {
 	const ix = index(g);
 	const out = [`change ${changeLine(c)}`];
 	if (c.why) out.push(`  why: ${c.why}`);
@@ -25866,6 +25866,9 @@ function rename(root, from, to) {
 var RUNNING = "viewer.json";
 /** The same change is not opened again in a new tab within this time. */
 var REOPEN_AFTER = 6e5;
+/** A page the agent just opened is given this long to load before the hook opens one itself. */
+var SETTLE_TRIES = 6;
+var SETTLE_PAUSE = 300;
 var runningFile = (root) => path.join(root, MODEL_DIR, ".cache", RUNNING);
 /** Called by "armature view" once it listens, so a hook can find it. */
 function noteViewer(root, url) {
@@ -25909,38 +25912,82 @@ function sessionUrl(base, session) {
 function ensureViewer(root) {
 	return (readRunning(root) ?? startViewer(root))?.url ?? null;
 }
-/** How many pages show the session view right now. Null when the viewer does not answer in time. */
+/** What is open in the viewer right now. Null when the viewer does not answer in time. */
 async function watchers(base) {
 	try {
-		const n = (await (await fetch(`${base.replace(/\/$/, "")}/watchers`, { signal: AbortSignal.timeout(800) })).json()).session;
-		return typeof n === "number" ? n : null;
+		const w = await (await fetch(`${base.replace(/\/$/, "")}/watchers`, { signal: AbortSignal.timeout(800) })).json();
+		if (typeof w.session !== "number") return null;
+		return {
+			session: w.session,
+			pages: typeof w.pages === "number" ? w.pages : w.session,
+			shown: w.shown && typeof w.shown === "object" ? w.shown : {}
+		};
 	} catch {
 		return null;
 	}
 }
-/**
-* The person watches a session on the diagram, so the progress view is open before the session's
-* first edit. `first` is true on that edit: with no view open, the edit is sent back once with the
-* address to open. On a later edit, if the agent could not open it, the hook opens it in the
-* default browser, once (`fallback`). Returns the reason to send the edit back, or null to let it through.
-*/
-async function progressGate(root, session, first, fallback, deps = {
+var defaults = {
 	allowed: openingAllowed,
 	viewer: ensureViewer,
 	watchers,
-	open: openBrowser
-}) {
+	open: openBrowser,
+	pause: (ms) => new Promise((r) => setTimeout(r, ms))
+};
+/**
+* True once the viewer shows what `seen` looks for. The agent repeats its edit right after it
+* opens the page, so the page may still be loading: ask a few times before giving up.
+* Also true when the viewer stops answering, so that nothing is opened on a guess.
+*/
+async function settles(base, seen, deps) {
+	for (let i = 0; i < SETTLE_TRIES; i++) {
+		if (i) await deps.pause(SETTLE_PAUSE);
+		const w = await deps.watchers(base);
+		if (!w || seen(w)) return true;
+	}
+	return false;
+}
+/**
+* The person watches a session on the diagram, so the progress view is open before the session's
+* first edit. `first` is true on that edit: with no session view open, the edit is sent back once
+* with the address to open. On a later edit, if the viewer still has no page open at all, the hook
+* opens it in the default browser, once (`fallback`). A page of any kind counts there: the person
+* has the diagram in front of them, and a second window in another browser is not wanted.
+* Returns the reason to send the edit back, or null to let it through.
+*/
+async function progressGate(root, session, first, fallback, deps = defaults) {
 	if (!session || !deps.allowed()) return null;
 	if (!first && !fallback()) return null;
 	const base = deps.viewer(root);
 	if (!base) return null;
-	if (await deps.watchers(base) !== 0) return null;
 	const url = sessionUrl(base, session);
 	if (!first) {
-		deps.open(url);
+		if (!await settles(base, (w) => w.pages > 0, deps)) deps.open(url);
 		return null;
 	}
-	return `Armature shows the person what this session does on the diagram, so the progress view is opened before the first edit: ${url}\n- In the Claude desktop app: open that address in the browser pane (the preview_start tool with "url"), and leave it open.\n- With no browser tool: say so in one line and go on. The next edit opens it in the person's default browser.\nThen make this edit again. This is asked once per session.`;
+	if ((await deps.watchers(base))?.session !== 0) return null;
+	return `Armature shows the person what this session does on the diagram, so the progress view is opened before the first edit: ${url}\n- In the Claude desktop app: open that address in the browser pane (the preview_start tool with "url", not a server name: the address must keep "?view=session"), and leave it open.\n- With no browser tool: say so in one line and go on. The next edit opens it in the person's default browser.\nThen make this edit again. This is asked once per session.`;
+}
+/**
+* The diagram of a change is in front of the person when they are asked to approve it.
+* If the viewer has not shown the change lately, the approving edit is sent back once (`first`)
+* for the agent to open it in the browser pane; when it comes again and the change is still not
+* shown, the hook opens the default browser. Returns the page's address (null when no viewer
+* could be reached) and, when the edit is to be sent back, the reason.
+*/
+async function changeGate(root, change, first, deps = defaults) {
+	if (!deps.allowed()) return { url: null };
+	const base = deps.viewer(root);
+	if (!base) return { url: null };
+	const url = changeUrl(base, change);
+	const shown = (w) => Date.now() - (w.shown[change] ?? 0) < REOPEN_AFTER;
+	const now = await deps.watchers(base);
+	if (!now || shown(now)) return { url };
+	if (first()) return {
+		url,
+		send: `This is not a refusal. The person approves change "${change}" on its diagram, so it is opened before they are asked: ${url}\n- In the Claude desktop app: open that address in the browser pane (the preview_start tool with "url").\n- With no browser tool: say so in one line and go on. It opens in the person's default browser.\nThen make this edit again, unchanged. The person is asked then.`
+	};
+	if (!await settles(base, shown, deps)) deps.open(url);
+	return { url };
 }
 function changeUrl(base, change) {
 	return `${base.replace(/\/$/, "")}/?lens=work&change=${encodeURIComponent(change)}`;
@@ -25987,28 +26034,6 @@ function openBrowser(url) {
 			stdio: "ignore"
 		}).unref();
 	} catch {}
-}
-/**
-* Opens the change in the viewer for the person to look at while they answer the prompt.
-* Returns the page's address, or null when no viewer could be reached.
-*/
-function showChange(root, change) {
-	if (!openingAllowed()) return null;
-	const running = readRunning(root) ?? startViewer(root);
-	if (!running) return null;
-	const url = changeUrl(running.url, change);
-	const opened = running.opened ?? {};
-	if (!(Date.now() - (opened[change] ?? 0) < REOPEN_AFTER)) {
-		openBrowser(url);
-		opened[change] = Date.now();
-		try {
-			fs.writeFileSync(runningFile(root), JSON.stringify({
-				...running,
-				opened
-			}));
-		} catch {}
-	}
-	return url;
 }
 // src/live.ts
 var LIVE_FILE = "live.jsonl";
@@ -26349,6 +26374,7 @@ function serve(root, port, github, opts = {}) {
 	viewerHtml();
 	const clients = /* @__PURE__ */ new Set();
 	const watching = /* @__PURE__ */ new Set();
+	const shown = /* @__PURE__ */ new Map();
 	const token = randomBytes(24).toString("hex");
 	let lastSeen = Date.now();
 	let owners = null;
@@ -26401,7 +26427,11 @@ function serve(root, port, github, opts = {}) {
 				"content-type": "application/json",
 				"cache-control": "no-store"
 			});
-			res.end(JSON.stringify({ session: watching.size }));
+			res.end(JSON.stringify({
+				session: watching.size,
+				pages: clients.size,
+				shown: Object.fromEntries(shown)
+			}));
 			return;
 		}
 		if (url === "/diff") {
@@ -26479,6 +26509,12 @@ function serve(root, port, github, opts = {}) {
 			return;
 		}
 		if (url === "/" || url === "/index.html") {
+			const change = new URL(req.url ?? "/", "http://x").searchParams.get("change");
+			if (change) {
+				shown.delete(change);
+				shown.set(change, Date.now());
+				if (shown.size > 100) shown.delete(shown.keys().next().value);
+			}
 			res.writeHead(200, {
 				"content-type": "text/html; charset=utf-8",
 				"cache-control": "no-store"
@@ -27999,6 +28035,22 @@ function once(root, name, key) {
 	fs.writeFileSync(marker, [...seen.slice(-50), key].join("\n"));
 	return true;
 }
+/** True when `key` was not seen under `name` in the last `ms`; the sighting is recorded. For a hook that asks, then acts when the same call comes back. */
+function onceIn(root, name, key, ms) {
+	const marker = path.join(root, MODEL_DIR, ".cache", name);
+	let seen = {};
+	try {
+		seen = JSON.parse(fs.readFileSync(marker, "utf8"));
+	} catch {}
+	const now = Date.now();
+	const fresh = !(now - (seen[key] ?? 0) < ms);
+	if (fresh) {
+		seen[key] = now;
+		fs.mkdirSync(path.dirname(marker), { recursive: true });
+		fs.writeFileSync(marker, JSON.stringify(Object.fromEntries(Object.entries(seen).slice(-50))));
+	}
+	return fresh;
+}
 /** Forgets that a session was told something, so it is told again (after the context was compacted). */
 function forget(root, names, key) {
 	for (const name of names) {
@@ -28098,8 +28150,13 @@ async function hook(name, rootFlag) {
 				}
 				const more = sec.lines.length - 5;
 				verdict.reason += `\n${sec.lines.length ? `Security:\n${sec.lines.slice(0, 5).join("\n")}${more > 0 ? `\n  and ${more} more: "armature approve" prints all` : ""}` : "Security: no new entry point, no sensitive data sent out, no secret."}`;
-				const graph = showChange(root, verdict.approves);
-				if (graph) verdict.reason = `Diagram of the change: ${graph}\n${verdict.reason}`;
+				const approves = verdict.approves;
+				const graph = await changeGate(root, approves, () => onceIn(root, "approval-shown.json", `${String(input.session_id ?? "")}:${approves}`, 12e4));
+				if (graph.send) {
+					decide("deny", graph.send);
+					return;
+				}
+				if (graph.url) verdict.reason = `Diagram of the change: ${graph.url}\n${verdict.reason}`;
 				notePendingApproval(root, verdict.approves, callKey(input.tool_input));
 			}
 			decide(verdict.decision, verdict.reason);
