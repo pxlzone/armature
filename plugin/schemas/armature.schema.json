@@ -645,6 +645,40 @@
             },
             "additionalProperties": false
           }
+        },
+        "style": {
+          "type": "object",
+          "description": "How the viewer looks: a built-in palette and the colours that differ from it. Default: the paper palette, light or dark as each reader's system is.",
+          "additionalProperties": false,
+          "properties": {
+            "palette": {
+              "enum": [
+                "paper",
+                "slate",
+                "contrast"
+              ]
+            },
+            "mode": {
+              "enum": [
+                "auto",
+                "light",
+                "dark"
+              ],
+              "description": "Light or dark for every reader, or auto to follow each reader's system. Default: auto."
+            },
+            "colors": {
+              "$ref": "#/$defs/colors",
+              "description": "Colours for light and dark mode."
+            },
+            "light": {
+              "$ref": "#/$defs/colors",
+              "description": "Colours for light mode only, laid over colors."
+            },
+            "dark": {
+              "$ref": "#/$defs/colors",
+              "description": "Colours for dark mode only, laid over colors."
+            }
+          }
         }
       }
     },
@@ -869,6 +903,85 @@
         "supersedes": {
           "$ref": "#/$defs/strings",
           "description": "Documents this one replaces, as paths from the repo root."
+        }
+      }
+    },
+    "colors": {
+      "type": "object",
+      "description": "Viewer colours by name. Each value is a hex colour, a CSS colour function (rgb, hsl, oklch, ...) or a colour name.",
+      "additionalProperties": false,
+      "properties": {
+        "bg": {
+          "type": "string"
+        },
+        "canvas": {
+          "type": "string"
+        },
+        "panel": {
+          "type": "string"
+        },
+        "tile": {
+          "type": "string"
+        },
+        "ink": {
+          "type": "string"
+        },
+        "ink-2": {
+          "type": "string"
+        },
+        "ink-3": {
+          "type": "string"
+        },
+        "line": {
+          "type": "string"
+        },
+        "line-2": {
+          "type": "string"
+        },
+        "accent": {
+          "type": "string"
+        },
+        "accent-bg": {
+          "type": "string"
+        },
+        "red": {
+          "type": "string"
+        },
+        "red-bg": {
+          "type": "string"
+        },
+        "amber": {
+          "type": "string"
+        },
+        "amber-bg": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "string"
+        },
+        "heat": {
+          "type": "string"
+        },
+        "green": {
+          "type": "string"
+        },
+        "blue": {
+          "type": "string"
+        },
+        "teal": {
+          "type": "string"
+        },
+        "purple": {
+          "type": "string"
+        },
+        "pink": {
+          "type": "string"
+        },
+        "orange": {
+          "type": "string"
+        },
+        "gray": {
+          "type": "string"
         }
       }
     }

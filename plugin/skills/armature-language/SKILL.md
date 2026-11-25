@@ -41,7 +41,7 @@ The same commands exist as MCP tools on the `armature` server.
 
 ```
 armature/
-  system.yaml          name, headline, actors, externals, system-wide rules, reports
+  system.yaml          name, headline, actors, externals, system-wide rules, reports, style
   nodes/<id>.yaml      one node per file; a folder is a parent, defined by its _group.yaml
   shapes/*.yaml        named data shapes, several per file
   flows/<id>.yaml      ordered stories across links
@@ -56,6 +56,8 @@ armature/
 ```
 
 Ids come from file and folder names. A node in `nodes/billing/ledger.yaml` has id `billing.ledger`.
+
+The viewer's colours are set by `style:` in `system.yaml`: a built-in `palette` (paper, slate, contrast), a `mode` (auto, light, dark), and `colors:` (both modes), `light:` and `dark:` that override named colours such as `accent`, `bg`, `ink` or the group hues (`blue`, `teal`, ...). Values are hex, a CSS colour function or a colour name. It changes nothing but the look; set it only when a person asks.
 
 ## References
 

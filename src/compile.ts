@@ -22,6 +22,7 @@ import { cleanDocsSetting, CONFIRMED_FILE, hasModel, MODEL_DIR, readApprovals, r
 import crypto from 'node:crypto';
 import { findNode, nodeProblem, resolveRef, type RefIndex } from './refs.js';
 import { isSecretName, securityFindings, type SecurityView } from './security.js';
+import { isColor, lowContrast, resolveStyle, type StyleInput } from './style.js';
 
 export { APPROVALS_FILE, MODEL_DIR, readApprovals } from './paths.js';
 export const LOCK_FILE = 'shapes.lock.json';
@@ -190,6 +191,20 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
   const docsHome = cleanDocsSetting(sys.docs) ?? `${mdir}/docs`;
   if (sys.docs !== undefined && !cleanDocsSetting(sys.docs)) err('schema', `docs: "${sys.docs}" is not a folder inside the repo.`, undefined, `${mdir}/system.yaml`);
   else if (sys.docs !== undefined && !fs.existsSync(path.join(root, docsHome))) warn('reference', `docs: "${docsHome}" in system.yaml names a folder that does not exist.`, undefined, `${mdir}/system.yaml`);
+
+  // How the viewer looks: `style:` in system.yaml. The schema knows the names; the values are checked
+  // here, since the viewer writes them into a stylesheet.
+  let style: ReturnType<typeof resolveStyle>;
+  if (sys.style && typeof sys.style === 'object') {
+    for (const part of ['colors', 'light', 'dark'] as const) {
+      const c = sys.style[part];
+      if (!c || typeof c !== 'object') continue;
+      for (const [k, v] of Object.entries(c)) if (!isColor(v)) err('schema', `style.${part}.${k}: "${String(v)}" is not a colour. Write a hex colour (#2f6fde), a CSS colour function (rgb(47 111 222), oklch(0.6 0.15 255)) or a colour name.`, undefined, `${mdir}/system.yaml`);
+    }
+    style = resolveStyle(sys.style as StyleInput);
+    const hard = style ? lowContrast(style) : [];
+    if (hard.length) warn('style-contrast', `style: in system.yaml makes text hard to read: ${hard.slice(0, 4).join('; ')}${hard.length > 4 ? '; …' : ''}.`, undefined, `${mdir}/system.yaml`);
+  }
 
   // ---- raw nodes ----------------------------------------------------------
   const raws: RawNode[] = [];
@@ -1726,6 +1741,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       accepts: accepts.map((a) => ({ code: a.code, ...(a.ref ? { ref: String(a.ref) } : {}), ...(a.file ? { file: String(a.file) } : {}), ...(a.match ? { match: String(a.match) } : {}), ...(a.why ? { why: String(a.why) } : {}) })),
       idleAccepts,
       gate: sys.gate !== 'off',
+      ...(style ? { style } : {}),
     },
     nodes: order,
     edges,

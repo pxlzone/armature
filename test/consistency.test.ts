@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { WRITE_TOOLS } from '../src/agent.js';
+import { PALETTES, STYLE_TOKENS } from '../src/style.js';
 import { DOC_KINDS, NODE_KINDS, VIA_KINDS, WARNING_INFO } from '../src/types.js';
 // @ts-expect-error a plain .mjs script with no types
 import { pluginInputsHash } from '../scripts/plugin-inputs.mjs';
@@ -77,5 +78,14 @@ describe('one fact, one home', () => {
     const notYet = spec.slice(spec.indexOf('## 11.'), spec.indexOf('## 12.'));
     expect(notYet).not.toMatch(/field extraction from Zod/i);
     expect(notYet).not.toMatch(/Call-site/i);
+  });
+
+  it('names the same style colours and palettes in the schema, the spec and the code', () => {
+    const schema = JSON.parse(read('schemas/armature.schema.json')).$defs;
+    expect(Object.keys(schema.colors.properties).sort()).toEqual(Object.keys(STYLE_TOKENS).sort());
+    expect([...schema.system.properties.style.properties.palette.enum].sort()).toEqual(Object.keys(PALETTES).sort());
+    const spec = read('SPEC.md');
+    for (const t of Object.keys(STYLE_TOKENS)) expect(spec, `SPEC.md does not name the style colour "${t}"`).toContain(`\`${t}\``);
+    for (const p of Object.keys(PALETTES)) expect(spec).toContain(p);
   });
 });

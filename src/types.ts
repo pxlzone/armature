@@ -1,4 +1,5 @@
 // Pure types shared by the compiler, the CLI and the viewer. No runtime imports.
+import type { Style } from './style.js';
 
 export type NodeKind =
   | 'actor' | 'app' | 'service' | 'worker' | 'job' | 'agent'
@@ -566,6 +567,7 @@ export const WARNING_INFO: Record<string, { group: WarningGroup; what: string }>
   undeployed: { group: 'incomplete', what: 'A compose service is not claimed by any node.' },
   'unknown-tech': { group: 'incomplete', what: 'A node names a technology that armature/tech.yaml does not list.' },
   'ignore-reason': { group: 'incomplete', what: 'An ignore entry gives no reason.' },
+  'style-contrast': { group: 'incomplete', what: 'The style: block in system.yaml puts text on a background it is hard to read on. Main text needs 4.5:1, secondary text 3:1.' },
   'no-shape': { group: 'incomplete', what: 'A link does not say what data it carries.' },
   'no-requirement': { group: 'incomplete', what: 'A node owns code but states no requirement that must keep holding.' },
   'no-code': { group: 'incomplete', what: 'A service has no code globs, so it cannot be tied to files.' },
@@ -619,6 +621,8 @@ export interface Graph {
     idleAccepts: number[];
     /** False when system.yaml says `gate: off`. */
     gate: boolean;
+    /** The viewer's colours, from `style:` in system.yaml. Absent when the model sets none. */
+    style?: Style;
   };
   nodes: GNode[];
   edges: Edge[];
