@@ -44,6 +44,7 @@ function repo(): string {
       '    public Order place(Order o) {',
       '        Helper.check(o);',
       '        now();',
+      '        java.util.function.Supplier<Object> mapper = Mapper::new;',
       '        return repo.save(o);',
       '    }',
       '',
@@ -55,6 +56,7 @@ function repo(): string {
   );
   write('svc/src/main/java/com/acme/app/Base.java', 'package com.acme.app;\n\npublic abstract class Base {\n}\n');
   write('svc/src/main/java/com/acme/app/Repo.java', 'package com.acme.app;\n\nimport com.acme.model.Order;\n\npublic class Repo {\n    public Order save(Order o) {\n        return o;\n    }\n}\n');
+  write('svc/src/main/java/com/acme/app/Mapper.java', 'package com.acme.app;\n\npublic class Mapper {\n}\n');
   write('svc/src/main/java/com/acme/app/Dead.java', 'package com.acme.app;\n\nclass Dead {\n}\n');
   write('svc/src/main/java/com/acme/app/DeadBean.java', 'package com.acme.app;\n\nimport org.springframework.stereotype.Component;\n\n@Component\npublic class DeadBean extends Dead {\n}\n');
   write(
@@ -81,7 +83,7 @@ describe('java code index', () => {
   it('extracts types and public methods, and resolves explicit, static, wildcard and same-package imports', async () => {
     const root = repo();
     const r = await buildCodeIndex(root);
-    expect(r.parsed).toBe(13);
+    expect(r.parsed).toBe(14);
     expect(r.index.files['svc/src/main/java/com/acme/app/FastRepo.java'].hints).toContainEqual({ k: 'bean', v: 'Repo', op: 'extends', l: 7 });
     const f = r.index.files['svc/src/main/java/com/acme/app/Service.java'];
     expect(f.lang).toBe('java');
@@ -93,6 +95,7 @@ describe('java code index', () => {
     const resolved = f.imports.map((i) => `${i.spec}>${i.file ?? `pkg:${i.pkg}`}`).sort();
     expect(resolved).toEqual([
       'com.acme.app.Base>svc/src/main/java/com/acme/app/Base.java',
+      'com.acme.app.Mapper>svc/src/main/java/com/acme/app/Mapper.java',
       'com.acme.app.Repo>svc/src/main/java/com/acme/app/Repo.java',
       'com.acme.model>svc/src/main/java/com/acme/model/Address.java',
       'com.acme.model>svc/src/main/java/com/acme/model/Order.java',

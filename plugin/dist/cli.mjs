@@ -20935,7 +20935,7 @@ function extractJava(root, source) {
 		if (!/^[A-Z][A-Za-z0-9_]*$/.test(text) || text.length < 2 || own.has(text) || explicit.has(text) || used.has(text)) continue;
 		if (id.type === "identifier") {
 			const p = id.parent;
-			if (!(p?.type === "method_invocation" && p.childForFieldName("object")?.id === id.id || p?.type === "field_access" && p.childForFieldName("object")?.id === id.id)) continue;
+			if (!(p?.type === "method_invocation" && p.childForFieldName("object")?.id === id.id || p?.type === "field_access" && p.childForFieldName("object")?.id === id.id || p?.type === "method_reference" && p.namedChildren[0]?.id === id.id)) continue;
 		}
 		if (id.parent?.type === "type_parameter") continue;
 		used.set(text, id.startPosition.row + 1);
@@ -20977,7 +20977,7 @@ function extractJava(root, source) {
 		const p = id.parent;
 		if (!p || p.type === "import_declaration" || p.type === "scoped_identifier" || p.type === "package_declaration") continue;
 		if (JAVA_TYPES.has(p.type) && p.childForFieldName("name")?.id === id.id) continue;
-		const called = p.type === "method_invocation" && (p.childForFieldName("name")?.id === id.id || p.childForFieldName("object")?.id === id.id) || p.type === "object_creation_expression" && p.childForFieldName("type")?.id === id.id || p.type === "superclass" || p.type === "super_interfaces" || p.type === "type_list" || (p.type === "marker_annotation" || p.type === "annotation") && p.childForFieldName("name")?.id === id.id;
+		const called = p.type === "method_invocation" && (p.childForFieldName("name")?.id === id.id || p.childForFieldName("object")?.id === id.id) || p.type === "object_creation_expression" && p.childForFieldName("type")?.id === id.id || p.type === "method_reference" || p.type === "superclass" || p.type === "super_interfaces" || p.type === "type_list" || (p.type === "marker_annotation" || p.type === "annotation") && p.childForFieldName("name")?.id === id.id;
 		const row = id.startPosition.row;
 		const where = encl(row);
 		if (where === text) continue;
@@ -21209,7 +21209,7 @@ async function buildCodeIndex(root) {
 	const mdir = MODEL_DIR;
 	const wanted = repo.files.filter((f) => LANG_OF[path.extname(f)] && !SKIP$2.test(`/${f}`) && !f.endsWith(".d.ts") && !/\.min\.js$/.test(f) && !f.startsWith(`${mdir}/`));
 	const prior = readCodeIndex(root);
-	const old = prior?.extractor === 12 ? prior : null;
+	const old = prior?.extractor === 13 ? prior : null;
 	const files = {};
 	const resolve = makeResolver(root, all);
 	let parsed = 0;
@@ -21318,7 +21318,7 @@ async function buildCodeIndex(root) {
 	}
 	const index = {
 		version: 3,
-		extractor: 12,
+		extractor: 13,
 		builtAt: (/* @__PURE__ */ new Date()).toISOString(),
 		files
 	};

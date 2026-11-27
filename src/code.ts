@@ -98,7 +98,7 @@ export interface CodeFile {
 }
 
 /** Bump when extraction changes, so unchanged files are parsed again with the new rules. */
-export const EXTRACTOR = 12;
+export const EXTRACTOR = 13;
 
 export interface CodeIndex {
   version: 3;
@@ -887,9 +887,12 @@ function extractJava(root: any, source: string): Raw {
     const text: string = id.text;
     if (!/^[A-Z][A-Za-z0-9_]*$/.test(text) || text.length < 2 || own.has(text) || explicit.has(text) || used.has(text)) continue;
     if (id.type === 'identifier') {
-      // An identifier counts only where a class name can stand: before a dot (X.of(), X.CONST) or in a static-looking position.
+      // An identifier counts only where a class name can stand: before a dot (X.of(), X.CONST) or before :: (X::new).
       const p = id.parent;
-      const isStatic = (p?.type === 'method_invocation' && p.childForFieldName('object')?.id === id.id) || (p?.type === 'field_access' && p.childForFieldName('object')?.id === id.id);
+      const isStatic =
+        (p?.type === 'method_invocation' && p.childForFieldName('object')?.id === id.id) ||
+        (p?.type === 'field_access' && p.childForFieldName('object')?.id === id.id) ||
+        (p?.type === 'method_reference' && p.namedChildren[0]?.id === id.id);
       if (!isStatic) continue;
     }
     if (id.parent?.type === 'type_parameter') continue;
@@ -923,7 +926,7 @@ function extractJava(root: any, source: string): Raw {
     const called =
       (p.type === 'method_invocation' && (p.childForFieldName('name')?.id === id.id || p.childForFieldName('object')?.id === id.id)) ||
       (p.type === 'object_creation_expression' && p.childForFieldName('type')?.id === id.id) ||
-      p.type === 'superclass' || p.type === 'super_interfaces' || p.type === 'type_list' ||
+      p.type === 'method_reference' || p.type === 'superclass' || p.type === 'super_interfaces' || p.type === 'type_list' ||
       (p.type === 'marker_annotation' || p.type === 'annotation') && p.childForFieldName('name')?.id === id.id;
     const row = id.startPosition.row;
     const where = encl(row);
