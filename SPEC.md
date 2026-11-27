@@ -385,7 +385,7 @@ Commit subjects and pull-request titles are read as [Conventional Commits](https
 
 ### 6.3 Code graph
 
-`armature index` parses every source file with tree-sitter (TypeScript, TSX, JavaScript, Python) and records its top-level symbols with one-line signatures and doc comments, and what it imports. Imports are resolved to files in the repo: relative paths, `tsconfig` path aliases, workspace packages and Python modules. The index lives in `armature/.cache/code-index.json`; unchanged files are not re-read.
+`armature index` parses every source file with tree-sitter (TypeScript, TSX, JavaScript, Python, Java) and records its top-level symbols with one-line signatures and doc comments, and what it imports. Imports are resolved to files in the repo: relative paths, `tsconfig` path aliases, workspace packages, Python modules and Java packages (under a `src/<set>/java` root or the folder above the first package segment; `import a.b.*` loads the whole package; a class of the same package counts as imported when a file matches it). A Java file is a test when its class name ends in `Test`, `Tests`, `IT` or `Check`, since every file of a test project sits under `src/test`. A Java class registered in `META-INF/services` or in an `aop.xml` is an entry point. The index lives in `armature/.cache/code-index.json`; unchanged files are not re-read.
 
 The index is tied to the model through file ownership (`code:` globs):
 

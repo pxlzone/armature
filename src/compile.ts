@@ -11,7 +11,7 @@ import type {
 import { warningGroup } from './types.js';
 import { expand, git, matcher, parseConventional, readCommits, readJunit, readLcov, readPullRequests, readRepo, sourceHash, type TestCase } from './repo.js';
 
-import { rankFiles, readCodeIndex, TEST_FILE } from './code.js';
+import { isTestFile, rankFiles, readCodeIndex } from './code.js';
 import { analyzeRuntime } from './runtime.js';
 import { readHistory } from './history.js';
 import { sameName, schemaFor } from './schemas.js';
@@ -1236,7 +1236,7 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
     const testsOf = (file: string): Set<string> => {
       const out = new Set<string>();
       for (const u of importers.get(file) ?? []) {
-        if (cidx.files[u]?.test || TEST_FILE.test(u)) out.add(u);
+        if (cidx.files[u]?.test || isTestFile(u)) out.add(u);
         else if (/(^|\/)index\.[cm]?[jt]sx?$/.test(u)) for (const v of importers.get(u) ?? []) if (cidx.files[v]?.test) out.add(v);
       }
       return out;
@@ -1524,9 +1524,9 @@ export function compile(root: string, opts: CompileOptions = {}): Graph {
       // Tags in test titles count with no report to read them from: look for them in the source.
       // Only in test files: a plan that quotes a tag proves nothing.
       const found = repo.hasGit ? git(root, ['grep', '--untracked', '-o', '-I', '-E', '\\[req [^] ]+\\]']) : null;
-      let text = (found ?? '').split('\n').filter((l) => TEST_FILE.test(l.slice(0, l.indexOf(':')))).join('\n');
+      let text = (found ?? '').split('\n').filter((l) => isTestFile(l.slice(0, l.indexOf(':')))).join('\n');
       if (found === null) {
-        for (const f of repo.files.filter((x) => TEST_FILE.test(x))) {
+        for (const f of repo.files.filter((x) => isTestFile(x))) {
           try {
             text += fs.readFileSync(path.join(root, f), 'utf8');
           } catch {

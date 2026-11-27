@@ -19942,9 +19942,16 @@ var LANG_OF = {
 	".mjs": "javascript",
 	".cjs": "javascript",
 	".py": "python",
-	".sql": "sql"
+	".sql": "sql",
+	".java": "java"
 };
 var TEST_FILE = /(\.|_)(test|spec)\.[cm]?[jt]sx?$|(^|\/)(__tests__|tests?|e2e)\/|(^|\/)test_[^/]+\.py$|_test\.py$/;
+/** Java keeps every source of a test project under src/test/java, so only the class name says what is a test. */
+var JAVA_TEST_FILE = /(Test|Tests|IT|Check)\.java$/;
+/** Whether a path is a test file, by the conventions of its language. */
+function isTestFile(file) {
+	return file.endsWith(".java") ? JAVA_TEST_FILE.test(file) : TEST_FILE.test(file);
+}
 var TS_EXT = [
 	".ts",
 	".tsx",
@@ -20434,7 +20441,8 @@ function envHints(source, lineAt) {
 		/\bimport\.meta\.env\.([A-Z_][A-Z0-9_]*)\b/g,
 		/\bDeno\.env\.get\(\s*["'`]([A-Z_][A-Z0-9_]*)["'`]/g,
 		/\bos\.environ\[\s*["']([A-Z_][A-Z0-9_]*)["']\s*\]/g,
-		/\bos\.(?:environ\.get|getenv)\(\s*["']([A-Z_][A-Z0-9_]*)["']/g
+		/\bos\.(?:environ\.get|getenv)\(\s*["']([A-Z_][A-Z0-9_]*)["']/g,
+		/\bSystem\.getenv\(\s*"([A-Z_][A-Z0-9_]*)"/g
 	]) for (const m of source.matchAll(re)) out.push({
 		k: "env",
 		v: m[1],
@@ -20745,6 +20753,265 @@ function pyType(t) {
 		AnyUrl: "url"
 	}[s] ?? "json";
 }
+/** The Javadoc right above a Java declaration, as one line without its @tags. */
+function javaDocOf(node) {
+	const prev = node.previousSibling;
+	if (!prev || prev.type !== "block_comment" || !String(prev.text).startsWith("/**") || node.startPosition.row - prev.endPosition.row > 1) return void 0;
+	const lines = String(prev.text).split("\n").map((l) => l.replace(/^\s*(\/\*\*?|\*\/|\*)\s?/, "").replace(/\*\/\s*$/, "").trim()).filter((l) => l && !l.startsWith("@")).map((l) => l.replace(/<[^>]+>/g, "").replace(/\{@\w+\s+([^}]*)\}/g, "$1"));
+	return lines.length ? oneLine(lines.join(" "), 140) : void 0;
+}
+var JAVA_TYPES = /* @__PURE__ */ new Set([
+	"class_declaration",
+	"interface_declaration",
+	"enum_declaration",
+	"record_declaration",
+	"annotation_type_declaration"
+]);
+/** The keywords of a modifiers node, without its annotations. */
+function javaModifiers(decl) {
+	const mods = decl.namedChildren?.find((c) => c.type === "modifiers");
+	return new Set((mods?.children ?? []).filter((c) => !c.type.includes("annotation")).map((c) => c.type));
+}
+function javaType(t, enums) {
+	const s = t.replace(/\s+/g, "").replace(/^final/, "");
+	const opt = /^Optional<(.+)>$/.exec(s)?.[1];
+	if (opt) return `${javaType(opt, enums).replace(/\?$/, "")}?`;
+	const list = /^(?:List|Set|Collection|Iterable|ArrayList|LinkedList|HashSet|Queue|Deque)<(.+)>$/.exec(s)?.[1];
+	if (list) return `${javaType(list, enums).replace(/\?$/, "")}[]`;
+	if (s.endsWith("[]")) return `${javaType(s.slice(0, -2), enums).replace(/\?$/, "")}[]`;
+	const map = /^(?:Map|HashMap|LinkedHashMap|TreeMap)<(.+),(.+)>$/.exec(s);
+	if (map) return `map<${javaType(map[1], enums)},${javaType(map[2], enums)}>`;
+	const known = {
+		String: "string",
+		char: "string",
+		Character: "string",
+		CharSequence: "string",
+		int: "int",
+		Integer: "int",
+		long: "int",
+		Long: "int",
+		short: "int",
+		Short: "int",
+		byte: "int",
+		Byte: "int",
+		BigInteger: "int",
+		double: "float",
+		Double: "float",
+		float: "float",
+		Float: "float",
+		BigDecimal: "float",
+		boolean: "bool",
+		Boolean: "bool",
+		UUID: "uuid",
+		LocalDate: "date",
+		LocalDateTime: "timestamp",
+		ZonedDateTime: "timestamp",
+		OffsetDateTime: "timestamp",
+		Instant: "timestamp",
+		Date: "timestamp",
+		URI: "url",
+		URL: "url",
+		Object: "json",
+		JsonNode: "json",
+		"byte[]": "bytes"
+	};
+	if (known[s]) return known[s];
+	if (enums[s]) return enums[s];
+	const bare = s.replace(/<.*>$/, "");
+	return /^[A-Z]\w*$/.test(bare) ? bare : "json";
+}
+/** Lombok and record classes carry their fields in the code; everything else is behaviour. */
+var JAVA_DATA_ANNOTATIONS = /@(Data|Value|Builder|Getter|Setter|AllArgsConstructor|NoArgsConstructor|JsonProperty|Jacksonized)\b/;
+function extractJava(root, source) {
+	const symbols = [];
+	const imports = [];
+	const schemas = {};
+	const enums = {};
+	const explicit = /* @__PURE__ */ new Set();
+	const beanHints = [];
+	let pkg = "";
+	for (const top of root.children) {
+		const line = top.startPosition.row + 1;
+		if (top.type === "package_declaration") pkg = top.text.replace(/^package\s+|\s*;\s*$/g, "").trim();
+		else if (top.type === "import_declaration") {
+			const m = /^import\s+(static\s+)?([\w.$]+?)(\.\*)?\s*;/.exec(top.text.replace(/\s+/g, " "));
+			if (!m) continue;
+			const [, isStatic, spec, star] = m;
+			const last = spec.split(".").pop();
+			const names = star ? ["*"] : [last];
+			if (!star) explicit.add(last);
+			imports.push({
+				spec: isStatic && !star ? spec.slice(0, -last.length - 1) : spec,
+				names,
+				line,
+				as: star ? void 0 : { [last]: last }
+			});
+		} else if (JAVA_TYPES.has(top.type)) {
+			const name = top.childForFieldName("name")?.text;
+			if (!name) continue;
+			const exported = javaModifiers(top).has("public");
+			const kind = top.type === "interface_declaration" ? "interface" : top.type === "enum_declaration" ? "enum" : top.type === "annotation_type_declaration" ? "type" : "class";
+			symbols.push({
+				name,
+				kind,
+				line,
+				sig: signature(top.text),
+				doc: javaDocOf(top),
+				exported
+			});
+			const members = top.childForFieldName("body")?.namedChildren ?? [];
+			const annotations = top.namedChildren?.find((c) => c.type === "modifiers")?.text ?? "";
+			if (/@Aspect\b/.test(annotations)) beanHints.push({
+				k: "main",
+				v: "@Aspect",
+				l: line
+			});
+			if (/@(Component|Service|Repository|Configuration|Controller|RestController|Profile)\b/.test(annotations)) for (const sup of top.namedChildren.filter((c) => c.type === "superclass" || c.type === "super_interfaces" || c.type === "extends_interfaces")) {
+				const list = sup.type === "superclass" ? sup.namedChildren : sup.namedChildren.flatMap((c) => c.type === "type_list" ? c.namedChildren : [c]);
+				for (const t of list) {
+					const tname = t.type === "type_identifier" ? t.text : t.namedChildren?.find((c) => c.type === "type_identifier")?.text;
+					if (tname) beanHints.push({
+						k: "bean",
+						v: tname,
+						op: sup.type === "superclass" ? "extends" : "implements",
+						l: line
+					});
+				}
+			}
+			if (top.type === "enum_declaration") {
+				const constants = members.filter((m) => m.type === "enum_constant").map((m) => m.childForFieldName("name")?.text).filter(Boolean);
+				if (constants.length && constants.length <= 60) enums[name] = `enum(${constants.join("|")})`;
+			}
+			let count = 0;
+			for (const m of members) {
+				if (m.type !== "method_declaration" || count >= 80) continue;
+				const mm = javaModifiers(m);
+				if (mm.has("private")) continue;
+				const mname = m.childForFieldName("name")?.text;
+				if (!mname) continue;
+				count++;
+				symbols.push({
+					name: `${name}.${mname}`,
+					kind: "function",
+					line: m.startPosition.row + 1,
+					sig: signature(m.text).replace(/;$/, ""),
+					doc: javaDocOf(m),
+					exported: exported && (mm.has("public") || top.type === "interface_declaration")
+				});
+			}
+			const annotated = JAVA_DATA_ANNOTATIONS.test(top.text.slice(0, top.text.indexOf(name)));
+			if (top.type === "record_declaration" || top.type === "class_declaration" && annotated) {
+				const fields = [];
+				if (top.type === "record_declaration") for (const p of top.childForFieldName("parameters")?.namedChildren ?? []) {
+					const ty = p.childForFieldName("type")?.text;
+					const fname = p.childForFieldName("name")?.text;
+					if (ty && fname) fields.push({
+						name: fname,
+						type: javaType(ty, enums)
+					});
+				}
+				else for (const f of members) {
+					if (f.type !== "field_declaration" || javaModifiers(f).has("static")) continue;
+					const ty = f.childForFieldName("type")?.text;
+					for (const d of f.namedChildren.filter((c) => c.type === "variable_declarator")) {
+						const fname = d.childForFieldName("name")?.text;
+						if (ty && fname) fields.push({
+							name: fname,
+							type: javaType(ty, enums)
+						});
+					}
+				}
+				if (fields.length) schemas[name] = {
+					kind: "java",
+					fields
+				};
+			}
+		}
+	}
+	const own = new Set(symbols.filter((s) => !s.name.includes(".")).map((s) => s.name));
+	const used = /* @__PURE__ */ new Map();
+	for (const id of root.descendantsOfType(["type_identifier", "identifier"])) {
+		const text = id.text;
+		if (!/^[A-Z][A-Za-z0-9_]*$/.test(text) || text.length < 2 || own.has(text) || explicit.has(text) || used.has(text)) continue;
+		if (id.type === "identifier") {
+			const p = id.parent;
+			if (!(p?.type === "method_invocation" && p.childForFieldName("object")?.id === id.id || p?.type === "field_access" && p.childForFieldName("object")?.id === id.id)) continue;
+		}
+		if (id.parent?.type === "type_parameter") continue;
+		used.set(text, id.startPosition.row + 1);
+	}
+	for (const [name, line] of used) imports.push({
+		spec: pkg ? `${pkg}.${name}` : name,
+		names: [name],
+		line,
+		as: { [name]: name },
+		implicit: true
+	});
+	const known = /* @__PURE__ */ new Set([...own, ...explicit]);
+	for (const i of imports) for (const n of Object.keys(i.as ?? {})) known.add(n);
+	const spans = [];
+	for (const top of root.children) {
+		if (!JAVA_TYPES.has(top.type)) continue;
+		const tname = top.childForFieldName("name")?.text;
+		if (!tname) continue;
+		spans.push([
+			top.startPosition.row,
+			top.endPosition.row,
+			tname
+		]);
+		for (const m of top.childForFieldName("body")?.namedChildren ?? []) {
+			if (m.type !== "method_declaration" && m.type !== "constructor_declaration") continue;
+			const mname = m.childForFieldName("name")?.text;
+			if (mname) spans.unshift([
+				m.startPosition.row,
+				m.endPosition.row,
+				`${tname}.${mname}`
+			]);
+		}
+	}
+	const encl = (row) => spans.find(([a, b]) => row >= a && row <= b)?.[2];
+	const refs = /* @__PURE__ */ new Map();
+	for (const id of root.descendantsOfType(["identifier", "type_identifier"])) {
+		const text = id.text;
+		if (!known.has(text)) continue;
+		const p = id.parent;
+		if (!p || p.type === "import_declaration" || p.type === "scoped_identifier" || p.type === "package_declaration") continue;
+		if (JAVA_TYPES.has(p.type) && p.childForFieldName("name")?.id === id.id) continue;
+		const called = p.type === "method_invocation" && (p.childForFieldName("name")?.id === id.id || p.childForFieldName("object")?.id === id.id) || p.type === "object_creation_expression" && p.childForFieldName("type")?.id === id.id || p.type === "superclass" || p.type === "super_interfaces" || p.type === "type_list" || (p.type === "marker_annotation" || p.type === "annotation") && p.childForFieldName("name")?.id === id.id;
+		const row = id.startPosition.row;
+		const where = encl(row);
+		if (where === text) continue;
+		const key = `${text}|${where ?? ""}`;
+		const prev = refs.get(key);
+		if (prev) {
+			prev.x++;
+			if (called) prev.c = 1;
+		} else refs.set(key, {
+			n: text,
+			l: row + 1,
+			in: where,
+			c: called ? 1 : 0,
+			x: 1
+		});
+	}
+	const clean = withoutComments(source);
+	const lineAt = (i) => clean.slice(0, i).split("\n").length;
+	const hints = [...beanHints];
+	for (const m of clean.matchAll(/"([^"\n]*?(\/api\/[A-Za-z0-9_\-/:.{}]+))[^"\n]*"/g)) hints.push({
+		k: "http",
+		v: m[2].replace(/\{[^}]*\}/g, ":p").replace(/\/+$/, ""),
+		l: lineAt(m.index ?? 0)
+	});
+	sqlHints(clean, hints, lineAt);
+	return {
+		symbols,
+		imports,
+		refs: [...refs.values()].slice(0, 600),
+		schemas,
+		enums,
+		hints: [...dedupeHints(hints).slice(0, 200), ...envHints(clean, lineAt)]
+	};
+}
 var STOP = new Set("the and for with from this that not are was were has have had but its into out all any can will would should could may must use used using via per get set new old true false null undefined async await void string number boolean unknown self def none str int float bool src lib index test tests const let var function export import type interface class return else then when what which who how why also only just like make made more most some such than them they there these those very each other over same where while about after again before being both does doing down during few further here itself once own too until upon".split(" "));
 /** Splits code and prose into lowercase words: camelCase, snake_case and paths all become words. */
 function words(text) {
@@ -20810,8 +21077,40 @@ function makeResolver(root, files) {
 		} catch {}
 	}
 	aliases.sort((a, b) => b.dir.length - a.dir.length);
+	const javaRoots = /* @__PURE__ */ new Set();
+	const javaDirs = /* @__PURE__ */ new Set();
+	for (const f of files) {
+		if (!f.endsWith(".java") || SKIP$2.test(`/${f}`)) continue;
+		javaDirs.add(path.posix.dirname(f));
+		const segs = f.split("/");
+		const at = segs.indexOf("java");
+		javaRoots.add(at >= 0 && at < segs.length - 1 ? segs.slice(0, at + 1).join("/") : "");
+	}
+	const roots = [...javaRoots].sort((a, b) => b.length - a.length);
 	return (from, spec, lang) => {
 		const dir = path.posix.dirname(from);
+		if (lang === "java") {
+			const ordered = [...roots.filter((r) => !r || from.startsWith(`${r}/`)), ...roots.filter((r) => r && !from.startsWith(`${r}/`))];
+			const at = (root, rel) => root ? `${root}/${rel}` : rel;
+			const segs = spec.split(".");
+			for (let n = segs.length; n > 0 && n >= segs.length - 2; n--) {
+				const rel = `${segs.slice(0, n).join("/")}.java`;
+				for (const r of ordered) if (files.has(at(r, rel))) return { file: at(r, rel) };
+			}
+			for (const r of ordered) {
+				const d = at(r, segs.join("/"));
+				if (javaDirs.has(d)) return {
+					file: null,
+					files: [...files].filter((f) => f.endsWith(".java") && path.posix.dirname(f) === d).sort()
+				};
+			}
+			const pkgSegs = [...segs];
+			while (pkgSegs.length > 1 && /^[A-Z]/.test(pkgSegs[pkgSegs.length - 1])) pkgSegs.pop();
+			return {
+				file: null,
+				pkg: pkgSegs.join(".")
+			};
+		}
 		if (lang === "python") {
 			const dots = spec.match(/^\.+/)?.[0].length ?? 0;
 			const rest = spec.slice(dots).replace(/\./g, "/");
@@ -20892,7 +21191,8 @@ function loadRuntime() {
 			"typescript",
 			"tsx",
 			"javascript",
-			"python"
+			"python",
+			"java"
 		]) langs.set(l, await TS.Language.load(path.join(dir, `tree-sitter-${l}.wasm`)));
 		return {
 			Parser: TS.Parser,
@@ -20909,7 +21209,7 @@ async function buildCodeIndex(root) {
 	const mdir = MODEL_DIR;
 	const wanted = repo.files.filter((f) => LANG_OF[path.extname(f)] && !SKIP$2.test(`/${f}`) && !f.endsWith(".d.ts") && !/\.min\.js$/.test(f) && !f.startsWith(`${mdir}/`));
 	const prior = readCodeIndex(root);
-	const old = prior?.extractor === 10 ? prior : null;
+	const old = prior?.extractor === 12 ? prior : null;
 	const files = {};
 	const resolve = makeResolver(root, all);
 	let parsed = 0;
@@ -20934,7 +21234,8 @@ async function buildCodeIndex(root) {
 					spec: i.spec,
 					names: i.names,
 					line: i.line,
-					as: i.as
+					as: i.as,
+					implicit: i.implicit
 				}))
 			};
 			reused++;
@@ -20969,7 +21270,7 @@ async function buildCodeIndex(root) {
 				}
 				try {
 					const tree = parser.parse(source);
-					raw = lang === "python" ? extractPy(tree.rootNode, source) : extractTs(tree.rootNode, source);
+					raw = lang === "python" ? extractPy(tree.rootNode, source) : lang === "java" ? extractJava(tree.rootNode, source) : extractTs(tree.rootNode, source);
 					tree.delete();
 				} catch {}
 			}
@@ -20987,12 +21288,23 @@ async function buildCodeIndex(root) {
 			lang,
 			mtime: st.mtimeMs,
 			size: st.size,
-			test: TEST_FILE.test(f),
-			imports: entry.imports.filter((i) => !(lang === "python" && i.names.length === 0)).flatMap((i) => {
+			test: isTestFile(f),
+			imports: entry.imports.filter((i) => !((lang === "python" || lang === "java") && i.names.length === 0)).flatMap((i) => {
+				const { files: pkgFiles, ...resolved } = resolve(f, i.spec, lang === "sql" ? "typescript" : lang);
 				const own = {
 					...i,
-					...resolve(f, i.spec, lang === "sql" ? "typescript" : lang)
+					...resolved
 				};
+				if (lang === "java") {
+					if (i.implicit && !own.file) return [];
+					if (pkgFiles) return pkgFiles.filter((x) => x !== f).map((file) => ({
+						spec: i.spec,
+						names: [],
+						line: i.line,
+						file
+					}));
+					return [own];
+				}
 				if (lang !== "python") return [own];
 				const subs = i.names.filter((n) => n !== "*").map((n) => resolve(f, i.spec.endsWith(".") ? `${i.spec}${n}` : `${i.spec}.${n}`, "python").file);
 				return [own, ...[...new Set(subs)].filter((x) => !!x && x !== own.file).map((file) => ({
@@ -21006,7 +21318,7 @@ async function buildCodeIndex(root) {
 	}
 	const index = {
 		version: 3,
-		extractor: 10,
+		extractor: 12,
 		builtAt: (/* @__PURE__ */ new Date()).toISOString(),
 		files
 	};
@@ -21869,7 +22181,8 @@ var CODE_LANGS = /* @__PURE__ */ new Set([
 	"py",
 	"javascript",
 	"typescript",
-	"python"
+	"python",
+	"java"
 ]);
 var EXT = [
 	"",
@@ -21932,7 +22245,22 @@ function reach(input) {
 		return [...known].filter((f) => inDir(f) && tails.some((t) => f === t || f.endsWith(`/${t}`)));
 	};
 	const tokens = (cmd) => [...[...cmd.matchAll(FILE_TOKEN)].map((m) => m[0]).filter((t) => !t.startsWith("http")), ...[...cmd.matchAll(/\b(?:uvicorn|gunicorn|hypercorn|daphne)\b[^&;|]*?\s([A-Za-z_][\w.]*):[A-Za-z_]\w*/g)].map((m) => `${m[1].replace(/\./g, "/")}.py`)];
-	for (const f of Object.values(idx.files)) if (f.test || TEST_FILE.test(f.path)) mark(f.path, "test");
+	for (const f of Object.values(idx.files)) if (f.test || isTestFile(f.path)) mark(f.path, "test");
+	const javaClass = (name) => {
+		const tail = `${name.trim().replace(/\./g, "/")}.java`;
+		for (const f of known) if (f === tail || f.endsWith(`/${tail}`)) return f;
+		return null;
+	};
+	for (const reg of files.filter((f) => /(^|\/)META-INF\/services\/[^/]+$/.test(f) || /(^|\/)aop\.xml$/.test(f))) {
+		let text = "";
+		try {
+			text = fs.readFileSync(path.join(root, reg), "utf8");
+		} catch {
+			continue;
+		}
+		const names = reg.endsWith(".xml") ? [...text.matchAll(/<(?:aspect|concrete-aspect)\b[^>]*\bname="([\w.$]+)"/g)].map((m) => m[1]) : text.split("\n").map((l) => l.replace(/#.*/, "").trim()).filter((l) => /^[\w.$]+$/.test(l));
+		for (const n of names) mark(javaClass(n), `registered in ${reg}`);
+	}
 	for (const pj of files.filter((f) => /(^|\/)package\.json$/.test(f) && !f.includes("node_modules/"))) {
 		let pkg;
 		try {
@@ -21973,7 +22301,7 @@ function reach(input) {
 		for (const m of text.matchAll(/<script[^>]*\bsrc=["']([^"']+)["']/g)) mark(resolveIn(dir, m[1].replace(/^\//, "")), `script in ${html}`);
 	}
 	for (const f of Object.values(idx.files)) for (const h of f.hints ?? []) {
-		if (h.k === "main") mark(f.path, "runs as a script (__main__)");
+		if (h.k === "main") mark(f.path, h.v === "__main__" ? "runs as a script (__main__)" : `started by the framework (${h.v})`);
 		if (h.k !== "entry") continue;
 		const dir = path.posix.dirname(f.path);
 		if (/[*{]/.test(h.v)) {
@@ -21986,12 +22314,30 @@ function reach(input) {
 	for (const f of known) if (listed?.(f)) mark(f, "listed as an entry in the model");
 	else if (conv(f)) mark(f, "framework or tooling convention");
 	const reachable = /* @__PURE__ */ new Set();
-	const queue = [...entries.keys()];
-	while (queue.length) {
-		const f = queue.pop();
-		if (reachable.has(f)) continue;
-		reachable.add(f);
-		for (const i of idx.files[f]?.imports ?? []) if (i.file && !reachable.has(i.file)) queue.push(i.file);
+	const walk = (from) => {
+		const queue = [...from];
+		while (queue.length) {
+			const f = queue.pop();
+			if (reachable.has(f)) continue;
+			reachable.add(f);
+			for (const i of idx.files[f]?.imports ?? []) if (i.file && !reachable.has(i.file)) queue.push(i.file);
+		}
+	};
+	walk(entries.keys());
+	for (let grew = true; grew;) {
+		grew = false;
+		for (const f of Object.values(idx.files)) {
+			if (reachable.has(f.path)) continue;
+			for (const h of f.hints ?? []) {
+				if (h.k !== "bean") continue;
+				const sup = f.imports.find((i) => i.file && (i.names.includes(h.v) || i.file.endsWith(`/${h.v}.java`)))?.file;
+				if (!sup || !reachable.has(sup)) continue;
+				mark(f.path, `wired by the framework as a ${h.v} (${sup})`);
+				walk([f.path]);
+				grew = true;
+				break;
+			}
+		}
 	}
 	return {
 		entries,
@@ -23725,7 +24071,7 @@ function compile$1(root, opts = {}) {
 		for (const f of Object.values(cidx.files)) for (const i of f.imports) if (i.file) importers.set(i.file, [...importers.get(i.file) ?? [], f.path]);
 		const testsOf = (file) => {
 			const out = /* @__PURE__ */ new Set();
-			for (const u of importers.get(file) ?? []) if (cidx.files[u]?.test || TEST_FILE.test(u)) out.add(u);
+			for (const u of importers.get(file) ?? []) if (cidx.files[u]?.test || isTestFile(u)) out.add(u);
 			else if (/(^|\/)index\.[cm]?[jt]sx?$/.test(u)) {
 				for (const v of importers.get(u) ?? []) if (cidx.files[v]?.test) out.add(v);
 			}
@@ -24046,8 +24392,8 @@ function compile$1(root, opts = {}) {
 				"-E",
 				"\\[req [^] ]+\\]"
 			]) : null;
-			let text = (found ?? "").split("\n").filter((l) => TEST_FILE.test(l.slice(0, l.indexOf(":")))).join("\n");
-			if (found === null) for (const f of repo.files.filter((x) => TEST_FILE.test(x))) try {
+			let text = (found ?? "").split("\n").filter((l) => isTestFile(l.slice(0, l.indexOf(":")))).join("\n");
+			if (found === null) for (const f of repo.files.filter((x) => isTestFile(x))) try {
 				text += fs.readFileSync(path.join(root, f), "utf8");
 			} catch {}
 			for (const m of text.matchAll(/\[req ([^\]\s]+)\]/g)) {

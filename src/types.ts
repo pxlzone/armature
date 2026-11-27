@@ -447,7 +447,7 @@ export interface Shape {
   stale: boolean;
   bound: boolean; // source resolves and hash is confirmed
   /** Set when the fields were read from code (the model's own field list is then only a fallback). */
-  fromCode?: 'drizzle' | 'zod' | 'pydantic' | 'sql' | 'ts';
+  fromCode?: 'drizzle' | 'zod' | 'pydantic' | 'sql' | 'ts' | 'java';
   /** Field names that differ between the model file and the code. */
   drift?: { onlyModel: string[]; onlyCode: string[] };
   file: string;

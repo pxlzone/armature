@@ -6,10 +6,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import picomatch from 'picomatch';
 import type { CodeIndex } from './code.js';
-import { TEST_FILE } from './code.js';
+import { isTestFile } from './code.js';
 import type { ComposeService } from './deploy.js';
 
-const CODE_LANGS = new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'py', 'javascript', 'typescript', 'python']);
+const CODE_LANGS = new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'py', 'javascript', 'typescript', 'python', 'java']);
 const EXT = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '/index.ts', '/index.tsx', '/index.js', '/index.mjs'];
 const FILE_TOKEN = /[\w@.\-/]+\.(?:[cm]?[jt]sx?|py)\b/g;
 
@@ -81,7 +81,26 @@ export function reach(input: ReachInput): ReachResult {
   ];
 
   // 1. Tests.
-  for (const f of Object.values(idx.files)) if (f.test || TEST_FILE.test(f.path)) mark(f.path, 'test');
+  for (const f of Object.values(idx.files)) if (f.test || isTestFile(f.path)) mark(f.path, 'test');
+
+  // 1b. Java classes a framework loads by name: ServiceLoader registrations (META-INF/services) and AspectJ aspects (aop.xml).
+  const javaClass = (name: string): string | null => {
+    const tail = `${name.trim().replace(/\./g, '/')}.java`;
+    for (const f of known) if (f === tail || f.endsWith(`/${tail}`)) return f;
+    return null;
+  };
+  for (const reg of files.filter((f) => /(^|\/)META-INF\/services\/[^/]+$/.test(f) || /(^|\/)aop\.xml$/.test(f))) {
+    let text = '';
+    try {
+      text = fs.readFileSync(path.join(root, reg), 'utf8');
+    } catch {
+      continue;
+    }
+    const names = reg.endsWith('.xml')
+      ? [...text.matchAll(/<(?:aspect|concrete-aspect)\b[^>]*\bname="([\w.$]+)"/g)].map((m) => m[1])
+      : text.split('\n').map((l) => l.replace(/#.*/, '').trim()).filter((l) => /^[\w.$]+$/.test(l));
+    for (const n of names) mark(javaClass(n), `registered in ${reg}`);
+  }
 
   // 2. package.json: bins, scripts, and the public entry of packages others install.
   for (const pj of files.filter((f) => /(^|\/)package\.json$/.test(f) && !f.includes('node_modules/'))) {
@@ -134,7 +153,7 @@ export function reach(input: ReachInput): ReachResult {
   // 5. Files loaded by path at run time (workflowsPath, import.meta.glob), and Python scripts.
   for (const f of Object.values(idx.files)) {
     for (const h of f.hints ?? []) {
-      if (h.k === 'main') mark(f.path, 'runs as a script (__main__)');
+      if (h.k === 'main') mark(f.path, h.v === '__main__' ? 'runs as a script (__main__)' : `started by the framework (${h.v})`);
       if (h.k !== 'entry') continue;
       const dir = path.posix.dirname(f.path);
       if (/[*{]/.test(h.v)) {
@@ -154,12 +173,32 @@ export function reach(input: ReachInput): ReachResult {
 
   // Walk the import graph from every entry.
   const reachable = new Set<string>();
-  const queue = [...entries.keys()];
-  while (queue.length) {
-    const f = queue.pop()!;
-    if (reachable.has(f)) continue;
-    reachable.add(f);
-    for (const i of idx.files[f]?.imports ?? []) if (i.file && !reachable.has(i.file)) queue.push(i.file);
+  const walk = (from: Iterable<string>): void => {
+    const queue = [...from];
+    while (queue.length) {
+      const f = queue.pop()!;
+      if (reachable.has(f)) continue;
+      reachable.add(f);
+      for (const i of idx.files[f]?.imports ?? []) if (i.file && !reachable.has(i.file)) queue.push(i.file);
+    }
+  };
+  walk(entries.keys());
+  // A bean a framework wires by type (a Spring component) is named nowhere: its users name the interface or
+  // class it implements. It is alive when that supertype is, and what it imports is alive with it.
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const f of Object.values(idx.files)) {
+      if (reachable.has(f.path)) continue;
+      for (const h of f.hints ?? []) {
+        if (h.k !== 'bean') continue;
+        const sup = f.imports.find((i) => i.file && (i.names.includes(h.v) || i.file.endsWith(`/${h.v}.java`)))?.file;
+        if (!sup || !reachable.has(sup)) continue;
+        mark(f.path, `wired by the framework as a ${h.v} (${sup})`);
+        walk([f.path]);
+        grew = true;
+        break;
+      }
+    }
   }
   const dead = Object.values(idx.files)
     .filter((f) => CODE_LANGS.has(f.lang) && !reachable.has(f.path) && !f.path.endsWith('.d.ts'))
