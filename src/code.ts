@@ -98,7 +98,7 @@ export interface CodeFile {
 }
 
 /** Bump when extraction changes, so unchanged files are parsed again with the new rules. */
-export const EXTRACTOR = 13;
+export const EXTRACTOR = 14;
 
 export interface CodeIndex {
   version: 3;
@@ -112,12 +112,18 @@ const LANG_OF: Record<string, string> = {
   '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript', '.py': 'python', '.sql': 'sql', '.java': 'java',
 };
 export const TEST_FILE = /(\.|_)(test|spec)\.[cm]?[jt]sx?$|(^|\/)(__tests__|tests?|e2e)\/|(^|\/)test_[^/]+\.py$|_test\.py$/;
-/** Java keeps every source of a test project under src/test/java, so only the class name says what is a test. */
-const JAVA_TEST_FILE = /(Test|Tests|IT|Check)\.java$/;
+/**
+ * Java test classes by name, as Maven Surefire and Failsafe pick them: *Test, *Tests, *TestCase, *IT, *ITCase anywhere,
+ * and Test* or IT* inside a test source set. The folder alone says nothing: a test project keeps every source under src/test.
+ * A class with test methods and another name is found by its annotations (see JAVA_TEST_METHOD).
+ */
+const JAVA_TEST_FILE = /[A-Za-z0-9_](?:Tests?|TestCase|IT|ITCase)\.java$|(^|\/)src\/[^/]*[tT]est[^/]*\/(?:.*\/)?(?:Test|IT)[A-Z0-9][^/]*\.java$/;
 /** Whether a path is a test file, by the conventions of its language. */
 export function isTestFile(file: string): boolean {
   return file.endsWith('.java') ? JAVA_TEST_FILE.test(file) : TEST_FILE.test(file);
 }
+/** The hint a Java file carries when it has test methods; the index marks such a file as a test whatever its name. */
+export const JAVA_TEST_HINT = '@Test';
 const TS_EXT = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
 const SKIP = /(^|\/)(node_modules|dist|build|\.next|\.turbo|coverage|vendor|__pycache__|\.venv)\//;
 const MAX_BYTES = 400 * 1024;
@@ -787,6 +793,13 @@ function javaType(t: string, enums: Record<string, string>): string {
   return /^[A-Z]\w*$/.test(bare) ? bare : 'json';
 }
 
+/** Classes a framework starts without anyone naming them: aspects, the Spring application, web entry points, configuration. */
+const JAVA_STARTED_CLASS = /@(Aspect|SpringBootApplication|RestController|Controller|ControllerAdvice|RestControllerAdvice|Configuration|WebServlet|WebFilter|WebListener)\b/;
+/** Methods a framework calls: scheduled jobs, listeners, bean factories, lifecycle callbacks. */
+const JAVA_STARTED_METHOD = /@(Scheduled|EventListener|TransactionalEventListener|KafkaListener|RabbitListener|JmsListener|SqsListener|Bean|PostConstruct)\b/;
+/** JUnit and TestNG test methods. */
+const JAVA_TEST_METHOD = /@(?:Test|ParameterizedTest|RepeatedTest|TestFactory|TestTemplate)\b/;
+
 /** Lombok and record classes carry their fields in the code; everything else is behaviour. */
 const JAVA_DATA_ANNOTATIONS = /@(Data|Value|Builder|Getter|Setter|AllArgsConstructor|NoArgsConstructor|JsonProperty|Jacksonized)\b/;
 
@@ -821,9 +834,22 @@ function extractJava(root: any, source: string): Raw {
       const body = top.childForFieldName('body');
       const members: any[] = body?.namedChildren ?? [];
       // A Spring component is wired by the type its users name, so the interface or class it implements or extends
-      // is what keeps it alive. An aspect runs by itself.
+      // is what keeps it alive. An aspect, a controller, a configuration and the application class run by themselves.
       const annotations = top.namedChildren?.find((c: any) => c.type === 'modifiers')?.text ?? '';
-      if (/@Aspect\b/.test(annotations)) beanHints.push({ k: 'main', v: '@Aspect', l: line });
+      const starts = JAVA_STARTED_CLASS.exec(annotations)?.[1];
+      if (starts) beanHints.push({ k: 'main', v: `@${starts}`, l: line });
+      // So do the methods a framework or the JVM calls: a test, a scheduled job, a listener, a bean factory, main().
+      for (const m of members) {
+        if (m.type !== 'method_declaration') continue;
+        const ml = m.startPosition.row + 1;
+        const mtext = m.namedChildren?.find((c: any) => c.type === 'modifiers')?.text ?? '';
+        if (JAVA_TEST_METHOD.test(mtext)) beanHints.push({ k: 'main', v: JAVA_TEST_HINT, l: ml });
+        const called = JAVA_STARTED_METHOD.exec(mtext)?.[1];
+        if (called) beanHints.push({ k: 'main', v: `@${called}`, l: ml });
+        if (m.childForFieldName('name')?.text === 'main' && javaModifiers(m).has('static') && /^\(\s*(?:final\s+)?String\s*(?:\[\]|\.\.\.)/.test(m.childForFieldName('parameters')?.text ?? '')) {
+          beanHints.push({ k: 'main', v: 'main()', l: ml });
+        }
+      }
       if (/@(Component|Service|Repository|Configuration|Controller|RestController|Profile)\b/.test(annotations)) {
         for (const sup of top.namedChildren.filter((c: any) => c.type === 'superclass' || c.type === 'super_interfaces' || c.type === 'extends_interfaces')) {
           const list = sup.type === 'superclass' ? sup.namedChildren : sup.namedChildren.flatMap((c: any) => (c.type === 'type_list' ? c.namedChildren : [c]));
@@ -1202,7 +1228,7 @@ export async function buildCodeIndex(root: string): Promise<IndexResult> {
       lang,
       mtime: st.mtimeMs,
       size: st.size,
-      test: isTestFile(f),
+      test: isTestFile(f) || (lang === 'java' && (entry.hints ?? []).some((h) => h.k === 'main' && h.v === JAVA_TEST_HINT)),
       // A reused entry still holds the submodule imports added last time (names: []); they are added again below.
       imports: entry.imports.filter((i) => !((lang === 'python' || lang === 'java') && i.names.length === 0)).flatMap((i): CodeImport[] => {
         const { files: pkgFiles, ...resolved } = resolve(f, i.spec, lang === 'sql' ? 'typescript' : lang);

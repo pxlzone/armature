@@ -179,7 +179,7 @@ writes one self-contained HTML file with the model embedded. It needs no server.
 armature index
 ```
 
-parses the source files (TypeScript, TSX, JavaScript, Python, Java) and records each file's top-level symbols and imports. For Java it also records the public methods of each class, same-package classes used without an import line, and the fields of records and Lombok data classes. It takes a couple of seconds for a thousand files and well under a second after that, because unchanged files are skipped. The session-start hook and `armature view` refresh it automatically.
+parses the source files (TypeScript, TSX, JavaScript, Python, Java) and records each file's top-level symbols and imports. For Java it also records the public methods of each class, same-package classes used without an import line, and the fields of records and Lombok data classes. Dead-code analysis knows the usual Java entry points: test classes, `main` methods, Spring controllers, configuration, scheduled jobs and listeners, and components wired through an interface. It takes a couple of seconds for a thousand files and well under a second after that, because unchanged files are skipped. The session-start hook and `armature view` refresh it automatically.
 
 ```bash
 armature map billing

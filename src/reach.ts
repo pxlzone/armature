@@ -44,6 +44,11 @@ export interface ReachInput {
   entryGlobs: string[];
 }
 
+/** The repo file that declares the supertype a bean is wired by; undefined when the type comes from a library. */
+function beanSupertype(f: CodeIndex['files'][string], name: string): string | undefined {
+  return f.imports.find((i) => i.file && (i.names.includes(name) || i.file.endsWith(`/${name}.java`)))?.file ?? undefined;
+}
+
 export function reach(input: ReachInput): ReachResult {
   const { root, files, idx } = input;
   const known = new Set(Object.keys(idx.files));
@@ -153,7 +158,7 @@ export function reach(input: ReachInput): ReachResult {
   // 5. Files loaded by path at run time (workflowsPath, import.meta.glob), and Python scripts.
   for (const f of Object.values(idx.files)) {
     for (const h of f.hints ?? []) {
-      if (h.k === 'main') mark(f.path, h.v === '__main__' ? 'runs as a script (__main__)' : `started by the framework (${h.v})`);
+      if (h.k === 'main') mark(f.path, h.v === '__main__' ? 'runs as a script (__main__)' : h.v === 'main()' ? 'has a main method' : `started by the framework (${h.v})`);
       if (h.k !== 'entry') continue;
       const dir = path.posix.dirname(f.path);
       if (/[*{]/.test(h.v)) {
@@ -169,6 +174,15 @@ export function reach(input: ReachInput): ReachResult {
   for (const f of known) {
     if (listed?.(f)) mark(f, 'listed as an entry in the model');
     else if (conv(f)) mark(f, 'framework or tooling convention');
+  }
+
+  // 5b. A bean that implements or extends a library type (CommandLineRunner, Filter, Converter) is called by the
+  // framework through that type, so nobody in the repo names it.
+  for (const f of Object.values(idx.files)) {
+    for (const h of f.hints ?? []) {
+      if (h.k !== 'bean' || beanSupertype(f, h.v)) continue;
+      mark(f.path, `wired by the framework as a ${h.v} (a library type)`);
+    }
   }
 
   // Walk the import graph from every entry.
@@ -191,7 +205,7 @@ export function reach(input: ReachInput): ReachResult {
       if (reachable.has(f.path)) continue;
       for (const h of f.hints ?? []) {
         if (h.k !== 'bean') continue;
-        const sup = f.imports.find((i) => i.file && (i.names.includes(h.v) || i.file.endsWith(`/${h.v}.java`)))?.file;
+        const sup = beanSupertype(f, h.v);
         if (!sup || !reachable.has(sup)) continue;
         mark(f.path, `wired by the framework as a ${h.v} (${sup})`);
         walk([f.path]);

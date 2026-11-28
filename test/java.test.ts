@@ -74,6 +74,15 @@ function repo(): string {
     'svc/src/test/java/com/acme/app/ServiceTest.java',
     'package com.acme.app;\n\nimport org.junit.jupiter.api.Test;\n\nclass ServiceTest {\n    @Test\n    void placesOrder() {\n        new Service(new Repo()).place(null);\n    }\n}\n',
   );
+  // Started by the framework or the JVM, and named by nobody.
+  write('svc/src/main/java/com/acme/app/App.java', 'package com.acme.app;\n\npublic class App {\n    public static void main(String[] args) {\n    }\n}\n');
+  write('svc/src/main/java/com/acme/app/OrderController.java', 'package com.acme.app;\n\nimport org.springframework.web.bind.annotation.RestController;\n\n@RestController\npublic class OrderController {\n}\n');
+  write('svc/src/main/java/com/acme/app/Nightly.java', 'package com.acme.app;\n\nimport org.springframework.scheduling.annotation.Scheduled;\nimport org.springframework.stereotype.Component;\n\n@Component\npublic class Nightly {\n    @Scheduled(cron = "0 0 3 * * *")\n    void run() {\n    }\n}\n');
+  write('svc/src/main/java/com/acme/app/Startup.java', 'package com.acme.app;\n\nimport org.springframework.boot.CommandLineRunner;\nimport org.springframework.stereotype.Component;\n\n@Component\npublic class Startup implements CommandLineRunner {\n    public void run(String... args) {\n    }\n}\n');
+  // A component with no supertype that nobody names stays dead; a class is not a test because of a word in its name.
+  write('svc/src/main/java/com/acme/app/Unused.java', 'package com.acme.app;\n\nimport org.springframework.stereotype.Component;\n\n@Component\npublic class Unused {\n}\n');
+  write('svc/src/main/java/com/acme/app/HealthCheck.java', 'package com.acme.app;\n\npublic class HealthCheck {\n}\n');
+  write('svc/src/test/java/com/acme/app/OrderRules.java', 'package com.acme.app;\n\nimport org.junit.jupiter.api.Test;\n\nclass OrderRules {\n    @Test\n    void holds() {\n    }\n}\n');
   execFileSync('git', ['init', '-q'], { cwd: root });
   execFileSync('git', ['add', '-A'], { cwd: root });
   return root;
@@ -83,7 +92,7 @@ describe('java code index', () => {
   it('extracts types and public methods, and resolves explicit, static, wildcard and same-package imports', async () => {
     const root = repo();
     const r = await buildCodeIndex(root);
-    expect(r.parsed).toBe(14);
+    expect(r.parsed).toBe(21);
     expect(r.index.files['svc/src/main/java/com/acme/app/FastRepo.java'].hints).toContainEqual({ k: 'bean', v: 'Repo', op: 'extends', l: 7 });
     const f = r.index.files['svc/src/main/java/com/acme/app/Service.java'];
     expect(f.lang).toBe('java');
@@ -115,11 +124,19 @@ describe('java code index', () => {
     expect(r.index.files['svc/src/main/java/com/acme/model/Address.java'].schemas.Address).toEqual({ kind: 'java', fields: [{ name: 'city', type: 'string' }, { name: 'zip', type: 'int' }] });
     expect(r.index.files['svc/src/main/java/com/acme/model/Status.java'].enums).toEqual({ Status: 'enum(NEW|PAID)' });
     expect(r.index.files['svc/src/test/java/com/acme/app/ServiceTest.java'].test).toBe(true);
+    // A class with test methods is a test whatever its name; a word in a name does not make one.
+    expect(r.index.files['svc/src/test/java/com/acme/app/OrderRules.java'].test).toBe(true);
+    expect(r.index.files['svc/src/main/java/com/acme/app/HealthCheck.java'].test).toBe(false);
   });
 
   it('tells test classes by name, not by the src/test folder', () => {
-    expect(isTestFile('svc/src/test/java/com/acme/app/ServiceTest.java')).toBe(true);
-    expect(isTestFile('svc/src/test/java/com/acme/app/ServiceHook.java')).toBe(false);
+    for (const name of ['ServiceTest', 'ServiceTests', 'ServiceTestCase', 'ServiceIT', 'ServiceITCase', 'TestService', 'ITService']) {
+      expect(isTestFile(`svc/src/test/java/com/acme/app/${name}.java`), name).toBe(true);
+    }
+    for (const name of ['ServiceHook', 'HealthCheck', 'Latest', 'Item']) expect(isTestFile(`svc/src/test/java/com/acme/app/${name}.java`), name).toBe(false);
+    // Test* and IT* are names of tests only inside a test source set.
+    expect(isTestFile('svc/src/main/java/com/acme/app/TestService.java')).toBe(false);
+    expect(isTestFile('svc/src/integrationTest/java/com/acme/app/ITService.java')).toBe(true);
     expect(isTestFile('apps/web/tests/login.ts')).toBe(true);
   });
 
@@ -130,7 +147,13 @@ describe('java code index', () => {
     const kinds = Object.fromEntries(g.codeDeps.map((d) => [`${d.from}>${d.to}`, d.kind]));
     expect(kinds).toEqual({ 'app>util': 'declared', 'app>model': 'library' });
     // FastRepo is wired by Spring as a Repo, so it lives, and so does the Ext it imports; a bean of a dead supertype is dead too.
-    expect(g.dead.map((d) => d.path)).toEqual(['svc/src/main/java/com/acme/app/Dead.java', 'svc/src/main/java/com/acme/app/DeadBean.java']);
+    // A main method, a controller, a scheduled job and a bean of a library type are started without being named.
+    expect(g.dead.map((d) => d.path)).toEqual([
+      'svc/src/main/java/com/acme/app/Dead.java',
+      'svc/src/main/java/com/acme/app/DeadBean.java',
+      'svc/src/main/java/com/acme/app/HealthCheck.java',
+      'svc/src/main/java/com/acme/app/Unused.java',
+    ]);
     expect(g.problems.some((p) => p.code === 'unread-node')).toBe(false);
     const idx = readCodeIndex(root)!;
     const map = codeMap(g, idx, 'app');

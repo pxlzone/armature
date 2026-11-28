@@ -19946,12 +19946,18 @@ var LANG_OF = {
 	".java": "java"
 };
 var TEST_FILE = /(\.|_)(test|spec)\.[cm]?[jt]sx?$|(^|\/)(__tests__|tests?|e2e)\/|(^|\/)test_[^/]+\.py$|_test\.py$/;
-/** Java keeps every source of a test project under src/test/java, so only the class name says what is a test. */
-var JAVA_TEST_FILE = /(Test|Tests|IT|Check)\.java$/;
+/**
+* Java test classes by name, as Maven Surefire and Failsafe pick them: *Test, *Tests, *TestCase, *IT, *ITCase anywhere,
+* and Test* or IT* inside a test source set. The folder alone says nothing: a test project keeps every source under src/test.
+* A class with test methods and another name is found by its annotations (see JAVA_TEST_METHOD).
+*/
+var JAVA_TEST_FILE = /[A-Za-z0-9_](?:Tests?|TestCase|IT|ITCase)\.java$|(^|\/)src\/[^/]*[tT]est[^/]*\/(?:.*\/)?(?:Test|IT)[A-Z0-9][^/]*\.java$/;
 /** Whether a path is a test file, by the conventions of its language. */
 function isTestFile(file) {
 	return file.endsWith(".java") ? JAVA_TEST_FILE.test(file) : TEST_FILE.test(file);
 }
+/** The hint a Java file carries when it has test methods; the index marks such a file as a test whatever its name. */
+var JAVA_TEST_HINT = "@Test";
 var TS_EXT = [
 	".ts",
 	".tsx",
@@ -20820,6 +20826,12 @@ function javaType(t, enums) {
 	const bare = s.replace(/<.*>$/, "");
 	return /^[A-Z]\w*$/.test(bare) ? bare : "json";
 }
+/** Classes a framework starts without anyone naming them: aspects, the Spring application, web entry points, configuration. */
+var JAVA_STARTED_CLASS = /@(Aspect|SpringBootApplication|RestController|Controller|ControllerAdvice|RestControllerAdvice|Configuration|WebServlet|WebFilter|WebListener)\b/;
+/** Methods a framework calls: scheduled jobs, listeners, bean factories, lifecycle callbacks. */
+var JAVA_STARTED_METHOD = /@(Scheduled|EventListener|TransactionalEventListener|KafkaListener|RabbitListener|JmsListener|SqsListener|Bean|PostConstruct)\b/;
+/** JUnit and TestNG test methods. */
+var JAVA_TEST_METHOD = /@(?:Test|ParameterizedTest|RepeatedTest|TestFactory|TestTemplate)\b/;
 /** Lombok and record classes carry their fields in the code; everything else is behaviour. */
 var JAVA_DATA_ANNOTATIONS = /@(Data|Value|Builder|Getter|Setter|AllArgsConstructor|NoArgsConstructor|JsonProperty|Jacksonized)\b/;
 function extractJava(root, source) {
@@ -20861,11 +20873,33 @@ function extractJava(root, source) {
 			});
 			const members = top.childForFieldName("body")?.namedChildren ?? [];
 			const annotations = top.namedChildren?.find((c) => c.type === "modifiers")?.text ?? "";
-			if (/@Aspect\b/.test(annotations)) beanHints.push({
+			const starts = JAVA_STARTED_CLASS.exec(annotations)?.[1];
+			if (starts) beanHints.push({
 				k: "main",
-				v: "@Aspect",
+				v: `@${starts}`,
 				l: line
 			});
+			for (const m of members) {
+				if (m.type !== "method_declaration") continue;
+				const ml = m.startPosition.row + 1;
+				const mtext = m.namedChildren?.find((c) => c.type === "modifiers")?.text ?? "";
+				if (JAVA_TEST_METHOD.test(mtext)) beanHints.push({
+					k: "main",
+					v: JAVA_TEST_HINT,
+					l: ml
+				});
+				const called = JAVA_STARTED_METHOD.exec(mtext)?.[1];
+				if (called) beanHints.push({
+					k: "main",
+					v: `@${called}`,
+					l: ml
+				});
+				if (m.childForFieldName("name")?.text === "main" && javaModifiers(m).has("static") && /^\(\s*(?:final\s+)?String\s*(?:\[\]|\.\.\.)/.test(m.childForFieldName("parameters")?.text ?? "")) beanHints.push({
+					k: "main",
+					v: "main()",
+					l: ml
+				});
+			}
 			if (/@(Component|Service|Repository|Configuration|Controller|RestController|Profile)\b/.test(annotations)) for (const sup of top.namedChildren.filter((c) => c.type === "superclass" || c.type === "super_interfaces" || c.type === "extends_interfaces")) {
 				const list = sup.type === "superclass" ? sup.namedChildren : sup.namedChildren.flatMap((c) => c.type === "type_list" ? c.namedChildren : [c]);
 				for (const t of list) {
@@ -21209,7 +21243,7 @@ async function buildCodeIndex(root) {
 	const mdir = MODEL_DIR;
 	const wanted = repo.files.filter((f) => LANG_OF[path.extname(f)] && !SKIP$2.test(`/${f}`) && !f.endsWith(".d.ts") && !/\.min\.js$/.test(f) && !f.startsWith(`${mdir}/`));
 	const prior = readCodeIndex(root);
-	const old = prior?.extractor === 13 ? prior : null;
+	const old = prior?.extractor === 14 ? prior : null;
 	const files = {};
 	const resolve = makeResolver(root, all);
 	let parsed = 0;
@@ -21288,7 +21322,7 @@ async function buildCodeIndex(root) {
 			lang,
 			mtime: st.mtimeMs,
 			size: st.size,
-			test: isTestFile(f),
+			test: isTestFile(f) || lang === "java" && (entry.hints ?? []).some((h) => h.k === "main" && h.v === "@Test"),
 			imports: entry.imports.filter((i) => !((lang === "python" || lang === "java") && i.names.length === 0)).flatMap((i) => {
 				const { files: pkgFiles, ...resolved } = resolve(f, i.spec, lang === "sql" ? "typescript" : lang);
 				const own = {
@@ -21318,7 +21352,7 @@ async function buildCodeIndex(root) {
 	}
 	const index = {
 		version: 3,
-		extractor: 13,
+		extractor: 14,
 		builtAt: (/* @__PURE__ */ new Date()).toISOString(),
 		files
 	};
@@ -22211,6 +22245,10 @@ var CONVENTION_ENTRIES = [
 	"**/bin/**",
 	"**/{conftest,manage,setup}.py"
 ];
+/** The repo file that declares the supertype a bean is wired by; undefined when the type comes from a library. */
+function beanSupertype(f, name) {
+	return f.imports.find((i) => i.file && (i.names.includes(name) || i.file.endsWith(`/${name}.java`)))?.file ?? void 0;
+}
 function reach(input) {
 	const { root, files, idx } = input;
 	const known = new Set(Object.keys(idx.files));
@@ -22301,7 +22339,7 @@ function reach(input) {
 		for (const m of text.matchAll(/<script[^>]*\bsrc=["']([^"']+)["']/g)) mark(resolveIn(dir, m[1].replace(/^\//, "")), `script in ${html}`);
 	}
 	for (const f of Object.values(idx.files)) for (const h of f.hints ?? []) {
-		if (h.k === "main") mark(f.path, h.v === "__main__" ? "runs as a script (__main__)" : `started by the framework (${h.v})`);
+		if (h.k === "main") mark(f.path, h.v === "__main__" ? "runs as a script (__main__)" : h.v === "main()" ? "has a main method" : `started by the framework (${h.v})`);
 		if (h.k !== "entry") continue;
 		const dir = path.posix.dirname(f.path);
 		if (/[*{]/.test(h.v)) {
@@ -22313,6 +22351,10 @@ function reach(input) {
 	const listed = input.entryGlobs.length ? (0, import_picomatch.default)(input.entryGlobs, { dot: true }) : null;
 	for (const f of known) if (listed?.(f)) mark(f, "listed as an entry in the model");
 	else if (conv(f)) mark(f, "framework or tooling convention");
+	for (const f of Object.values(idx.files)) for (const h of f.hints ?? []) {
+		if (h.k !== "bean" || beanSupertype(f, h.v)) continue;
+		mark(f.path, `wired by the framework as a ${h.v} (a library type)`);
+	}
 	const reachable = /* @__PURE__ */ new Set();
 	const walk = (from) => {
 		const queue = [...from];
@@ -22330,7 +22372,7 @@ function reach(input) {
 			if (reachable.has(f.path)) continue;
 			for (const h of f.hints ?? []) {
 				if (h.k !== "bean") continue;
-				const sup = f.imports.find((i) => i.file && (i.names.includes(h.v) || i.file.endsWith(`/${h.v}.java`)))?.file;
+				const sup = beanSupertype(f, h.v);
 				if (!sup || !reachable.has(sup)) continue;
 				mark(f.path, `wired by the framework as a ${h.v} (${sup})`);
 				walk([f.path]);
