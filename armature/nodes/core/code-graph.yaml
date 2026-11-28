@@ -9,7 +9,7 @@ code:
   - src/schemas.ts
   - src/history.ts
   - src/watch.ts
-tests: [test/code.test.ts, test/islands.test.ts, test/deep.test.ts]
+tests: [test/code.test.ts, test/islands.test.ts, test/deep.test.ts, test/java.test.ts]
 
 accepts:
   - id: index
@@ -35,6 +35,14 @@ requirements:
     text: A second index run reads only the files that changed.
     tests: test/code.test.ts
     match: reuses unchanged files
+  - id: reads-java
+    text: A Java file gives its types, public methods and imports, and a class of the same package counts as imported.
+    tests: test/java.test.ts
+    match: extracts types and public methods
+  - id: keeps-wired-java-classes
+    text: A Java class that a framework wires or a service file registers is not reported as dead code.
+    tests: test/java.test.ts
+    match: keeps classes a service file registers
   - id: reads-shapes-from-code
     text: A shape bound to a Drizzle, Zod, Pydantic or SQL source takes its fields from that source.
     tests: test/deep.test.ts
