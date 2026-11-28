@@ -43,7 +43,7 @@ fs.chmodSync(path.join(out, 'bin', 'armature.mjs'), 0o755);
 
 // 2. tree-sitter is loaded from disk at run time; vendor only the runtime and the grammars we parse.
 const ts = 'node_modules/@vscode/tree-sitter-wasm';
-for (const f of ['package.json', 'LICENSE', 'wasm/tree-sitter.js', 'wasm/tree-sitter.wasm', ...['typescript', 'tsx', 'javascript', 'python'].map((l) => `wasm/tree-sitter-${l}.wasm`)]) {
+for (const f of ['package.json', 'LICENSE', 'wasm/tree-sitter.js', 'wasm/tree-sitter.wasm', ...['typescript', 'tsx', 'javascript', 'python', 'java'].map((l) => `wasm/tree-sitter-${l}.wasm`)]) {
   copy(`${ts}/${f}`, `node_modules/@vscode/tree-sitter-wasm/${f}`);
 }
 

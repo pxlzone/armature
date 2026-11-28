@@ -6,7 +6,7 @@ tech:
   - { id: vitest, name: Vitest, category: tool, files: [vitest.config.ts] }
   - { id: react, name: React, category: framework }
   - { id: elk, name: ELK, category: library, note: Lays out the diagram. }
-  - { id: tree-sitter, name: tree-sitter, category: library, note: "Parses TypeScript, JavaScript and Python for the code index." }
+  - { id: tree-sitter, name: tree-sitter, category: library, note: "Parses TypeScript, JavaScript, Python and Java for the code index." }
   - { id: yaml, name: yaml, category: library, note: "Reads the model, and rewrites it without losing comments." }
   - { id: ajv, name: Ajv, category: library, note: Validates model files against the JSON Schema. }
   - { id: picomatch, name: picomatch, category: library, note: Matches code globs. }

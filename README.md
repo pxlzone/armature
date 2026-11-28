@@ -179,7 +179,7 @@ writes one self-contained HTML file with the model embedded. It needs no server.
 armature index
 ```
 
-parses the source files (TypeScript, TSX, JavaScript, Python) and records each file's top-level symbols and imports. It takes a couple of seconds for a thousand files and well under a second after that, because unchanged files are skipped. The session-start hook and `armature view` refresh it automatically.
+parses the source files (TypeScript, TSX, JavaScript, Python, Java) and records each file's top-level symbols and imports. For Java it also records the public methods of each class, same-package classes used without an import line, and the fields of records and Lombok data classes. Dead-code analysis knows the usual Java entry points: test classes, `main` methods, Spring controllers, configuration, scheduled jobs and listeners, and components wired through an interface. It takes a couple of seconds for a thousand files and well under a second after that, because unchanged files are skipped. The session-start hook and `armature view` refresh it automatically.
 
 ```bash
 armature map billing
@@ -214,7 +214,7 @@ The MCP tools `context`, `search`, `callers`, `tests_for`, `drift`, `path`, `tra
 
 ## Keeping the model honest
 
-**What is not checked is said to be unchecked.** The code index reads TypeScript, JavaScript, Python and SQL, and recognises a fixed set of things in them (routes registered on an app or router, Temporal queues, Drizzle and Supabase table access, SQL text, `/api/` paths). Every interface and link carries what it found: seen, not seen, or not checked. `armature drift` ends with the nodes it could not read, so a node in Go or one that uses another ORM is never taken for clean.
+**What is not checked is said to be unchecked.** The code index reads TypeScript, JavaScript, Python, Java and SQL, and recognises a fixed set of things in them (routes registered on an app or router, Temporal queues, Drizzle and Supabase table access, SQL text, `/api/` paths). Every interface and link carries what it found: seen, not seen, or not checked. `armature drift` ends with the nodes it could not read, so a node in Go or one that uses another ORM is never taken for clean.
 
 **Reviewing a pull request.**
 

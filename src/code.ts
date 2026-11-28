@@ -26,6 +26,8 @@ export interface CodeImport {
   pkg?: string;
   /** Local name -> imported name ("*" for a namespace import). */
   as?: Record<string, string>;
+  /** Java: a class of the same package used without an import line. Dropped when no file matches. */
+  implicit?: boolean;
 }
 
 /** A use of an imported or top-level name: n is the local name, or ns.member for a namespace import. */
@@ -45,9 +47,9 @@ export interface SchemaField {
   type: string;
 }
 
-/** A data structure defined in code: a Drizzle table, a Zod object, a Pydantic model, a SQL table. */
+/** A data structure defined in code: a Drizzle table, a Zod object, a Pydantic model, a SQL table, a Java record or Lombok class. */
 export interface CodeSchema {
-  kind: 'drizzle' | 'zod' | 'pydantic' | 'sql' | 'ts';
+  kind: 'drizzle' | 'zod' | 'pydantic' | 'sql' | 'ts' | 'java';
   table?: string;
   fields: SchemaField[];
 }
@@ -63,8 +65,12 @@ export interface SqlOp {
 
 /** Things the code does at run time that imports cannot show. */
 export interface RuntimeHint {
-  /** entry: a file this one loads by path at run time (Temporal workflowsPath, import.meta.glob); main: a Python script; env: an environment variable read. */
-  k: 'route' | 'http' | 'queue' | 'workflow' | 'table' | 'entry' | 'main' | 'env';
+  /**
+   * entry: a file this one loads by path at run time (Temporal workflowsPath, import.meta.glob); main: a Python script,
+   * or a class a framework starts by itself (an aspect); env: an environment variable read;
+   * bean: a class a framework wires by type (a Spring component), v being the interface or class it implements or extends.
+   */
+  k: 'route' | 'http' | 'queue' | 'workflow' | 'table' | 'entry' | 'main' | 'env' | 'bean';
   v: string;
   op?: string;
   l: number;
@@ -92,7 +98,7 @@ export interface CodeFile {
 }
 
 /** Bump when extraction changes, so unchanged files are parsed again with the new rules. */
-export const EXTRACTOR = 10;
+export const EXTRACTOR = 14;
 
 export interface CodeIndex {
   version: 3;
@@ -103,9 +109,21 @@ export interface CodeIndex {
 
 const LANG_OF: Record<string, string> = {
   '.ts': 'typescript', '.mts': 'typescript', '.cts': 'typescript', '.tsx': 'tsx', '.jsx': 'tsx',
-  '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript', '.py': 'python', '.sql': 'sql',
+  '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript', '.py': 'python', '.sql': 'sql', '.java': 'java',
 };
 export const TEST_FILE = /(\.|_)(test|spec)\.[cm]?[jt]sx?$|(^|\/)(__tests__|tests?|e2e)\/|(^|\/)test_[^/]+\.py$|_test\.py$/;
+/**
+ * Java test classes by name, as Maven Surefire and Failsafe pick them: *Test, *Tests, *TestCase, *IT, *ITCase anywhere,
+ * and Test* or IT* inside a test source set. The folder alone says nothing: a test project keeps every source under src/test.
+ * A class with test methods and another name is found by its annotations (see JAVA_TEST_METHOD).
+ */
+const JAVA_TEST_FILE = /[A-Za-z0-9_](?:Tests?|TestCase|IT|ITCase)\.java$|(^|\/)src\/[^/]*[tT]est[^/]*\/(?:.*\/)?(?:Test|IT)[A-Z0-9][^/]*\.java$/;
+/** Whether a path is a test file, by the conventions of its language. */
+export function isTestFile(file: string): boolean {
+  return file.endsWith('.java') ? JAVA_TEST_FILE.test(file) : TEST_FILE.test(file);
+}
+/** The hint a Java file carries when it has test methods; the index marks such a file as a test whatever its name. */
+export const JAVA_TEST_HINT = '@Test';
 const TS_EXT = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
 const SKIP = /(^|\/)(node_modules|dist|build|\.next|\.turbo|coverage|vendor|__pycache__|\.venv)\//;
 const MAX_BYTES = 400 * 1024;
@@ -499,6 +517,7 @@ function envHints(source: string, lineAt: (i: number) => number): RuntimeHint[] 
     /\bDeno\.env\.get\(\s*["'`]([A-Z_][A-Z0-9_]*)["'`]/g,
     /\bos\.environ\[\s*["']([A-Z_][A-Z0-9_]*)["']\s*\]/g,
     /\bos\.(?:environ\.get|getenv)\(\s*["']([A-Z_][A-Z0-9_]*)["']/g,
+    /\bSystem\.getenv\(\s*"([A-Z_][A-Z0-9_]*)"/g,
   ];
   for (const re of patterns) for (const m of source.matchAll(re)) out.push({ k: 'env', v: m[1], l: lineAt(m.index ?? 0) });
   return dedupeHints(out).slice(0, 60);
@@ -732,6 +751,230 @@ function pyType(t: string): string {
 }
 
 
+/** The Javadoc right above a Java declaration, as one line without its @tags. */
+function javaDocOf(node: any): string | undefined {
+  const prev = node.previousSibling;
+  if (!prev || prev.type !== 'block_comment' || !String(prev.text).startsWith('/**') || node.startPosition.row - prev.endPosition.row > 1) return undefined;
+  const lines = String(prev.text)
+    .split('\n')
+    .map((l: string) => l.replace(/^\s*(\/\*\*?|\*\/|\*)\s?/, '').replace(/\*\/\s*$/, '').trim())
+    .filter((l: string) => l && !l.startsWith('@'))
+    .map((l: string) => l.replace(/<[^>]+>/g, '').replace(/\{@\w+\s+([^}]*)\}/g, '$1'));
+  return lines.length ? oneLine(lines.join(' '), 140) : undefined;
+}
+
+const JAVA_TYPES = new Set(['class_declaration', 'interface_declaration', 'enum_declaration', 'record_declaration', 'annotation_type_declaration']);
+
+/** The keywords of a modifiers node, without its annotations. */
+function javaModifiers(decl: any): Set<string> {
+  const mods = decl.namedChildren?.find((c: any) => c.type === 'modifiers');
+  return new Set((mods?.children ?? []).filter((c: any) => !c.type.includes('annotation')).map((c: any) => c.type));
+}
+
+function javaType(t: string, enums: Record<string, string>): string {
+  const s = t.replace(/\s+/g, '').replace(/^final/, '');
+  const opt = /^Optional<(.+)>$/.exec(s)?.[1];
+  if (opt) return `${javaType(opt, enums).replace(/\?$/, '')}?`;
+  const list = /^(?:List|Set|Collection|Iterable|ArrayList|LinkedList|HashSet|Queue|Deque)<(.+)>$/.exec(s)?.[1];
+  if (list) return `${javaType(list, enums).replace(/\?$/, '')}[]`;
+  if (s.endsWith('[]')) return `${javaType(s.slice(0, -2), enums).replace(/\?$/, '')}[]`;
+  const map = /^(?:Map|HashMap|LinkedHashMap|TreeMap)<(.+),(.+)>$/.exec(s);
+  if (map) return `map<${javaType(map[1], enums)},${javaType(map[2], enums)}>`;
+  const known: Record<string, string> = {
+    String: 'string', char: 'string', Character: 'string', CharSequence: 'string',
+    int: 'int', Integer: 'int', long: 'int', Long: 'int', short: 'int', Short: 'int', byte: 'int', Byte: 'int', BigInteger: 'int',
+    double: 'float', Double: 'float', float: 'float', Float: 'float', BigDecimal: 'float',
+    boolean: 'bool', Boolean: 'bool', UUID: 'uuid', LocalDate: 'date', LocalDateTime: 'timestamp', ZonedDateTime: 'timestamp',
+    OffsetDateTime: 'timestamp', Instant: 'timestamp', Date: 'timestamp', URI: 'url', URL: 'url', Object: 'json', JsonNode: 'json', 'byte[]': 'bytes',
+  };
+  if (known[s]) return known[s];
+  if (enums[s]) return enums[s];
+  const bare = s.replace(/<.*>$/, '');
+  return /^[A-Z]\w*$/.test(bare) ? bare : 'json';
+}
+
+/** Classes a framework starts without anyone naming them: aspects, the Spring application, web entry points, configuration. */
+const JAVA_STARTED_CLASS = /@(Aspect|SpringBootApplication|RestController|Controller|ControllerAdvice|RestControllerAdvice|Configuration|WebServlet|WebFilter|WebListener)\b/;
+/** Methods a framework calls: scheduled jobs, listeners, bean factories, lifecycle callbacks. */
+const JAVA_STARTED_METHOD = /@(Scheduled|EventListener|TransactionalEventListener|KafkaListener|RabbitListener|JmsListener|SqsListener|Bean|PostConstruct)\b/;
+/** JUnit and TestNG test methods. */
+const JAVA_TEST_METHOD = /@(?:Test|ParameterizedTest|RepeatedTest|TestFactory|TestTemplate)\b/;
+
+/** Lombok and record classes carry their fields in the code; everything else is behaviour. */
+const JAVA_DATA_ANNOTATIONS = /@(Data|Value|Builder|Getter|Setter|AllArgsConstructor|NoArgsConstructor|JsonProperty|Jacksonized)\b/;
+
+function extractJava(root: any, source: string): Raw {
+  const symbols: CodeSymbol[] = [];
+  const imports: Raw['imports'] = [];
+  const schemas: Record<string, CodeSchema> = {};
+  const enums: Record<string, string> = {};
+  const explicit = new Set<string>();
+  const beanHints: RuntimeHint[] = [];
+  let pkg = '';
+  for (const top of root.children) {
+    const line = top.startPosition.row + 1;
+    if (top.type === 'package_declaration') {
+      pkg = top.text.replace(/^package\s+|\s*;\s*$/g, '').trim();
+    } else if (top.type === 'import_declaration') {
+      const m = /^import\s+(static\s+)?([\w.$]+?)(\.\*)?\s*;/.exec(top.text.replace(/\s+/g, ' '));
+      if (!m) continue;
+      const [, isStatic, spec, star] = m;
+      const last = spec.split('.').pop()!;
+      const names = star ? ['*'] : [last];
+      if (!star) explicit.add(last);
+      // A static import names a member, so it belongs to the class before it; a wildcard one takes the whole class.
+      imports.push({ spec: isStatic && !star ? spec.slice(0, -last.length - 1) : spec, names, line, as: star ? undefined : { [last]: last } });
+    } else if (JAVA_TYPES.has(top.type)) {
+      const name = top.childForFieldName('name')?.text;
+      if (!name) continue;
+      const mods = javaModifiers(top);
+      const exported = mods.has('public');
+      const kind: CodeSymbol['kind'] = top.type === 'interface_declaration' ? 'interface' : top.type === 'enum_declaration' ? 'enum' : top.type === 'annotation_type_declaration' ? 'type' : 'class';
+      symbols.push({ name, kind, line, sig: signature(top.text), doc: javaDocOf(top), exported });
+      const body = top.childForFieldName('body');
+      const members: any[] = body?.namedChildren ?? [];
+      // A Spring component is wired by the type its users name, so the interface or class it implements or extends
+      // is what keeps it alive. An aspect, a controller, a configuration and the application class run by themselves.
+      const annotations = top.namedChildren?.find((c: any) => c.type === 'modifiers')?.text ?? '';
+      const starts = JAVA_STARTED_CLASS.exec(annotations)?.[1];
+      if (starts) beanHints.push({ k: 'main', v: `@${starts}`, l: line });
+      // So do the methods a framework or the JVM calls: a test, a scheduled job, a listener, a bean factory, main().
+      for (const m of members) {
+        if (m.type !== 'method_declaration') continue;
+        const ml = m.startPosition.row + 1;
+        const mtext = m.namedChildren?.find((c: any) => c.type === 'modifiers')?.text ?? '';
+        if (JAVA_TEST_METHOD.test(mtext)) beanHints.push({ k: 'main', v: JAVA_TEST_HINT, l: ml });
+        const called = JAVA_STARTED_METHOD.exec(mtext)?.[1];
+        if (called) beanHints.push({ k: 'main', v: `@${called}`, l: ml });
+        if (m.childForFieldName('name')?.text === 'main' && javaModifiers(m).has('static') && /^\(\s*(?:final\s+)?String\s*(?:\[\]|\.\.\.)/.test(m.childForFieldName('parameters')?.text ?? '')) {
+          beanHints.push({ k: 'main', v: 'main()', l: ml });
+        }
+      }
+      if (/@(Component|Service|Repository|Configuration|Controller|RestController|Profile)\b/.test(annotations)) {
+        for (const sup of top.namedChildren.filter((c: any) => c.type === 'superclass' || c.type === 'super_interfaces' || c.type === 'extends_interfaces')) {
+          const list = sup.type === 'superclass' ? sup.namedChildren : sup.namedChildren.flatMap((c: any) => (c.type === 'type_list' ? c.namedChildren : [c]));
+          for (const t of list) {
+            const tname = t.type === 'type_identifier' ? t.text : t.namedChildren?.find((c: any) => c.type === 'type_identifier')?.text;
+            if (tname) beanHints.push({ k: 'bean', v: tname, op: sup.type === 'superclass' ? 'extends' : 'implements', l: line });
+          }
+        }
+      }
+      if (top.type === 'enum_declaration') {
+        const constants = members.filter((m) => m.type === 'enum_constant').map((m) => m.childForFieldName('name')?.text).filter(Boolean);
+        if (constants.length && constants.length <= 60) enums[name] = `enum(${constants.join('|')})`;
+      }
+      // Public and protected methods: what the rest of the code calls on this class.
+      let count = 0;
+      for (const m of members) {
+        if (m.type !== 'method_declaration' || count >= 80) continue;
+        const mm = javaModifiers(m);
+        if (mm.has('private')) continue;
+        const mname = m.childForFieldName('name')?.text;
+        if (!mname) continue;
+        count++;
+        symbols.push({
+          name: `${name}.${mname}`,
+          kind: 'function',
+          line: m.startPosition.row + 1,
+          sig: signature(m.text).replace(/;$/, ''),
+          doc: javaDocOf(m),
+          exported: exported && (mm.has('public') || top.type === 'interface_declaration'),
+        });
+      }
+      // Data shapes: records, and classes Lombok or Jackson turn into plain data.
+      const annotated = JAVA_DATA_ANNOTATIONS.test(top.text.slice(0, top.text.indexOf(name)));
+      if (top.type === 'record_declaration' || (top.type === 'class_declaration' && annotated)) {
+        const fields: SchemaField[] = [];
+        if (top.type === 'record_declaration') {
+          for (const p of top.childForFieldName('parameters')?.namedChildren ?? []) {
+            const ty = p.childForFieldName('type')?.text;
+            const fname = p.childForFieldName('name')?.text;
+            if (ty && fname) fields.push({ name: fname, type: javaType(ty, enums) });
+          }
+        } else {
+          for (const f of members) {
+            if (f.type !== 'field_declaration' || javaModifiers(f).has('static')) continue;
+            const ty = f.childForFieldName('type')?.text;
+            for (const d of f.namedChildren.filter((c: any) => c.type === 'variable_declarator')) {
+              const fname = d.childForFieldName('name')?.text;
+              if (ty && fname) fields.push({ name: fname, type: javaType(ty, enums) });
+            }
+          }
+        }
+        if (fields.length) schemas[name] = { kind: 'java', fields };
+      }
+    }
+  }
+  // Classes of the same package need no import line. Each name used that is not declared here, imported, or
+  // a type parameter is taken as one; the resolver drops the ones no file matches.
+  const own = new Set(symbols.filter((s) => !s.name.includes('.')).map((s) => s.name));
+  const used = new Map<string, number>();
+  for (const id of root.descendantsOfType(['type_identifier', 'identifier'])) {
+    const text: string = id.text;
+    if (!/^[A-Z][A-Za-z0-9_]*$/.test(text) || text.length < 2 || own.has(text) || explicit.has(text) || used.has(text)) continue;
+    if (id.type === 'identifier') {
+      // An identifier counts only where a class name can stand: before a dot (X.of(), X.CONST) or before :: (X::new).
+      const p = id.parent;
+      const isStatic =
+        (p?.type === 'method_invocation' && p.childForFieldName('object')?.id === id.id) ||
+        (p?.type === 'field_access' && p.childForFieldName('object')?.id === id.id) ||
+        (p?.type === 'method_reference' && p.namedChildren[0]?.id === id.id);
+      if (!isStatic) continue;
+    }
+    if (id.parent?.type === 'type_parameter') continue;
+    used.set(text, id.startPosition.row + 1);
+  }
+  for (const [name, line] of used) imports.push({ spec: pkg ? `${pkg}.${name}` : name, names: [name], line, as: { [name]: name }, implicit: true });
+
+  // Uses of imported names and own symbols, attributed to the method they sit in.
+  const known = new Set<string>([...own, ...explicit]);
+  for (const i of imports) for (const n of Object.keys(i.as ?? {})) known.add(n);
+  const spans: Array<[number, number, string]> = [];
+  for (const top of root.children) {
+    if (!JAVA_TYPES.has(top.type)) continue;
+    const tname = top.childForFieldName('name')?.text;
+    if (!tname) continue;
+    spans.push([top.startPosition.row, top.endPosition.row, tname]);
+    for (const m of top.childForFieldName('body')?.namedChildren ?? []) {
+      if (m.type !== 'method_declaration' && m.type !== 'constructor_declaration') continue;
+      const mname = m.childForFieldName('name')?.text;
+      if (mname) spans.unshift([m.startPosition.row, m.endPosition.row, `${tname}.${mname}`]);
+    }
+  }
+  const encl = (row: number): string | undefined => spans.find(([a, b]) => row >= a && row <= b)?.[2];
+  const refs = new Map<string, CodeRef>();
+  for (const id of root.descendantsOfType(['identifier', 'type_identifier'])) {
+    const text: string = id.text;
+    if (!known.has(text)) continue;
+    const p = id.parent;
+    if (!p || p.type === 'import_declaration' || p.type === 'scoped_identifier' || p.type === 'package_declaration') continue;
+    if (JAVA_TYPES.has(p.type) && p.childForFieldName('name')?.id === id.id) continue;
+    const called =
+      (p.type === 'method_invocation' && (p.childForFieldName('name')?.id === id.id || p.childForFieldName('object')?.id === id.id)) ||
+      (p.type === 'object_creation_expression' && p.childForFieldName('type')?.id === id.id) ||
+      p.type === 'method_reference' || p.type === 'superclass' || p.type === 'super_interfaces' || p.type === 'type_list' ||
+      (p.type === 'marker_annotation' || p.type === 'annotation') && p.childForFieldName('name')?.id === id.id;
+    const row = id.startPosition.row;
+    const where = encl(row);
+    if (where === text) continue;
+    const key = `${text}|${where ?? ''}`;
+    const prev = refs.get(key);
+    if (prev) {
+      prev.x++;
+      if (called) prev.c = 1;
+    } else refs.set(key, { n: text, l: row + 1, in: where, c: called ? 1 : 0, x: 1 });
+  }
+  const clean = withoutComments(source);
+  const lineAt = (i: number): number => clean.slice(0, i).split('\n').length;
+  const hints: RuntimeHint[] = [...beanHints];
+  // Paths handed to an HTTP client: the same /api/ rule as for TypeScript.
+  for (const m of clean.matchAll(/"([^"\n]*?(\/api\/[A-Za-z0-9_\-/:.{}]+))[^"\n]*"/g)) {
+    hints.push({ k: 'http', v: m[2].replace(/\{[^}]*\}/g, ':p').replace(/\/+$/, ''), l: lineAt(m.index ?? 0) });
+  }
+  sqlHints(clean, hints, lineAt);
+  return { symbols, imports, refs: [...refs.values()].slice(0, 600), schemas, enums, hints: [...dedupeHints(hints).slice(0, 200), ...envHints(clean, lineAt)] };
+}
+
 const STOP = new Set('the and for with from this that not are was were has have had but its into out all any can will would should could may must use used using via per get set new old true false null undefined async await void string number boolean unknown self def none str int float bool src lib index test tests const let var function export import type interface class return else then when what which who how why also only just like make made more most some such than them they there these those very each other over same where while about after again before being both does doing down during few further here itself once own too until upon'.split(' '));
 
 /** Splits code and prose into lowercase words: camelCase, snake_case and paths all become words. */
@@ -770,7 +1013,8 @@ function termsOf(file: string, symbols: CodeSymbol[], source: string): Record<st
 }
 
 interface Resolver {
-  (from: string, spec: string, lang: string): { file: string | null; pkg?: string };
+  /** files: every file of a package, for a Java wildcard import. */
+  (from: string, spec: string, lang: string): { file: string | null; pkg?: string; files?: string[] };
 }
 
 function stripJsonComments(text: string): string {
@@ -817,9 +1061,38 @@ function makeResolver(root: string, files: Set<string>): Resolver {
     }
   }
   aliases.sort((a, b) => b.dir.length - a.dir.length);
+  // Java source roots: the folder a package path hangs from. Maven and Gradle put it at src/<set>/java;
+  // anything else is taken from the first segment named java, or the folder above the first package segment.
+  const javaRoots = new Set<string>();
+  const javaDirs = new Set<string>();
+  for (const f of files) {
+    if (!f.endsWith('.java') || SKIP.test(`/${f}`)) continue;
+    javaDirs.add(path.posix.dirname(f));
+    const segs = f.split('/');
+    const at = segs.indexOf('java');
+    javaRoots.add(at >= 0 && at < segs.length - 1 ? segs.slice(0, at + 1).join('/') : '');
+  }
+  const roots = [...javaRoots].sort((a, b) => b.length - a.length);
 
   return (from, spec, lang) => {
     const dir = path.posix.dirname(from);
+    if (lang === 'java') {
+      const ordered = [...roots.filter((r) => !r || from.startsWith(`${r}/`)), ...roots.filter((r) => r && !from.startsWith(`${r}/`))];
+      const at = (root: string, rel: string): string => (root ? `${root}/${rel}` : rel);
+      const segs = spec.split('.');
+      // a.b.C, then a.b.C.Inner and a.b.C.member fold back onto C.java.
+      for (let n = segs.length; n > 0 && n >= segs.length - 2; n--) {
+        const rel = `${segs.slice(0, n).join('/')}.java`;
+        for (const r of ordered) if (files.has(at(r, rel))) return { file: at(r, rel) };
+      }
+      for (const r of ordered) {
+        const d = at(r, segs.join('/'));
+        if (javaDirs.has(d)) return { file: null, files: [...files].filter((f) => f.endsWith('.java') && path.posix.dirname(f) === d).sort() };
+      }
+      const pkgSegs = [...segs];
+      while (pkgSegs.length > 1 && /^[A-Z]/.test(pkgSegs[pkgSegs.length - 1])) pkgSegs.pop();
+      return { file: null, pkg: pkgSegs.join('.') };
+    }
     if (lang === 'python') {
       const dots = spec.match(/^\.+/)?.[0].length ?? 0;
       const rest = spec.slice(dots).replace(/\./g, '/');
@@ -879,7 +1152,7 @@ function loadRuntime(): Promise<{ Parser: any; langs: Map<string, any> }> {
     await TS.Parser.init();
     const dir = path.dirname(require.resolve('@vscode/tree-sitter-wasm'));
     const langs = new Map<string, any>();
-    for (const l of ['typescript', 'tsx', 'javascript', 'python']) langs.set(l, await TS.Language.load(path.join(dir, `tree-sitter-${l}.wasm`)));
+    for (const l of ['typescript', 'tsx', 'javascript', 'python', 'java']) langs.set(l, await TS.Language.load(path.join(dir, `tree-sitter-${l}.wasm`)));
     return { Parser: TS.Parser, langs };
   })();
   return runtime;
@@ -920,7 +1193,7 @@ export async function buildCodeIndex(root: string): Promise<IndexResult> {
     const prev = old?.files[f];
     let entry: Omit<CodeFile, 'path' | 'lang' | 'mtime' | 'size' | 'imports' | 'test'> & { imports: Raw['imports'] };
     if (prev && prev.mtime === st.mtimeMs && prev.size === st.size) {
-      entry = { ...prev, imports: prev.imports.map((i) => ({ spec: i.spec, names: i.names, line: i.line, as: i.as })) };
+      entry = { ...prev, imports: prev.imports.map((i) => ({ spec: i.spec, names: i.names, line: i.line, as: i.as, implicit: i.implicit })) };
       reused++;
     } else {
       const source = fs.readFileSync(path.join(root, f), 'utf8');
@@ -940,7 +1213,7 @@ export async function buildCodeIndex(root: string): Promise<IndexResult> {
         }
         try {
           const tree = parser.parse(source);
-          raw = lang === 'python' ? extractPy(tree.rootNode, source) : extractTs(tree.rootNode, source);
+          raw = lang === 'python' ? extractPy(tree.rootNode, source) : lang === 'java' ? extractJava(tree.rootNode, source) : extractTs(tree.rootNode, source);
           tree.delete();
         } catch {
           /* unparsable: keep the file with no symbols */
@@ -955,10 +1228,18 @@ export async function buildCodeIndex(root: string): Promise<IndexResult> {
       lang,
       mtime: st.mtimeMs,
       size: st.size,
-      test: TEST_FILE.test(f),
+      test: isTestFile(f) || (lang === 'java' && (entry.hints ?? []).some((h) => h.k === 'main' && h.v === JAVA_TEST_HINT)),
       // A reused entry still holds the submodule imports added last time (names: []); they are added again below.
-      imports: entry.imports.filter((i) => !(lang === 'python' && i.names.length === 0)).flatMap((i) => {
-        const own = { ...i, ...resolve(f, i.spec, lang === 'sql' ? 'typescript' : lang) };
+      imports: entry.imports.filter((i) => !((lang === 'python' || lang === 'java') && i.names.length === 0)).flatMap((i): CodeImport[] => {
+        const { files: pkgFiles, ...resolved } = resolve(f, i.spec, lang === 'sql' ? 'typescript' : lang);
+        const own = { ...i, ...resolved };
+        if (lang === 'java') {
+          // A same-package name that matches no file was a type parameter or a library class: not an import.
+          if (i.implicit && !own.file) return [];
+          // "import a.b.*" loads every class of the package.
+          if (pkgFiles) return pkgFiles.filter((x) => x !== f).map((file) => ({ spec: i.spec, names: [] as string[], line: i.line, file }));
+          return [own];
+        }
         if (lang !== 'python') return [own];
         // "from pkg import mod" loads pkg/mod.py as well as pkg/__init__.py, or mod.py would look like dead code.
         const subs = i.names.filter((n) => n !== '*').map((n) => resolve(f, i.spec.endsWith('.') ? `${i.spec}${n}` : `${i.spec}.${n}`, 'python').file);

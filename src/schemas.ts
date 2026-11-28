@@ -5,7 +5,7 @@ import nodePath from 'node:path';
 import type { CodeIndex, SchemaField } from './code.js';
 
 export interface CodeShape {
-  kind: 'drizzle' | 'zod' | 'pydantic' | 'sql' | 'ts';
+  kind: 'drizzle' | 'zod' | 'pydantic' | 'sql' | 'ts' | 'java';
   fields: SchemaField[];
   table?: string;
 }
